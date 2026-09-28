@@ -1,0 +1,79 @@
+# negotiation_core が使う暫定値（design.md §2.1・§2.6）。
+# 「暫定」は design.md の未決事項（U-01〜U-14）が決まるまでの仮の値。
+# ここに置くのは 1a（negotiation_core）が使う値だけ。上限・期限・レート制限などは後の段で足す。
+
+# --- §2.1 語彙（軸）とグリッド ---
+# kind: "numeric"（数値軸）または "categorical"（区分軸）
+# grid: そのままグリッド（=取り得る値の全集合）として並べる。数値軸は昇順、区分軸は列挙順。
+# direction: 各軸の値が大きい／後ろにあるほど良いか悪いかを、候補者・求人側それぞれについて示す。
+#   "higher_is_better" / "lower_is_better"（数値軸） or "unordered"（区分軸）
+
+[axes.salary]
+label = "比較基準年収（万円）"
+kind = "numeric"
+discrete = false
+grid = [300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400, 1450, 1500]
+candidate_direction = "higher_is_better"
+employer_direction = "lower_is_better"
+
+[axes.remote_days]
+label = "リモート日数（週）"
+kind = "numeric"
+discrete = true
+grid = [0, 1, 2, 3, 4, 5]
+candidate_direction = "higher_is_better"
+employer_direction = "lower_is_better"
+
+[axes.night_duty]
+label = "当直回数（月）"
+kind = "numeric"
+discrete = true
+grid = [0, 2, 4, 6, 8]
+candidate_direction = "lower_is_better"
+employer_direction = "higher_is_better"
+
+[axes.review_months]
+label = "昇給見直しまでの月数"
+kind = "numeric"
+discrete = true
+grid = [6, 12]
+candidate_direction = "lower_is_better"
+employer_direction = "higher_is_better"
+
+[axes.training]
+label = "研修"
+kind = "categorical"
+discrete = true
+grid = ["none", "available"]
+candidate_direction = "unordered"
+employer_direction = "unordered"
+
+[axes.side_job]
+label = "副業"
+kind = "categorical"
+discrete = true
+grid = ["not_allowed", "allowed"]
+candidate_direction = "unordered"
+employer_direction = "unordered"
+
+[axes.start]
+label = "入職時期"
+kind = "categorical"
+discrete = true
+grid = ["within_1_month", "within_3_months", "within_6_months"]
+candidate_direction = "unordered"
+employer_direction = "unordered"
+
+# --- §2.6 候補者の属性帯（暫定） ---
+
+[attribute_bands.experience_band]
+label = "経験年数の帯"
+grid = ["under_3y", "3_to_5y", "5_to_10y", "10y_plus"]
+
+[attribute_bands.region_block]
+label = "地域ブロック"
+grid = ["hokkaido_tohoku", "kanto", "chubu", "kinki", "chugoku_shikoku", "kyushu_okinawa"]
+
+[attribute_bands.job_category]
+label = "職種"
+grid = ["medical_welfare", "it_web", "sales", "administration", "other"]
