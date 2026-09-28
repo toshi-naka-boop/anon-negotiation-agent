@@ -77,3 +77,36 @@ grid = ["hokkaido_tohoku", "kanto", "chubu", "kinki", "chugoku_shikoku", "kyushu
 [attribute_bands.job_category]
 label = "職種"
 grid = ["medical_welfare", "it_web", "sales", "administration", "other"]
+
+# --- vault が使う暫定値(design.md §3)。1b-1 の実装範囲でだけ使う ---
+# 上限・期限・寿命・TTL・T_high・1 日の予算はすべて未決事項(U-03・U-04・U-06)の暫定値。
+
+[vault.limits]
+# 評価回数の上限(自分の手で起きた評価だけ。側ごと。§3.5)
+evaluation_budget_per_side = 16
+# 手数の上限(check を除く。無効手を含む。側ごと。§3.5)
+moves_budget_per_side = 6
+# 途中確認の上限(側ごと。合計 2。§3.5・U-04)
+principal_checks_per_side = 1
+# 連続無効手の上限(側ごと。§3.5)
+consecutive_invalid_limit = 3
+# 本物の依頼者ごとの 24 時間の評価予算(交渉ごとに予約で引く。§3.5)
+daily_evaluation_budget_per_principal = 160
+
+[vault.deadlines]
+# 交渉の絶対の寿命(作成時刻から。秒。§3.4)
+negotiation_lifetime_seconds = 259200
+# 手番の期限(秒。§3.4)
+move_deadline_seconds = 300
+# 途中確認の期限(秒。§3.4)
+principal_check_deadline_seconds = 86400
+# 最長の停止時間(秒。これを超えたら見回りの expire で timeout にする。§3.4)
+max_pause_seconds = 86400
+
+[vault.judgment]
+# 広さの閾値。これ以上なら「高」、未満なら「中」(§3.6・U-06)
+t_high = 10
+
+[vault.retention]
+# デモ・攻撃モードの交渉に付ける TTL(秒。§3.8)
+fictional_negotiation_ttl_seconds = 345600
