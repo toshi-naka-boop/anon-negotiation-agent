@@ -1,15 +1,20 @@
-"""DV-10: イベント列の側ごとの見え方(design.md §3.2)。TurnInput・画面・レフェリーの
-作り直しは後の段。
+"""DV-10: イベント列の側ごとの見え方(design.md §3.2)。
 
-§3.2 の表のとおりに操作ごとの見え方が分かれていること、propose で相手の評価が
+金庫の部分: §3.2 の表のとおりに操作ごとの見え方が分かれていること、propose で相手の評価が
 どちらの見え方にも入らないこと、相手に見えない操作の後でも相手の seq が飛ばずに
 続くこと、見え方と view に相手の残り回数が現れず version は view にだけ入ること、
 最終記録が双方に 1 件だけであること、principal-answer の行が答えた側の見え方にだけ入り
 相手の seq を飛ばさないことを確かめる。
+
+web の部分(末尾。1d-1): TurnInput に version と相手の残り回数が現れないこと、レフェリーを金庫の操作の
+直後で止めて作り直しても、TurnInput.history に記録の欠けも重複もないこと。画面の部分は 1d-2 以降。
 """
 
+import pytest
+from negotiation_core import Verdict
 from vault.api_models import MoveRequest
 from vault_helpers import demo_create_request, put_candidate_and_employer_templates, sample_package
+from web_helpers import CrashAfterMove, SimulatedCrash, create_demo_negotiation, drive, move_dict
 
 
 def _create(store):
@@ -179,6 +184,7 @@ def test_view_and_events_never_expose_the_counterparty_remaining_budget(store):
         "status",
         "to_move",
         "paused",
+        "counterparty",  # TurnInput.counterparty の元(1d-1 で追加。相手の属性帯・公開求人の区分情報)
         "pending_offer",
         "last_check",
         "awaiting_principal_package",
@@ -285,3 +291,96 @@ def test_principal_answer_is_visible_only_to_the_answering_side_and_keeps_the_co
     )
     assert final_propose.valid is True
     assert [e.seq for e in store.get_events(nid, "employer")] == [1, 2, 3]
+
+
+# --- web(レフェリー)の部分(1d-1) ---
+
+
+def _all_keys(value) -> set[str]:
+    """JSON 相当の値に現れる、すべての辞書のキー。"""
+    if isinstance(value, dict):
+        return set(value) | {key for child in value.values() for key in _all_keys(child)}
+    if isinstance(value, list):
+        return {key for child in value for key in _all_keys(child)}
+    return set()
+
+
+@pytest.mark.anyio
+async def test_turn_input_shows_neither_the_version_nor_the_counterpartys_remaining_budget(store, web_env):
+    # DV-10: TurnInput に、version と相手の残り回数が現れない。budget は自分側の残りだけで、
+    # 相手が評価・手数を使っても、自分の TurnInput の残りは減らない。
+    env = web_env
+    p1 = sample_package()
+    nid = create_demo_negotiation(store)
+    env.agents.script("candidate", move_dict("check", p1), move_dict("check", p1), move_dict("propose", p1))
+    env.agents.script("employer", move_dict("check", p1), move_dict("accept"))
+
+    await drive(env.referee(nid))
+
+    def budget(call):
+        b = call.turn_input.budget
+        return (b.remaining_evaluations, b.remaining_moves, b.remaining_principal_checks)
+
+    candidate_calls = env.agents.calls_for("candidate")
+    employer_calls = env.agents.calls_for("employer")
+    # 候補者: check ×2(評価 2 回。有効な確認手は手数に数えない)→ propose のガード(評価 1 回)
+    assert [budget(c) for c in candidate_calls] == [(16, 6, 1), (15, 6, 1), (14, 6, 1)]
+    # 求人側: 候補者が評価を 3 回使った後でも、求人側は自分の分だけ(16)。check の後は 15。
+    assert [budget(c) for c in employer_calls] == [(16, 6, 1), (15, 6, 1)]
+
+    # 自分の手の数(own_move_number)は、金庫の通し番号(version)とは別物: 求人側の 1 回目は、候補者の
+    # 記録が 3 件あって version は 3 だが、自分の手は 0 回。
+    assert [c.turn_input.own_move_number for c in candidate_calls] == [0, 1, 2]
+    assert [c.turn_input.own_move_number for c in employer_calls] == [0, 1]
+
+    for call in env.agents.calls:
+        dumped = call.turn_input.model_dump(mode="json", by_alias=True)
+        keys = _all_keys(dumped)
+        assert "version" not in keys and "nid" not in keys  # 金庫の通し番号も、ID も入っていない
+        assert set(dumped["budget"]) == {"remaining_evaluations", "remaining_moves", "remaining_principal_checks"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("crash_on_move_number", [1, 2])
+async def test_recreated_referee_leaves_no_gap_or_duplicate_in_history_after_a_crash_right_after_a_vault_operation(
+    store, web_env, vault_client, crash_on_move_number
+):
+    # DV-10: レフェリーを金庫の操作の直後で止めてから作り直しても、TurnInput.history に記録の欠けも重複もない。
+    # 1 回目は候補者の確認手、2 回目は候補者の提案が、金庫にコミットされた直後に落ちる。web は記録を写さず、
+    # 履歴を金庫のイベント列から読み直すので、どちらでも同じ履歴になる。
+    env = web_env
+    p1, p2 = sample_package(salary=700), sample_package(salary=650)
+    nid = create_demo_negotiation(store)
+    env.agents.script("candidate", move_dict("check", p1), move_dict("propose", p1), move_dict("propose", p2))
+    env.agents.script("employer", move_dict("reject"), move_dict("accept"))
+
+    await env.restart(vault=CrashAfterMove(env.vault, crash_on_move_number=crash_on_move_number))
+    with pytest.raises(SimulatedCrash):
+        await drive(env.referee(nid))
+    assert len(store.get_events(nid, "candidate")) == crash_on_move_number  # 落ちる前の操作は、金庫に残っている
+
+    await env.restart(vault=vault_client)  # web を作り直す
+    await drive(env.referee(nid))
+
+    def history(call):
+        return [(e.by, e.move, e.package.salary, e.result) for e in call.turn_input.history]
+
+    candidate_calls = env.agents.calls_for("candidate")
+    employer_calls = env.agents.calls_for("employer")
+    assert len(candidate_calls) == 3 and len(employer_calls) == 2  # 呼び出しの数は、落ちた位置に依らない
+    assert history(candidate_calls[0]) == []
+    assert history(candidate_calls[1]) == [("self", "check", 700, Verdict.ACCEPTABLE)]  # 確認手は 1 件だけ
+    assert history(employer_calls[0]) == [("counterparty", "propose", 700, Verdict.ACCEPTABLE)]  # 提案は 1 件だけ
+    assert history(candidate_calls[2]) == [
+        ("self", "check", 700, Verdict.ACCEPTABLE),
+        ("self", "propose", 700, Verdict.ACCEPTABLE),
+        ("counterparty", "reject", 700, Verdict.ACCEPTABLE),
+    ]
+    assert [e.kind for e in store.get_events(nid, "candidate")] == [
+        "check",
+        "propose",
+        "offer_rejected",
+        "propose",
+        "final_result",
+    ]
+    assert store.get_view(nid, "candidate").status == "judged"

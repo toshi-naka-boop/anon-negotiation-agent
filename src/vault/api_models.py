@@ -9,7 +9,15 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from negotiation_core import Budget, CandidateAttributeBands, EvaluatedPackage, Package, Policy, Side
+from negotiation_core import (
+    Budget,
+    CandidateAttributeBands,
+    EvaluatedPackage,
+    JobCategoryInfo,
+    Package,
+    Policy,
+    Side,
+)
 
 from vault.models import (
     EventKind,
@@ -133,11 +141,17 @@ class CreateNegotiationResponse(VaultModel):
 
 
 class NegotiationViewResponse(VaultModel):
-    """GET /v1/negotiations/{nid}/view?side=(§3.3)。相手側の評価・確認結果・残りは含めない。"""
+    """GET /v1/negotiations/{nid}/view?side=(§3.3)。相手側の評価・確認結果・残りは含めない。
+
+    counterparty は TurnInput.counterparty(§2.7)の元(1d-1 で追加。台帳 I-2: 候補者の属性帯は
+    金庫にしかないため、web が組み立てるには金庫が返す必要がある)。
+    求人側(side=employer)には候補者の属性帯、候補者側(side=candidate)には公開求人の区分情報を返す。
+    """
 
     status: NegotiationStatus
     to_move: Side
     paused: bool
+    counterparty: CandidateAttributeBands | JobCategoryInfo
     pending_offer: EvaluatedPackage | None
     last_check: EvaluatedPackage | None
     awaiting_principal_package: Package | None
@@ -250,11 +264,21 @@ class PrincipalNegotiationSummary(VaultModel):
 
 
 class OpenNegotiationSummary(VaultModel):
+    """見回り用の一覧の 1 件(§3.3)。
+
+    mode と candidate_principal_id は 1d-1 で追加した。見回り(§4.1)がタスクと段階開示の状態
+    (stages/{nid}。本物の候補者の依頼者 ID を持つ。§6.2)を作り直すときに、web が持っていない
+    交渉の性質(レフェリーが呼ぶエージェントの種類は mode で決まる)と、本物の候補者の依頼者 ID を
+    金庫から取るため。candidate_principal_id は、候補者が架空人物なら None。
+    """
+
     nid: str
     status: Literal["active", "awaiting_principal"]
     paused: bool
     deadline: dt.datetime | None
     expires_at: dt.datetime
+    mode: NegotiationMode
+    candidate_principal_id: str | None
 
 
 class OpenNegotiationsPage(VaultModel):

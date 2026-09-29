@@ -127,3 +127,21 @@ t_high = 10
 [vault.retention]
 # デモ・攻撃モードの交渉に付ける TTL(秒。§3.8)
 fictional_negotiation_ttl_seconds = 345600
+
+# --- web が使う暫定値(design.md §4.1)。1d-1 の実装範囲(レフェリー・見回り)でだけ使う ---
+# 60 秒・3 回・60 秒ごとは設計書(§4.1)の暫定値。再試行の待ち時間と、待つときの読み直しの間隔は
+# 設計書に値がなく、実装時に置いた暫定値(決まったらここを差し替える)。
+
+[web.referee]
+# エージェントの 1 回の呼び出しの上限(秒)。再試行の待ち時間を含む(§4.1: 「この 60 秒の中で」)
+agent_call_timeout_seconds = 60
+# 一時的なエラー(ConnectionError)と時間切れ(TimeoutError)の再試行の最大回数(初回は数えない)
+agent_max_retries = 3
+# 再試行の待ち時間(秒)。n 回目の再試行の前に n 番目の値だけ待つ(足りなければ最後の値)
+agent_retry_backoff_seconds = [1.0, 2.0, 4.0]
+# 一時停止中・途中確認の回答待ち・409 の後に、金庫の状態を読み直す間隔(秒)
+wait_poll_interval_seconds = 2.0
+
+[web.sweeper]
+# 交渉の見回りの間隔(秒。起動時にも 1 回行う)
+interval_seconds = 60

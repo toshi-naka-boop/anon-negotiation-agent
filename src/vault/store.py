@@ -72,6 +72,7 @@ from vault.models import (
     PendingQuestion,
     SideCounters,
     Snapshots,
+    default_job_category_info,
 )
 from vault.serialization import model_from_firestore, model_to_firestore
 from vault.stop_rule import determine_stop_reason
@@ -318,6 +319,7 @@ class VaultStore:
                 template_id=request.employer.template_id,
                 job_id=employer_template.job_id,
                 company_id=employer_template.company_id,
+                job_category_info=employer_template.job_category_info,
             )
 
             # --- ブロック先(AC-16): 断るなら、交渉もイベントも回数も作らずここで抜ける ---
@@ -954,10 +956,19 @@ class VaultStore:
             ),
         )
 
+        # TurnInput.counterparty の元(§2.7)。求人側には候補者の属性帯(台帳 I-2: 金庫にしかない)、
+        # 候補者側には公開求人の区分情報を返す。テンプレートを経由せずに手で書いた文書には求人の
+        # 区分情報がないので、テンプレートの既定と同じ値にする。
+        if side == "employer":
+            counterparty = doc.participants.candidate.attribute_bands
+        else:
+            counterparty = doc.participants.employer.job_category_info or default_job_category_info()
+
         return NegotiationViewResponse(
             status=doc.status,
             to_move=doc.to_move,
             paused=doc.paused,
+            counterparty=counterparty,
             pending_offer=pending_offer_view,
             last_check=last_check,
             awaiting_principal_package=awaiting_package,
@@ -1057,6 +1068,8 @@ class VaultStore:
                 paused=doc.paused,
                 deadline=doc.deadline,
                 expires_at=doc.expires_at,
+                mode=doc.mode,
+                candidate_principal_id=doc.participants.candidate.principal_id,
             )
             for doc in page
         ]
