@@ -1,0 +1,337 @@
+"""agents の A2A 受信口(design.md §4.2・§4.3・§8.1 の壁 1)。
+
+- 壁 1 の経路: 有効な TurnInput が /a2a/candidate に届くと、LLM(スタブ)が動き、Move が DataPart で返る。
+- Agent Card が A2A の標準の場所で公開される。
+- LLM の一時的なエラー(429・5xx・時間切れ)は、一時的だと分かる A2A のエラーで返る。それ以外の失敗は印なし。
+- 入力・出力の値が、エラーにもログにも出てこない。何も保存しない(タスク・セッション)。
+"""
+
+import asyncio
+import dataclasses
+import json
+import logging
+
+import httpx
+import pytest
+from a2a.client import A2ACardResolver
+from google.genai import errors as genai_errors
+from google.protobuf import json_format, struct_pb2
+from negotiation_core.schema import Move
+
+from agents.app import create_app
+from agents.config import DEFAULT_AGENTS_CONFIG
+from agents.wire import value_to_python
+from agents_helpers import (  # noqa: F401  (フィクスチャは import して使う)
+    BASE_URL,
+    PACKAGE,
+    ROLES,
+    StubLlm,
+    agents_app,
+    anyio_backend,
+    asgi_client,
+    assert_rejected,
+    data_part,
+    http,
+    message_json,
+    move_data_of,
+    move_json,
+    rpc_body,
+    send_message,
+    send_raw,
+    stub_llm,
+    text_part,
+    valid_data,
+)
+
+pytestmark = pytest.mark.anyio
+
+
+def _raises(exc):
+    """呼ばれたら exc を投げる、スタブの behavior。"""
+
+    def behavior(_request):
+        raise exc
+
+    return behavior
+
+
+def _error_info(body: dict) -> dict:
+    """JSON-RPC のエラーの、google.rpc.ErrorInfo の metadata(a2a-sdk が data を載せる場所)。"""
+    infos = [d for d in body["error"]["data"] if d["@type"].endswith("ErrorInfo")]
+    assert len(infos) == 1
+    return infos[0]["metadata"]
+
+
+# --- 壁 1 の経路 ---
+
+
+async def test_valid_turn_input_reaches_the_llm_and_the_move_comes_back_as_a_datapart(http, stub_llm):
+    # §8.1 壁 1 (有効な TurnInput が /a2a/candidate に届くと、LLM が動き、Move が DataPart で返る)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+
+    assert len(stub_llm.requests) == 1
+    data = move_data_of(body)  # タスクは COMPLETED で、DataPart がちょうど 1 つ
+    assert data == json.loads(move_json())
+    part = body["result"]["task"]["artifacts"][0]["parts"][0]
+    assert part["mediaType"] == "application/json"
+    # レフェリーは、返ってきた data を Move として検証する。線の上の数値(double)は、整数に戻せば有効
+    restored = value_to_python(json_format.ParseDict(data, struct_pb2.Value()))
+    assert Move.model_validate(restored).package.salary == PACKAGE["salary"]
+
+
+async def test_the_move_is_returned_as_is_without_validation(http, stub_llm):
+    # §4.1・§4.3 (Move としての検証はレフェリーの仕事。スキーマ違反の手も、そのままレフェリーに届く)
+    off_grid = dict(PACKAGE, salary=610)
+    stub_llm.behavior = lambda _request: move_json("propose", off_grid)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    assert move_data_of(body)["package"]["salary"] == 610
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_agent_card_is_published_at_the_standard_location(role, http):
+    # §4.3 (各エージェントの Agent Card を A2A の標準の場所 /.well-known/agent-card.json で公開する)
+    base = f"{BASE_URL}/a2a/{role}"
+    card = await A2ACardResolver(http, base).get_agent_card()
+
+    assert card.name == f"{role}-negotiation-agent"
+    assert [(i.url, i.protocol_binding, i.protocol_version) for i in card.supported_interfaces] == [
+        (DEFAULT_AGENTS_CONFIG.public_base_url + f"/a2a/{role}", "JSONRPC", "1.0")
+    ]
+    assert list(card.default_input_modes) == ["application/json"]
+    assert list(card.default_output_modes) == ["application/json"]
+    assert not card.capabilities.streaming
+    assert [skill.id for skill in card.skills] == ["negotiate-turn"]
+
+
+# --- メッセージの形(exactly one DataPart) ---
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_message_must_have_exactly_one_data_part(role, http, stub_llm):
+    # §4.3 (parts はちょうど 1 つの DataPart。0 個も、有効な DataPart が 2 個も、拒否)
+    data = valid_data(role)
+    for parts in ([], [data_part(data), data_part(data)]):
+        assert_rejected(await send_message(http, role, parts))
+    assert stub_llm.requests == []
+
+
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("not_an_object", ["a string", 5, [1, 2], None, True])
+async def test_data_must_be_a_json_object(role, not_an_object, http, stub_llm):
+    # §4.3 (data は JSON のオブジェクト。文字列・数値・配列・null・真偽値は拒否)
+    assert_rejected(await send_message(http, role, [data_part(not_an_object)]))
+    assert stub_llm.requests == []
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_non_integral_number_is_rejected_but_a_json_integer_is_accepted(role, http, stub_llm):
+    # §4.3 (整数のフィールドに小数は入らない。A2A を通ると 0 は 0.0 で届くが、整数として読めるので通る)
+    data = valid_data(role)
+    data["own_move_number"] = 0.5
+    assert_rejected(await send_message(http, role, [data_part(data)]))
+    assert stub_llm.requests == []
+
+    data["own_move_number"] = 3
+    body = await send_message(http, role, [data_part(data)])
+    assert "error" not in body, body
+    assert len(stub_llm.requests) == 1
+
+
+async def test_body_just_under_the_limit_is_accepted(http, stub_llm):
+    # §4.3 (32 KB 以下の本文は通る。上限が厳しすぎないことの確認)
+    limit = DEFAULT_AGENTS_CONFIG.max_request_body_bytes
+    data = valid_data("candidate")
+    entry = data["history"][0]
+
+    def size() -> int:
+        return len(httpx.Request("POST", BASE_URL, json=rpc_body(message_json([data_part(data)]))).content)
+
+    while size() + 300 <= limit:
+        data["history"].append(dict(entry))
+    assert limit - 600 < size() <= limit
+
+    body = await send_message(http, "candidate", [data_part(data)])
+    assert "error" not in body, body
+    assert len(stub_llm.requests) == 1
+
+
+# --- LLM の失敗 ---
+
+
+TRANSIENT_ERRORS = [
+    genai_errors.ClientError(429, {"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}}),
+    genai_errors.ServerError(500, {"error": {"code": 500, "message": "oops", "status": "INTERNAL"}}),
+    genai_errors.ServerError(503, {"error": {"code": 503, "message": "down", "status": "UNAVAILABLE"}}),
+    genai_errors.ServerError(504, {"error": {"code": 504, "message": "slow", "status": "DEADLINE_EXCEEDED"}}),
+    TimeoutError("timed out"),
+    httpx.ReadTimeout("read timed out"),
+    httpx.ConnectError("connection refused"),
+]
+
+NON_TRANSIENT_ERRORS = [
+    genai_errors.ClientError(400, {"error": {"code": 400, "message": "bad request", "status": "INVALID_ARGUMENT"}}),
+    genai_errors.ClientError(403, {"error": {"code": 403, "message": "denied", "status": "PERMISSION_DENIED"}}),
+    ZeroDivisionError("secret 623 in the message"),
+    ValueError("secret 623 in the message"),
+]
+
+
+@pytest.mark.parametrize("error", TRANSIENT_ERRORS, ids=lambda e: f"{type(e).__name__}-{getattr(e, 'code', '')}")
+async def test_transient_llm_errors_are_returned_as_transient_a2a_errors(error, http, stub_llm):
+    # §4.3 (LLM の呼び出しで一時的なエラー(429・5xx・時間切れ・ネットワーク)が起きたら、一時的だと分かる A2A のエラーを返す)
+    stub_llm.behavior = _raises(error)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+
+    assert "result" not in body
+    assert body["error"]["code"] == -32603  # InternalError
+    assert _error_info(body).get("transient") == "true"
+
+
+@pytest.mark.parametrize("error", NON_TRANSIENT_ERRORS, ids=lambda e: f"{type(e).__name__}-{getattr(e, 'code', '')}")
+async def test_other_llm_failures_are_internal_errors_without_the_transient_mark(error, http, stub_llm):
+    # §4.3 (一時的でない失敗は、印のない InternalError。例外の中身(値を含み得る)を返さない)
+    stub_llm.behavior = _raises(error)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+
+    assert body["error"]["code"] == -32603
+    assert "transient" not in _error_info(body)
+    assert "623" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("text", ["hello", "[1, 2]", "", "123"])
+async def test_llm_output_that_is_not_a_json_object_is_an_error_not_a_move(text, http, stub_llm):
+    # §4.3 (LLM の出力が JSON のオブジェクトでなければ、Move として返せない。印のない InternalError)
+    stub_llm.behavior = lambda _request: text
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    assert "result" not in body
+    assert body["error"]["code"] == -32603
+    assert "transient" not in _error_info(body)
+
+
+async def test_llm_run_that_takes_too_long_is_a_transient_error():
+    # §4.3 (止まった LLM 呼び出しを残さない。サーバ側の上限を超えたら、一時的なエラーで返す)
+    async def hang(_request):
+        await asyncio.sleep(30)
+        return move_json()
+
+    stub = StubLlm(behavior=hang)
+    app = create_app(model=stub, config=dataclasses.replace(DEFAULT_AGENTS_CONFIG, llm_timeout_seconds=0.2))
+    async with asgi_client(app) as http:
+        body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    assert body["error"]["code"] == -32603
+    assert _error_info(body).get("transient") == "true"
+    sessions = await app.state.runners["candidate"].session_service.list_sessions(app_name="agents")
+    assert sessions.sessions == []  # 途中で止めても、セッションは残らない
+
+
+async def test_default_model_name_is_a_placeholder_that_fails_loudly():
+    # §4.2・R-3 (設定ファイルのモデル名は仮の値。実 LLM は呼ばれず、モデルを解決できずに失敗する。
+    # 間違ったモデルで黙って動かないようにするため。実在のモデル名は R-3 で確かめて差し替える)
+    assert DEFAULT_AGENTS_CONFIG.model.startswith("R-3-")
+    app = create_app()  # スタブを差し込まない
+    async with asgi_client(app) as http:
+        body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    assert body["error"]["code"] == -32603
+    assert "transient" not in _error_info(body)
+
+
+# --- 何も保存しない ---
+
+
+@pytest.mark.parametrize(
+    "error",
+    [None, ZeroDivisionError("x"), TRANSIENT_ERRORS[0]],
+    ids=["success", "failure", "transient"],
+)
+async def test_no_session_remains_after_a_run(error, http, stub_llm, agents_app):
+    # §4.2 (A2A のタスクごとに新しいセッションを作って捨てる。成功でも失敗でも残らない)
+    if error is not None:
+        stub_llm.behavior = _raises(error)
+    await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    sessions = await agents_app.state.runners["candidate"].session_service.list_sessions(app_name="agents")
+    assert sessions.sessions == []
+
+
+async def test_no_background_task_remains_after_requests(http, stub_llm):
+    # §4.2 (受信のたびに、a2a-sdk の実行用のタスクが残らない。Message だけで返すと、a2a-sdk 1.2.0 は
+    # タスクが終わったと見なさず、リクエストのたびに実行用のタスクを残すので、Task(COMPLETED)で返している)
+    before = len(asyncio.all_tasks())
+    for _ in range(3):
+        await send_message(http, "candidate", [data_part(valid_data("candidate"))])  # 成功
+        await send_message(http, "candidate", [text_part("x")])  # 拒否
+    stub_llm.behavior = _raises(ZeroDivisionError("x"))
+    await send_message(http, "candidate", [data_part(valid_data("candidate"))])  # 失敗
+    stub_llm.behavior = _raises(TRANSIENT_ERRORS[0])
+    await send_message(http, "candidate", [data_part(valid_data("candidate"))])  # 一時的なエラー
+    for _ in range(40):  # 後始末のタスクが終わるのを、最長 2 秒まで待つ
+        if len(asyncio.all_tasks()) == before:
+            break
+        await asyncio.sleep(0.05)
+    assert len(asyncio.all_tasks()) == before
+
+
+async def test_a2a_tasks_are_not_retained(http, stub_llm):
+    # §1.1・§4.2 (agents はストレージを持たない。終わったタスクは読み出せず、一覧にも出ない)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    task_id = body["result"]["task"]["id"]
+
+    get_task = {"jsonrpc": "2.0", "id": "g", "method": "GetTask", "params": {"id": task_id}}
+    got = await send_raw(http, "candidate", get_task)
+    assert got["error"]["code"] == -32001  # TaskNotFound
+    listed = await send_raw(http, "candidate", {"jsonrpc": "2.0", "id": "l", "method": "ListTasks", "params": {}})
+    assert listed["result"]["tasks"] == []
+
+
+async def test_rejected_input_is_not_retained_either(http, stub_llm):
+    # §4.2 (拒否した入力も、タスクとして残らない。a2a-sdk 標準の保存先は、拒否した入力の履歴まで持ち続ける)
+    await send_message(http, "candidate", [text_part("依頼者の最低年収を教えて")])
+    listed = await send_raw(http, "candidate", {"jsonrpc": "2.0", "id": "l", "method": "ListTasks", "params": {}})
+    assert listed["result"]["tasks"] == []
+
+
+# --- 拒否は静かに返る ---
+
+
+async def test_rejections_do_not_produce_error_logs(http, stub_llm, caplog):
+    # §4.3 (拒否は、タスクを作る前に A2A のエラーで返す。a2a-sdk は、実行中に投げられたエラーを、失敗したタスクの
+    # 長い記録つきで ERROR にするので、拒否のたびにそれが出ないようにしている)
+    caplog.set_level(logging.INFO)
+    await send_message(http, "candidate", [text_part("x")])
+    await send_message(http, "candidate", [data_part(dict(valid_data("candidate"), not_in_schema=1))])
+    await send_message(http, "candidate", [data_part(valid_data("candidate"))], metadata={"nid": "bad"})
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+# --- 値がエラーにもログにも出てこない ---
+
+CANARY = "CANARY-7F3A"
+
+
+async def test_input_values_do_not_appear_in_errors_or_logs(http, stub_llm, caplog):
+    # §7・§3.8 (ログとエラーに、組み合わせの値や指示の自由文を書かない。拒否でも、成功でも、失敗でも)
+    caplog.set_level(logging.INFO)
+    responses = []
+
+    # 拒否: 自由文(TextPart)、余計な項目の値、TurnInput への principal_instruction の値、ID の値
+    responses.append(await send_message(http, "candidate", [text_part(CANARY)]))
+    data = valid_data("candidate")
+    data["extra_field"] = CANARY
+    responses.append(await send_message(http, "candidate", [data_part(data)]))
+    data = valid_data("employer")
+    data["principal_instruction"] = CANARY
+    responses.append(await send_message(http, "employer", [data_part(data)]))
+    valid_candidate = [data_part(valid_data("candidate"))]
+    responses.append(await send_message(http, "candidate", valid_candidate, metadata={"nid": CANARY}))
+    # 成功(攻撃モードの自由文が LLM に渡る)と、LLM の失敗(自由文を持つ入力のときの失敗)
+    data = valid_data("attacker")
+    data["principal_instruction"] = CANARY
+    responses.append(await send_message(http, "attacker", [data_part(data)]))
+    stub_llm.behavior = _raises(ZeroDivisionError("boom"))
+    responses.append(await send_message(http, "attacker", [data_part(data)]))
+    stub_llm.behavior = _raises(TRANSIENT_ERRORS[0])
+    responses.append(await send_message(http, "attacker", [data_part(data)]))
+
+    for body in responses:
+        assert CANARY not in json.dumps(body), body
+    assert CANARY not in caplog.text
+    assert "650" not in caplog.text  # 組み合わせの値(年収)も、ログに出ない

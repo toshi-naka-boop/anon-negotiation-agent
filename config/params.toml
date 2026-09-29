@@ -78,6 +78,23 @@ grid = ["hokkaido_tohoku", "kanto", "chubu", "kinki", "chugoku_shikoku", "kyushu
 label = "職種"
 grid = ["medical_welfare", "it_web", "sales", "administration", "other"]
 
+# --- agents が使う暫定値(design.md §4.2・§4.3) ---
+
+[agents]
+# 交渉エージェント(候補者側・求人側・攻撃モードの求人側)が使う LLM(Gemini の Flash 系。§4.2)。
+# 【仮の値。実在するモデル名ではない】実在するモデル名・リージョンは調査事項 R-3(§15)で確かめて差し替える。
+# この値のまま実 LLM を呼ぶと、ADK がモデルを解決できずに失敗する(本番で気づけるようにするため、わざと動かない値にしてある)。
+model = "R-3-TBD-model-name"
+# 交渉の探索を揺らさないため 0(§4.2)
+temperature = 0
+# 受信本文の上限(バイト。暫定 32 KB。§4.3・U-03)
+max_request_body_bytes = 32768
+# 1 回の LLM 実行の上限(秒)。レフェリーの 1 呼び出しの上限(暫定 60 秒。§4.1)より短くする。
+# 超えたら一時的なエラーとして返し、止まったままの実行を残さない。
+llm_timeout_seconds = 45
+# Agent Card に載せる、agents サービスの公開 URL。デプロイ時に差し替える(ローカル開発用の仮の値)。
+public_base_url = "http://localhost:8080"
+
 # --- vault が使う暫定値(design.md §3)。1b-1 の実装範囲でだけ使う ---
 # 上限・期限・寿命・TTL・T_high・1 日の予算はすべて未決事項(U-03・U-04・U-06)の暫定値。
 
