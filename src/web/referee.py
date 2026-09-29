@@ -10,6 +10,9 @@
 時刻と待ち時間は注入できる(clock・sleep)ので、テストは sleep せずに 1 手ずつ進められる
 (step())。実際のタスクの起動・作り直しは RefereeManager と見回り(web.sweeper)が行う。
 
+本物の候補者の交渉では、金庫への操作を 1 回ごとに、その依頼者のロックの下で行う(台帳 I-4。
+RefereeDeps.locks を渡したとき。エージェントを呼んでいる間はロックを持たない)。
+
 ログには、交渉 ID・側・手の種類・理由(列挙値)・例外の型名だけを書く。組み合わせの値は書かない
 (例外の型名だけを書くのは、検証エラーのメッセージに入力値が含まれるため)。
 """
@@ -28,6 +31,7 @@ from vault.clock import Clock, SystemClock
 from vault.models import NegotiationMode, PrincipalAnswerKind, RegisteredInvalidReason
 
 from web.config import DEFAULT_WEB_CONFIG, RefereeConfig
+from web.locks import PrincipalLocks, PrincipalScopedVault
 from web.turn_input import build_turn_input, to_attacker_turn_input
 from web.vault_client import (
     VaultClient,
@@ -111,6 +115,9 @@ class RefereeDeps:
     # 攻撃モードの求人エージェントへ毎手番渡す指示文(§8.2)を、交渉 ID から引く口。None なら空文字。
     # 指示の受け付け(攻撃画面・入口ごとのレート制限)は ③ の範囲で、ここは差し込み口だけ。
     attacker_instruction: Callable[[str], str] | None = None
+    # 依頼者ごとのロック(台帳 I-4)。渡すと、本物の候補者の交渉の金庫への操作を 1 回ごとにロックの下で行う。
+    # 本人の削除・利用記録の更新・段の状態の作成と、同じ依頼者の操作を 1 つずつ順に処理するため。
+    locks: PrincipalLocks | None = None
 
 
 class StepOutcome(enum.Enum):
@@ -129,6 +136,10 @@ class Referee:
     def __init__(self, context: NegotiationContext, deps: RefereeDeps) -> None:
         self._context = context
         self._deps = deps
+        # 金庫への操作の口。本物の候補者の交渉なら、依頼者のロックの下で 1 回ずつ行う口にする(台帳 I-4)。
+        self._vault: VaultClient | PrincipalScopedVault = deps.vault
+        if deps.locks is not None and context.candidate_principal_id is not None:
+            self._vault = PrincipalScopedVault(deps.vault, deps.locks, context.candidate_principal_id)
 
     # ------------------------------------------------------------------
     # 実行ループ
@@ -169,10 +180,10 @@ class Referee:
     async def _read_turn_view(self) -> tuple[NegotiationViewResponse, Side]:
         """手番の側の view を読む。手番は view(どちらの側でも同じ)にあるので、まず候補者側を読む。"""
         nid = self._context.nid
-        first = await self._deps.vault.get_view(nid, "candidate")
+        first = await self._vault.get_view(nid, "candidate")
         if first.status == "judged" or first.to_move == "candidate":
             return first, "candidate"
-        return await self._deps.vault.get_view(nid, "employer"), "employer"
+        return await self._vault.get_view(nid, "employer"), "employer"
 
     # ------------------------------------------------------------------
     # 途中確認(awaiting_principal)
@@ -185,7 +196,7 @@ class Referee:
         if package is None or answerer is None or not self._context.is_fictional(side):
             return StepOutcome.WAITING
         answer = await answerer(nid=self._context.nid, side=side, package=package)
-        await self._deps.vault.post_principal_answer(
+        await self._vault.post_principal_answer(
             self._context.nid,
             PrincipalAnswerRequest(expected_version=view.version, side=side, package=package, answer=answer),
         )
@@ -197,7 +208,7 @@ class Referee:
 
     async def _take_turn(self, side: Side, view: NegotiationViewResponse) -> StepOutcome:
         nid = self._context.nid
-        events = await self._deps.vault.get_events(nid, side)
+        events = await self._vault.get_events(nid, side)
         turn_input: TurnInput | AttackerTurnInput = build_turn_input(side=side, view=view, events=events)
         role = self._context.agent_role(side)
         if role == "attacker":
@@ -205,7 +216,7 @@ class Referee:
             turn_input = to_attacker_turn_input(turn_input, source(nid) if source is not None else "")
 
         request = await self._ask_agent(role, turn_input, side=side, version=view.version)
-        response = await self._deps.vault.post_move(nid, request)
+        response = await self._vault.post_move(nid, request)
         return StepOutcome.FINISHED if response.status == "judged" else StepOutcome.MOVED
 
     async def _ask_agent(

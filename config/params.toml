@@ -145,3 +145,38 @@ wait_poll_interval_seconds = 2.0
 [web.sweeper]
 # 交渉の見回りの間隔(秒。起動時にも 1 回行う)
 interval_seconds = 60
+
+# --- web が使う暫定値(design.md §6.3・§4.1・§3.8、台帳 I-6)。1d-2 の実装範囲(依頼者のセッション・利用記録・削除)で使う ---
+# 29 日・1 時間・30 日・10 分ごと・96 時間は、設計書の暫定値(未決事項 U-03 ほか)。決まったらここを差し替える。
+
+[web.session]
+# クッキーの寿命(Max-Age。署名の中の期限にも同じ値を使う。秒。§6.3)。29 日。
+# データの自動削除(retention_seconds)より 1 日早く切れるようにする(読み込み時に確かめる)。
+cookie_max_age_seconds = 2505600
+
+[web.principals]
+# 利用記録 principals_meta の last_active_at を書き直す間隔(秒。§6.3)。1 時間。
+touch_interval_seconds = 3600
+# 最後に使ってからデータを自動で消すまで(秒。delete_after = 最終利用 + この値。§6.3・P-6)。30 日。
+retention_seconds = 2592000
+
+[web.principal_sweeper]
+# 依頼者の見回りの間隔(秒。起動時にも 1 回行う。§4.1)。10 分。
+interval_seconds = 600
+
+[web.retention]
+# デモ・攻撃の stages/{nid} に付ける TTL(秒。台帳 I-6)。金庫の fictional_negotiation_ttl_seconds と同じ 96 時間。
+# Firestore の TTL ポリシー自体の設定はデプロイの段で行う。本物の利用者の段の状態には付けない。
+fictional_stage_ttl_seconds = 345600
+
+[web.vault_client]
+# web から金庫を呼ぶ HTTP の時間切れ(秒)。本番の AsyncClient を作るときだけ使う(設計書に値がなく、実装時に置いた暫定値)。
+timeout_seconds = 30
+
+[web.limits]
+# 画面 API の入力の大きさの上限(設計書に値がなく、実装時に置いた暫定値。矛盾検査の計算量と保存量を抑えるため)。
+# 面談の送信 1 回に含められる、受けるアンカー・受けないアンカーのそれぞれの数
+max_anchors_per_kind = 100
+# ブロック先の企業 ID の数と、1 件の長さ
+max_blocklist_entries = 200
+max_company_id_length = 100

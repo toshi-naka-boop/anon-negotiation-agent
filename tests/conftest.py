@@ -185,3 +185,21 @@ async def web_env(store: VaultStore, clock: FixedClock, vault_client: VaultClien
     env = make_web_env(store, clock, vault_client, default_db)
     yield env
     await env.manager.stop_all()
+
+
+@pytest.fixture
+def session_key() -> str:
+    """セッションクッキーの署名の鍵(テスト用。コードにも既定値にも持たず、テストがここで与える。design.md §6.3)。"""
+    return "test-only-session-signing-key-0123456789abcdef"
+
+
+@pytest.fixture
+async def web_app(
+    store: VaultStore, clock: FixedClock, vault_client: VaultClient, default_db: firestore.Client, session_key: str
+):
+    """web の app 一式(画面 API・セッション・削除。金庫は本物の app を ASGI のままつなぐ)。終わったらタスクを止める。"""
+    from web_app_helpers import build_web_env  # conftest の import 時に tests/ の部品を読み込まないよう、ここで読む
+
+    env = build_web_env(store=store, clock=clock, vault=vault_client, default_db=default_db, session_key=session_key)
+    yield env
+    await env.aclose()

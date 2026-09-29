@@ -9,7 +9,11 @@
 一覧の 1 件の処理が失敗しても、ほかの交渉の見回りは続ける(次の見回りでやり直す)。1 件の中でも、
 3 つの処理は互いに独立に失敗を扱う(段階開示の状態を作れなくても、期限切れとタスクの作り直しは行う)。
 
-依頼者の見回り(30 日使われていない依頼者の削除。§4.1・§6.3)は、別の見回りで、1d-2 の範囲。
+依頼者の見回り(30 日使われていない依頼者の削除。§4.1・§6.3)は、別の見回り(web.principal_sweeper)。
+
+本物の候補者の交渉の stages/{nid} の作成は、その依頼者のロックの下で行う(locks を渡したとき。台帳 I-4)。
+一覧を読んだ後に本人の削除が済むと、古い一覧から段の状態を作り直して、削除した依頼者の文書が
+残ってしまう。そのため、ロックを取った後に、金庫にその交渉が(削除中でなく)残っていることを確かめる。
 """
 
 import asyncio
@@ -21,9 +25,10 @@ from vault.api_models import OpenNegotiationSummary
 from vault.clock import Clock, SystemClock
 
 from web.config import DEFAULT_WEB_CONFIG, SweeperConfig
+from web.locks import PrincipalLocks
 from web.referee import NegotiationContext, RefereeManager, Sleep
 from web.stages import StageStore
-from web.vault_client import VaultClient
+from web.vault_client import VaultClient, VaultConflictError, VaultNotFoundError
 
 _log = logging.getLogger(__name__)
 
@@ -52,6 +57,7 @@ class Sweeper:
         clock: Clock | None = None,
         sleep: Sleep = asyncio.sleep,
         config: SweeperConfig = DEFAULT_WEB_CONFIG.sweeper,
+        locks: PrincipalLocks | None = None,
     ) -> None:
         self._vault = vault
         self._stages = stages
@@ -59,6 +65,7 @@ class Sweeper:
         self._clock = clock if clock is not None else SystemClock()
         self._sleep = sleep
         self._config = config
+        self._locks = locks
 
     async def run(self) -> None:
         """起動時に 1 回、その後は interval_seconds ごとに見回る。止めるにはタスクを cancel する。"""
@@ -103,10 +110,29 @@ class Sweeper:
             return False
 
     async def _ensure_stage(self, item: OpenNegotiationSummary, report: SweepReport) -> bool:
-        created = await self._stages.ensure(item.nid, item.candidate_principal_id)
+        principal_id = item.candidate_principal_id
+        if principal_id is None or self._locks is None:
+            created = await self._stages.ensure(item.nid, principal_id)
+        else:
+            async with self._locks.lock(principal_id):
+                if not await self._negotiation_remains(item.nid):
+                    return False
+                created = await self._stages.ensure(item.nid, principal_id)
         if created:
             report.stages_created += 1
         return created
+
+    async def _negotiation_remains(self, nid: str) -> bool:
+        """金庫にその交渉が(依頼者が削除中でなく)残っているか。ロックを持ったまま確かめる(台帳 I-4)。
+
+        見つからない(404。削除の流れが消した)・依頼者が削除中(409)なら False: 一覧を読んだ後に
+        削除が進んだので、段の状態は作らない。金庫が応えないときは、例外のまま伝える(次の見回りでやり直す)。
+        """
+        try:
+            await self._vault.get_view(nid, "candidate")
+        except (VaultNotFoundError, VaultConflictError):
+            return False
+        return True
 
     async def _expire_if_due(self, item: OpenNegotiationSummary, report: SweepReport) -> bool:
         """期限を過ぎていれば expire を呼ぶ。終了処理(timeout)をしたら True。"""

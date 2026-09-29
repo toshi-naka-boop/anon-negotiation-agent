@@ -1,7 +1,8 @@
 """金庫の内部 HTTP・JSON API を呼ぶ非同期クライアント(design.md §3.3・§4.1)。
 
-レフェリー・見回りが使う口だけを持つ: view・events・moves・principal-answer・control・expire・
-見回りの一覧(open=true)。リクエスト・レスポンスの型は vault.api_models をそのまま使う
+レフェリー・見回りが使う口(view・events・moves・principal-answer・control・expire・見回りの一覧
+(open=true))と、本人の操作・削除の流れが使う口(policy の PUT・GET、blocklist の PUT、本人の削除、
+本人の交渉一覧、交渉の作成)を持つ。リクエスト・レスポンスの型は vault.api_models をそのまま使う
 (同じ形を二重に書かない)。
 
 サービス間の認証(ID トークン)はデプロイの段で足す。ここでは httpx.AsyncClient を受け取るだけ
@@ -21,6 +22,8 @@ from negotiation_core import Side
 from vault.api_models import (
     ControlRequest,
     ControlResponse,
+    CreateNegotiationRequest,
+    CreateNegotiationResponse,
     EventViewItem,
     ExpireResponse,
     MoveRequest,
@@ -28,8 +31,12 @@ from vault.api_models import (
     NegotiationViewResponse,
     OpenNegotiationsPage,
     OpenNegotiationSummary,
+    PolicyView,
     PrincipalAnswerRequest,
     PrincipalAnswerResponse,
+    PrincipalNegotiationSummary,
+    PutBlocklistRequest,
+    PutPolicyRequest,
 )
 
 _M = TypeVar("_M", bound=BaseModel)
@@ -74,7 +81,10 @@ class VaultClient:
         params: dict | None = None,
         body: BaseModel | None = None,
     ):
-        """リクエストを送り、失敗(4xx・5xx・通信エラー)は例外にして、成功した JSON を返す。"""
+        """リクエストを送り、失敗(4xx・5xx・通信エラー)は例外にして、成功した JSON を返す。
+
+        本文のない成功(204。PUT・DELETE)は None を返す。
+        """
         json_body = body.model_dump(mode="json", exclude_none=True) if body is not None else None
         try:
             response = await self._http.request(method, path, params=params, json=json_body)
@@ -82,6 +92,8 @@ class VaultClient:
             raise VaultUnavailableError(f"vault is unreachable: {type(exc).__name__}") from exc
         if response.status_code >= 400:
             raise self._error_for(response)
+        if response.status_code == 204:
+            return None
         return response.json()
 
     @staticmethod
@@ -160,3 +172,32 @@ class VaultClient:
             if page.next_cursor is None:
                 return items
             cursor = page.next_cursor
+
+    # ------------------------------------------------------------------
+    # 本人の操作・削除の流れが使う口(1d-2)
+    # ------------------------------------------------------------------
+
+    async def put_policy(self, principal_id: str, request: PutPolicyRequest) -> None:
+        """PUT /v1/principals/{pid}/policy(丸め済みポリシー・外した軸・属性帯を置き換える。§3.3)。"""
+        await self._send("PUT", f"/v1/principals/{principal_id}/policy", body=request)
+
+    async def get_policy(self, principal_id: str) -> PolicyView:
+        """GET /v1/principals/{pid}/policy(本人向けの表示。web は保存しない。§3.3)。"""
+        return await self._request("GET", f"/v1/principals/{principal_id}/policy", PolicyView)
+
+    async def put_blocklist(self, principal_id: str, request: PutBlocklistRequest) -> None:
+        """PUT /v1/principals/{pid}/blocklist(ブロック先を置き換える。§3.3)。"""
+        await self._send("PUT", f"/v1/principals/{principal_id}/blocklist", body=request)
+
+    async def delete_principal(self, principal_id: str) -> None:
+        """DELETE /v1/principals/{pid}(本人のデータを消す。冪等。すでに消えていても成功。§3.8)。"""
+        await self._send("DELETE", f"/v1/principals/{principal_id}")
+
+    async def list_principal_negotiations(self, principal_id: str) -> list[PrincipalNegotiationSummary]:
+        """GET /v1/principals/{pid}/negotiations(本人が当事者の交渉の一覧。終わったものを含む。§3.3)。"""
+        data = await self._send("GET", f"/v1/principals/{principal_id}/negotiations")
+        return [PrincipalNegotiationSummary.model_validate(item, strict=False) for item in data]
+
+    async def create_negotiation(self, request: CreateNegotiationRequest) -> CreateNegotiationResponse:
+        """POST /v1/negotiations(request_id で冪等。断られたときは status=refused と reason。§3.5)。"""
+        return await self._request("POST", "/v1/negotiations", CreateNegotiationResponse, body=request)

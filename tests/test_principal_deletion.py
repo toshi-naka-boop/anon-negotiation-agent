@@ -1,5 +1,8 @@
-"""DV-06(金庫の側): design.md §3.8。web 側の削除(principals_meta・開示台帳・段の状態)は
-後の段なので、ここでは vault-db に残らないことだけを確かめる。
+"""DV-06: design.md §3.8(金庫の側)・§6.3(web の側)。
+
+前半は金庫の側(store を直接呼ぶ)、末尾の `test_web_...` は web の側(1d-2。画面 API とミドルウェア・削除の流れ・
+依頼者の見回りを、金庫の app を ASGI のままつないで確かめる)。金庫の側では、ここでは vault-db に残らない
+ことだけを確かめる。
 
 削除の後、vault-db にその依頼者のポリシー・帯・ブロックリスト・コピー・自分側の見え方が
 残らないこと、相手が本物なら相手側の見え方と「なし」の最終記録が残ること、相手が架空人物
@@ -46,6 +49,10 @@ from vault_helpers import (
     put_candidate_policy,
     sample_package,
 )
+from web import ledger as ledger_module
+from web import stages as stages_module
+from web_app_helpers import CANARY, DeletionProbe, documents_mentioning, interview_body, plant_canaries
+from web_helpers import create_demo_negotiation
 
 # エミュレータの粗いロック実装(store.py の _new_transaction を参照)を踏まえ、
 # 交渉の作成と削除の並行テストは並行数を抑える。
@@ -338,3 +345,185 @@ def test_concurrent_creation_and_deletion_never_leaves_an_orphaned_negotiation(s
         store._negotiations().where(filter=FieldFilter("participants.candidate.principal_id", "==", pid)).stream()
     )
     assert remaining == []
+
+
+# ----------------------------------------------------------------------
+# DV-06(web の側): design.md §6.3 の削除の流れ。本人のボタン(POST /v1/principals/{pid}/delete)と、
+# 依頼者の見回りが、同じ流れを使う。
+# ----------------------------------------------------------------------
+
+_CANARY_OTHER = "CANARY-OTHER-PRINCIPAL-0001"
+
+
+async def _principal_with_two_negotiations(env, browser, canary: str = CANARY):
+    """面談を送り、交渉を 2 件(1 件目は取消)作って、カナリアを置いた依頼者。(pid, [nid, nid]) を返す。"""
+    pid = await browser.register()
+    template_id = env.put_employer_template()
+    first = await browser.create_negotiation(pid, template_id, "request-0001")
+    await browser.post(f"/v1/negotiations/{first}/control", {"action": "cancel"})
+    second = await browser.create_negotiation(pid, env.put_employer_template(), "request-0002")
+    plant_canaries(env, pid, [first, second], canary)
+    return pid, [first, second]
+
+
+@pytest.mark.anyio
+async def test_web_deletion_leaves_no_ledger_stage_or_canary_in_either_database(web_app):
+    # DV-06: 削除の後、(default) に、その依頼者の台帳・段の状態・カナリアが残らない(vault-db にも残らない)。
+    # 進行中の交渉は取消になる。ほかの依頼者のデータは、そのまま残る。
+    browser, other_browser = web_app.browser(), web_app.browser()
+    pid, nids = await _principal_with_two_negotiations(web_app, browser)
+    other_pid, other_nids = await _principal_with_two_negotiations(web_app, other_browser, _CANARY_OTHER)
+    assert documents_mentioning(web_app.default_db, pid, CANARY)  # 置いたカナリアが、削除の前は見つかる(確認の前提)
+    assert web_app.store._negotiation_ref(nids[1]).get().exists  # 2 件目は進行中
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert (response.status_code, response.json()) == (200, {"status": "deleted"})
+    assert browser.cookie is None  # 本人のボタンからのときは、クッキーも消える
+    assert documents_mentioning(web_app.default_db, pid, CANARY) == {}
+    assert documents_mentioning(web_app.store._db, pid, CANARY) == {}
+    assert not web_app.store._principal_ref(pid).get().exists
+    assert not any(web_app.store._negotiation_ref(nid).get().exists for nid in nids)  # 相手は架空の求人なので、丸ごと消える
+    assert not any(list(web_app.store._events(nid).stream()) for nid in nids)
+    # ほかの依頼者は、何も消えていない(利用記録・段の状態・開示台帳・金庫のポリシーと交渉)。
+    assert web_app.default_db.collection("principals_meta").document(other_pid).get().exists
+    assert all(web_app.default_db.collection("stages").document(nid).get().exists for nid in other_nids)
+    assert len(list(web_app.default_db.collection("principals").document(other_pid).collection("ledger").stream())) == 2
+    assert documents_mentioning(web_app.default_db, _CANARY_OTHER)
+    assert web_app.store._principal_ref(other_pid).get().exists
+    assert web_app.store._negotiation_ref(other_nids[1]).get().exists
+
+
+@pytest.mark.anyio
+async def test_web_operations_of_a_deleting_principal_are_rejected_on_every_route(web_app):
+    # DV-06: 削除中(deletion_state=deleting)の操作は拒否される。すべての依頼者向けのルート(開始ページ・面談の送信・
+    # 閲覧・ブロックリスト・交渉の作成・交渉への操作・データの削除)が 409 で、何も変えない。
+    browser = web_app.browser()
+    pid, nids = await _principal_with_two_negotiations(web_app, browser)
+    template_id = web_app.put_employer_template()
+    await web_app.services.meta.mark_deleting(pid)  # 削除の流れの 1 段目(印)だけが済んだ状態
+    policy_before = web_app.store._principal_ref(pid).get().to_dict()["policy"]
+
+    requests = [
+        ("GET", "/start", None),
+        ("POST", f"/v1/principals/{pid}/interview", interview_body(accept_anchors=[])),
+        ("GET", f"/v1/principals/{pid}/policy", None),
+        ("POST", f"/v1/principals/{pid}/blocklist", {"blocklist": ["company-x"]}),
+        ("GET", f"/v1/principals/{pid}/negotiations", None),
+        ("POST", f"/v1/principals/{pid}/negotiations", {"request_id": "request-0009", "employer_template_id": template_id}),
+        ("GET", f"/v1/negotiations/{nids[1]}/events", None),
+        ("POST", f"/v1/negotiations/{nids[1]}/control", {"action": "pause"}),
+        ("POST", f"/v1/negotiations/{nids[1]}/principal-answer", {"package": sample_package().model_dump(), "answer": "accept"}),
+        ("POST", f"/v1/principals/{pid}/delete", None),
+    ]
+    for method, path, body in requests:
+        response = await (browser.get(path) if method == "GET" else browser.post(path, body))
+        assert (response.status_code, response.json()) == (409, {"detail": "principal_deleting"}), (method, path)
+        assert "set-cookie" not in response.headers  # クッキーの期限も延ばさない
+
+    state = web_app.default_db.collection("principals_meta").document(pid).get().to_dict()
+    assert state["deletion_state"] == "deleting"
+    assert web_app.store._principal_ref(pid).get().to_dict()["policy"] == policy_before  # 面談の再送信は、金庫に届いていない
+    assert web_app.store.get_view(nids[1], "employer").status == "active"  # 一時停止もされていない
+    # デモ用のエンドポイントは、依頼者のセッションを見ない(削除中の依頼者のクッキーがあっても、デモは動く)。
+    demo_nid = create_demo_negotiation(web_app.store)
+    await web_app.services.sweeper.sweep_once()  # 架空の候補者の交渉にも、段の状態を作る(§6.2)
+    assert (await browser.get(f"/v1/demo/negotiations/{demo_nid}/events", side="candidate")).status_code == 200
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failing_step", DeletionProbe.STEPS)
+async def test_web_deletion_failing_between_steps_is_finished_by_the_principal_sweeper(web_app, failing_step):
+    # DV-06: 各段(金庫・開示台帳・段の状態・利用記録)の入口で失敗させても、本人が押し直さずに、
+    # 依頼者の見回りが最後まで進める。失敗の間、利用記録(削除中の印)は残り、最後の段で初めて消える。
+    browser = web_app.browser()
+    pid, nids = await _principal_with_two_negotiations(web_app, browser)
+    probe = DeletionProbe(web_app)
+    probe.fail_once_at(failing_step)
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")  # 本人が押すのは、これ 1 回だけ
+
+    assert (response.status_code, response.json()) == (202, {"status": "deleting"})
+    assert browser.cookie is not None  # 最後の段まで終わっていないので、クッキーはまだ消さない
+    assert probe.meta_state(pid) == "deleting"  # 印は残っている(先に消えていない)
+    reached = list(DeletionProbe.STEPS[: DeletionProbe.STEPS.index(failing_step) + 1])
+    assert [step for step, _ in probe.steps] == reached
+    assert (await browser.get(f"/v1/principals/{pid}/negotiations")).status_code == 409  # 削除中の操作は拒否される
+
+    report = await web_app.services.principal_sweeper.sweep_once()
+
+    assert (report.deleting, report.completed, report.incomplete, report.errors) == (1, 1, 0, 0)
+    assert probe.meta_state(pid) is None
+    assert documents_mentioning(web_app.default_db, pid, CANARY) == {}
+    assert documents_mentioning(web_app.store._db, pid, CANARY) == {}
+    assert not any(web_app.store._negotiation_ref(nid).get().exists for nid in nids)
+    # 見回りは、流れを最初からやり直した。失敗した段を含め、どの段の直前にも、印は残っていた(先に消えていない)。
+    assert [step for step, _ in probe.steps[len(reached):]] == list(DeletionProbe.STEPS)
+    assert all(state == "deleting" for _, state in probe.steps)
+
+
+@pytest.mark.anyio
+async def test_web_usage_record_is_deleted_last_and_never_before_the_other_steps(web_app):
+    # DV-06: principals_meta は最後に消え、それより先に消えることはない(印だけが先に消えて、データが残ることを防ぐ)。
+    browser = web_app.browser()
+    pid, nids = await _principal_with_two_negotiations(web_app, browser)
+    probe = DeletionProbe(web_app)
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert response.status_code == 200
+    # 金庫 → 開示台帳 → 段の状態 → 利用記録の順。どの段の直前にも、利用記録は削除中の印つきで残っている。
+    assert probe.steps == [("vault", "deleting"), ("ledger", "deleting"), ("stages", "deleting"), ("meta", "deleting")]
+    assert probe.meta_state(pid) is None  # 最後の段が終わって、初めて消える
+
+
+@pytest.mark.anyio
+async def test_web_deletion_without_a_usage_record_only_clears_the_cookie(web_app):
+    # DV-06 / §6.3: 利用記録がなければ(面談を送っていなければ)、サーバにデータはないので、クッキーを消すだけで終える。
+    browser = web_app.browser()
+    pid = await browser.open_start_page()
+    probe = DeletionProbe(web_app)
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert (response.status_code, response.json()) == (200, {"status": "deleted"})
+    assert browser.cookie is None
+    assert probe.steps == []  # 金庫にも (default) にも、何も呼んでいない
+
+
+@pytest.mark.anyio
+async def test_web_the_delete_response_clears_the_cookie_even_when_the_same_request_would_extend_it(web_app):
+    # DV-06 / §6.3: 1 時間以上たってからの「データを消す」は、利用記録の更新(クッキーの期限の延長)も伴うが、応答が付ける
+    # セッションクッキーは「消す」1 つだけ(延長のクッキーで、消したクッキーが復活しない)。
+    browser = web_app.browser()
+    pid = await browser.register()
+    web_app.clock.advance(dt.timedelta(hours=2))
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert response.status_code == 200
+    (header,) = response.headers.get_list("set-cookie")
+    assert "Max-Age=0" in header
+    assert browser.cookie is None
+    assert web_app.default_db.collection("principals_meta").document(pid).get().exists is False
+
+
+@pytest.mark.anyio
+async def test_web_deletion_removes_more_documents_than_one_batch_holds(web_app, monkeypatch):
+    # DV-06: 開示台帳の文書と段の状態が、1 回のバッチ(暫定 300 件)より多くても、すべて消える(バッチを繰り返す)。
+    # バッチの大きさを 2 に絞って、少ない文書で、複数回のバッチを確かめる。
+    monkeypatch.setattr(ledger_module, "_DELETE_BATCH_SIZE", 2)
+    monkeypatch.setattr(stages_module, "_DELETE_BATCH_SIZE", 2)
+    browser = web_app.browser()
+    pid = await browser.register()
+    nids = [f"{index:016x}" for index in range(1, 6)]
+    for nid in nids:
+        await web_app.services.stages.ensure(nid, pid)  # 5 件の段の状態
+    ledger = web_app.default_db.collection("principals").document(pid).collection("ledger")
+    for index in range(5):
+        ledger.document(f"row-{index}").set({"principal_id": pid, "note": CANARY})  # 5 件の台帳
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert response.status_code == 200
+    assert documents_mentioning(web_app.default_db, pid, CANARY) == {}
