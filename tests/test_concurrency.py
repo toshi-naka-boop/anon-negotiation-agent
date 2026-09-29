@@ -1,10 +1,11 @@
-"""DV-02(次の部分。途中確認の回答・「会う」・段 2 の承認は除く): design.md §3.3・§3.4・§3.5。
+"""DV-02(次の部分。「会う」・段 2 の承認は除く): design.md §3.3・§3.4・§3.5・§4.4。
 
 同じ expected_version の手(check を含む)を並行して 10 本送ると 1 本だけが通り、残りは
 何も消費せず 409 になること。上限を超える消費が起きないこと。control と expire は
 何度呼んでも同じ結果で 409 にならないこと。accept の直後に取消を並行して送っても
 結果が 2 通りにならないこと。手・一時停止・再開・期限切れを交互に起こしても記録が
-上書きされないことを確かめる。
+上書きされないこと。途中確認の回答が並行・再送で 1 回しか効かず、再試行が尽きたら
+409 になることを確かめる。
 
 並行呼び出しは、TestClient/ASGI の都合を避けるため VaultStore を直接スレッドから叩く
 (状態機械そのものの並行性を確かめるのが目的で、HTTP 層の並行性は対象外)。
@@ -17,9 +18,22 @@ import pytest
 from google.api_core.exceptions import Aborted
 from google.cloud.firestore_v1.transaction import Transaction
 
-from vault.api_models import ControlRequest, MoveRequest
+from vault.api_models import ControlRequest, MoveRequest, PrincipalAnswerRequest
 from vault.errors import MovePreconditionFailed, TransactionRetryExhausted
-from vault_helpers import accept_all_policy, demo_create_request, put_candidate_and_employer_templates, sample_package
+from vault.models import EmployerRule
+from vault_helpers import (
+    accept_all_policy,
+    demo_create_request,
+    needs_confirmation_policy,
+    put_candidate_and_employer_templates,
+    sample_package,
+)
+
+# store.py の _new_transaction のコメントのとおり、エミュレータの粗いロック実装は
+# 同一文書への高い並行度で顕著になる。process_principal_answer では 10 本だと、まれに
+# 全員が再試行を使い切って 0 勝(0 == 1 で失敗)になることが確認できたため、
+# 「1 本だけ勝ち、残りは 409」という性質自体は変えずに、並行数だけ落とす。
+_CONCURRENT_ANSWERS = 5
 
 
 def _create(store, **kwargs):
@@ -63,6 +77,47 @@ def test_ten_concurrent_moves_at_the_same_version_only_one_succeeds(store):
 
     # イベントも 1 件だけ残る。
     assert len(store.get_events(nid, "candidate")) == 1
+
+
+def _try_principal_answer(store, nid, request):
+    # process_principal_answer も、expected_version の不一致・再試行を使い切った場合の
+    # どちらも MovePreconditionFailed(409)にそろえる(手の操作と同じ扱い)。
+    try:
+        return store.process_principal_answer(nid, request)
+    except MovePreconditionFailed:
+        return "409"
+
+
+def test_concurrent_principal_answers_at_the_same_version_only_one_succeeds(store):
+    # DV-02: 途中確認の回答も、並行・再送で 1 回しか効かない。残りは何も消費せず 409 になる。
+    # 並行度は、手の操作の同種テスト(10 本)より抑える(_CONCURRENT_ANSWERS を参照)。
+    nid = _create(store, candidate_policy=needs_confirmation_policy("candidate"))
+    package = sample_package()
+    ask_response = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="ask_principal", package=package)
+    )
+    assert ask_response.status == "awaiting_principal"
+    v = ask_response.version
+
+    request = PrincipalAnswerRequest(expected_version=v, side="candidate", package=package, answer="accept")
+    with ThreadPoolExecutor(max_workers=_CONCURRENT_ANSWERS) as pool:
+        results = list(pool.map(lambda _: _try_principal_answer(store, nid, request), range(_CONCURRENT_ANSWERS)))
+
+    ok_results = [r for r in results if r != "409"]
+    conflict_results = [r for r in results if r == "409"]
+    assert len(ok_results) == 1
+    assert len(conflict_results) == _CONCURRENT_ANSWERS - 1
+
+    # 再送(同じリクエストをもう一度、逐次で)しても、古い expected_version なので 409。
+    assert _try_principal_answer(store, nid, request) == "409"
+
+    # 追記が 1 回しか効いていない(コピーの受けるアンカーが 1 件だけ)。
+    doc = store._negotiation_ref(nid).get().to_dict()
+    assert doc["status"] == "active"
+    assert len(doc["snapshots"]["candidate"]["accept_anchors"]) == 1
+
+    # イベントも 1 件だけ残る(答えた側の見え方にだけ)。
+    assert len(store.get_events(nid, "candidate")) == 2  # ask_principal 1 件 + principal_answer 1 件
 
 
 def test_concurrent_bursts_never_let_the_evaluation_budget_go_negative(store):
@@ -271,6 +326,45 @@ def test_moves_return_409_when_transaction_retries_are_exhausted(api_client, sto
     doc = store._negotiation_ref(nid).get().to_dict()
     assert doc["version"] == 0
     assert doc["counters"]["candidate"]["evaluations_used"] == 0
+
+
+def test_principal_answer_returns_409_when_transaction_retries_are_exhausted(api_client, store, monkeypatch):
+    # DV-02: principal-answer も、手の操作と同じ扱いで、再試行を使い切ったときは 409 にする
+    # (control・expire・作成とは違い、503 にはしない)。
+    nid = _create(store, candidate_policy=needs_confirmation_policy("candidate"))
+    package = sample_package()
+    ask_response = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="ask_principal", package=package)
+    )
+    v = ask_response.version
+
+    def _always_aborted(self):
+        raise Aborted("simulated contention")
+
+    monkeypatch.setattr(Transaction, "_commit", _always_aborted)
+
+    with pytest.raises(MovePreconditionFailed):
+        store.process_principal_answer(
+            nid, PrincipalAnswerRequest(expected_version=v, side="candidate", package=package, answer="accept")
+        )
+
+    http_response = api_client.post(
+        f"/v1/negotiations/{nid}/principal-answer",
+        json={
+            "expected_version": v,
+            "side": "candidate",
+            "package": package.model_dump(mode="json"),
+            "answer": "accept",
+        },
+    )
+    assert http_response.status_code == 409
+
+    monkeypatch.undo()
+
+    # 何も消費していない(status・version のどちらも変わっていない)。
+    doc = store._negotiation_ref(nid).get().to_dict()
+    assert doc["status"] == "awaiting_principal"
+    assert doc["version"] == v
 
 
 def test_control_returns_503_when_transaction_retries_are_exhausted(api_client, store, monkeypatch):

@@ -1,10 +1,11 @@
-"""DV-10: イベント列の側ごとの見え方(design.md §3.2)。principal-answer の行と、
-TurnInput・画面・レフェリーの作り直しは後の段(1b-2 以降)。
+"""DV-10: イベント列の側ごとの見え方(design.md §3.2)。TurnInput・画面・レフェリーの
+作り直しは後の段。
 
 §3.2 の表のとおりに操作ごとの見え方が分かれていること、propose で相手の評価が
 どちらの見え方にも入らないこと、相手に見えない操作の後でも相手の seq が飛ばずに
 続くこと、見え方と view に相手の残り回数が現れず version は view にだけ入ること、
-最終記録が双方に 1 件だけであることを確かめる。
+最終記録が双方に 1 件だけであること、principal-answer の行が答えた側の見え方にだけ入り
+相手の seq を飛ばさないことを確かめる。
 """
 
 from vault.api_models import MoveRequest
@@ -193,7 +194,15 @@ def test_view_and_events_never_expose_the_counterparty_remaining_budget(store):
     # イベントの見え方(EventViewItem)には version も budget も、そもそも項目自体がない。
     events = store.get_events(nid, "candidate")
     for event in events:
-        assert set(event.model_dump().keys()) == {"seq", "kind", "package", "own_evaluation", "reason", "result"}
+        assert set(event.model_dump().keys()) == {
+            "seq",
+            "kind",
+            "package",
+            "own_evaluation",
+            "reason",
+            "answer",
+            "result",
+        }
 
 
 def test_exactly_one_final_result_record_per_side(store):
@@ -212,3 +221,67 @@ def test_exactly_one_final_result_record_per_side(store):
         events = store.get_events(nid, side)
         final_events = [e for e in events if e.kind == "final_result"]
         assert len(final_events) == 1
+
+
+def test_principal_answer_is_visible_only_to_the_answering_side_and_keeps_the_counterpartys_seq_unbroken(store):
+    # DV-10: principal-answer の記録は、答えた側の見え方にだけ入り、相手には一切見えない
+    # (§3.2 の表)。相手に見えない操作(ask_principal・principal-answer)を挟んでも、
+    # 次に相手に見える操作の seq は飛ばずに続く。
+    from negotiation_core import Anchor, Policy
+    from vault.api_models import PrincipalAnswerRequest
+    from vault.models import EmployerRule
+    from vault_helpers import accept_all_policy
+
+    package_a = sample_package(salary=700)
+    package_b = sample_package(salary=650)  # ask_principal・principal-answer で使う組み合わせ
+    # candidate 自身の propose(package_a)のガードは通しつつ、package_b は NEEDS_CONFIRMATION の
+    # ままにしたいので、package_a とちょうど同じアンカー 1 件だけを持つポリシーにする
+    # (salary が違う package_b は、このアンカーを満たさない)。
+    candidate_policy = Policy(
+        side="candidate", accept_anchors=[Anchor(**package_a.model_dump(mode="python"))], reject_anchors=[]
+    )
+    candidate_template, employer_template = put_candidate_and_employer_templates(
+        store._db,
+        candidate_policy=candidate_policy,
+        employer_rules=[EmployerRule(when={}, policy=accept_all_policy("employer"))],
+    )
+    result = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id)
+    )
+    nid = result.nid
+
+    # 求人側にも見える操作を 1 往復させ、employer の seq を 2 にしておく(propose → reject)。
+    propose_response = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="propose", package=package_a)
+    )
+    v = propose_response.version
+    reject_response = store.process_move(nid, MoveRequest(expected_version=v, side="employer", move="reject"))
+    v = reject_response.version
+    assert [e.seq for e in store.get_events(nid, "employer")] == [1, 2]
+
+    # candidate が途中確認 → 回答(どちらも employer には一切見えない)。
+    ask_response = store.process_move(
+        nid, MoveRequest(expected_version=v, side="candidate", move="ask_principal", package=package_b)
+    )
+    v = ask_response.version
+    answer_response = store.process_principal_answer(
+        nid, PrincipalAnswerRequest(expected_version=v, side="candidate", package=package_b, answer="accept")
+    )
+    assert answer_response.status == "active"
+    v = answer_response.version
+
+    # 答えた側(candidate)には principal_answer の記録が見える。
+    candidate_events = store.get_events(nid, "candidate")
+    assert candidate_events[-1].kind == "principal_answer"
+    assert candidate_events[-1].package == package_b
+    assert candidate_events[-1].answer == "accept"
+
+    # 相手(employer)には一切見えない: イベント数は変わらず、seq も飛ばずに 1・2 のまま。
+    assert [e.seq for e in store.get_events(nid, "employer")] == [1, 2]
+
+    # 次に employer に見える操作が起きれば、seq は 3 から続く(飛びがない)。
+    final_propose = store.process_move(
+        nid, MoveRequest(expected_version=v, side="candidate", move="propose", package=package_b)
+    )
+    assert final_propose.valid is True
+    assert [e.seq for e in store.get_events(nid, "employer")] == [1, 2, 3]

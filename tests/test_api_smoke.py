@@ -1,4 +1,4 @@
-"""design.md §3.3 の API(1b-1 で作る分)が、実際に HTTP・JSON として動くことの確認。
+"""design.md §3.3 の API(1b-1・1b-2 で作る分)が、実際に HTTP・JSON として動くことの確認。
 
 状態機械そのものの詳細(AC/DV の各条件)は、store を直接呼ぶ他のテストファイルで
 確かめている。ここでは、FastAPI の配線(ルーティング・リクエスト/レスポンスの
@@ -6,6 +6,25 @@
 """
 
 from vault_helpers import accept_all_policy, new_id
+
+
+def test_delete_principal_is_idempotent_over_http(api_client):
+    # そもそも何もなくても成功し(204)、実在するものを消しても成功する。
+    empty_response = api_client.delete(f"/v1/principals/{new_id('nobody')}")
+    assert empty_response.status_code == 204
+
+    pid = new_id("principal")
+    put_response = api_client.put(
+        f"/v1/principals/{pid}/policy",
+        json={"policy": accept_all_policy("candidate").model_dump(mode="json"), "removed_axes": []},
+    )
+    assert put_response.status_code == 204
+
+    delete_response = api_client.delete(f"/v1/principals/{pid}")
+    assert delete_response.status_code == 204
+
+    get_response = api_client.get(f"/v1/principals/{pid}/policy")
+    assert get_response.status_code == 404
 
 
 def test_policy_put_and_get_round_trip(api_client):
@@ -162,3 +181,60 @@ def test_move_with_stale_version_is_409_over_http(api_client, store):
         json={"expected_version": 99, "side": "candidate", "move": "end"},
     )
     assert response.status_code == 409
+
+
+def test_principal_answer_over_http(api_client, store):
+    from vault.models import EmployerRule
+    from vault_helpers import needs_confirmation_policy, put_candidate_and_employer_templates
+
+    candidate_template, employer_template = put_candidate_and_employer_templates(
+        store._db,
+        candidate_policy=needs_confirmation_policy("candidate"),
+        employer_rules=[EmployerRule(when={}, policy=accept_all_policy("employer"))],
+    )
+    create_response = api_client.post(
+        "/v1/negotiations",
+        json={
+            "request_id": new_id("req"),
+            "mode": "demo",
+            "candidate": {"is_fictional": True, "template_id": candidate_template.template_id},
+            "employer": {"template_id": employer_template.template_id},
+        },
+    )
+    nid = create_response.json()["nid"]
+
+    package = {
+        "salary": 700,
+        "remote_days": 2,
+        "night_duty": 2,
+        "review_months": 6,
+        "training": "available",
+        "side_job": "allowed",
+        "start": "within_1_month",
+    }
+    ask_response = api_client.post(
+        f"/v1/negotiations/{nid}/moves",
+        json={"expected_version": 0, "side": "candidate", "move": "ask_principal", "package": package},
+    )
+    assert ask_response.status_code == 200
+    ask_data = ask_response.json()
+    assert ask_data["status"] == "awaiting_principal"
+
+    answer_response = api_client.post(
+        f"/v1/negotiations/{nid}/principal-answer",
+        json={
+            "expected_version": ask_data["version"],
+            "side": "candidate",
+            "package": package,
+            "answer": "accept",
+        },
+    )
+    assert answer_response.status_code == 200
+    assert answer_response.json()["status"] == "active"
+
+    events_response = api_client.get(
+        f"/v1/negotiations/{nid}/events", params={"side": "candidate", "after_seq": 0}
+    )
+    assert events_response.status_code == 200
+    kinds = [e["kind"] for e in events_response.json()]
+    assert "principal_answer" in kinds

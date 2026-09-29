@@ -30,3 +30,13 @@ class TransactionRetryExhausted(VaultError):
 
 class PolicyValidationError(VaultError):
     """ポリシーがグリッド外・矛盾などで拒否された(§3.3 の PUT policy)。"""
+
+
+class PrincipalDeletingError(VaultError):
+    """依頼者が削除中(deleting)で、その依頼者が関わる操作が拒否された(409。§3.8 手順 1)。
+
+    「依頼者を単位にする操作」(PUT/GET policy・PUT blocklist・本人の交渉一覧)と、
+    「交渉を単位にする操作」のうち手の操作(moves)・control・読み出し(view・events)から
+    投げる。交渉の作成(create_negotiation)は例外にせず、既存の断り方(status="refused")に
+    合わせる。expire はシステムの操作(終わらせるだけ)なのでここには含めない。
+    """

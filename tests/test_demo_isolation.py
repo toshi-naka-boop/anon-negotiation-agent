@@ -1,12 +1,21 @@
-"""DV-07: デモの分離(design.md §3.7・§12.2)。途中確認の追記は 1b-2。
+"""DV-07: デモの分離(design.md §3.7・§12.2)。
 
-2 つのデモを並行して動かしても、回数が互いに影響しないこと。実行の後、テンプレートが
-変わっていないことを確かめる。
+2 つのデモを並行して動かしても、回数と途中確認の追記が互いに影響しないこと。実行の後、
+テンプレートが変わっていないことを確かめる。
 """
 
-from vault.api_models import MoveRequest
+from negotiation_core import Verdict
+
+from vault.api_models import MoveRequest, PrincipalAnswerRequest
+from vault.models import EmployerRule
 from vault.templates import get_template
-from vault_helpers import demo_create_request, put_candidate_and_employer_templates, sample_package
+from vault_helpers import (
+    accept_all_policy,
+    demo_create_request,
+    needs_confirmation_policy,
+    put_candidate_and_employer_templates,
+    sample_package,
+)
 
 
 def test_two_concurrent_demos_do_not_share_counters(store):
@@ -81,3 +90,49 @@ def test_templates_are_unchanged_after_running_demos(store):
 
     assert candidate_template_after == candidate_template_before
     assert employer_template_after == employer_template_before
+
+
+def test_two_concurrent_demos_do_not_share_principal_answer_appends(store):
+    # DV-07: 2 つのデモを並行して動かしても、途中確認の追記が互いに影響しない。
+    candidate_template, employer_template = put_candidate_and_employer_templates(
+        store._db,
+        candidate_policy=needs_confirmation_policy("candidate"),
+        employer_rules=[EmployerRule(when={}, policy=accept_all_policy("employer"))],
+    )
+    demo_1 = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id)
+    )
+    demo_2 = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id)
+    )
+    package = sample_package()
+
+    # デモ 1 だけで、途中確認 → 「受ける」の回答まで進める。
+    ask_response = store.process_move(
+        demo_1.nid,
+        MoveRequest(expected_version=0, side="candidate", move="ask_principal", package=package),
+    )
+    assert ask_response.status == "awaiting_principal"
+    answer_response = store.process_principal_answer(
+        demo_1.nid,
+        PrincipalAnswerRequest(
+            expected_version=ask_response.version, side="candidate", package=package, answer="accept"
+        ),
+    )
+    assert answer_response.status == "active"
+
+    # デモ 1 では、同じ組み合わせがもう ACCEPTABLE になっている。
+    demo_1_check = store.process_move(
+        demo_1.nid,
+        MoveRequest(expected_version=answer_response.version, side="candidate", move="check", package=package),
+    )
+    assert demo_1_check.valid is True
+    assert store.get_view(demo_1.nid, "candidate").last_check.own_evaluation is Verdict.ACCEPTABLE
+
+    # デモ 2(同じテンプレートから作った、別の交渉)は、デモ 1 の回答の影響を受けない。
+    # 同じ組み合わせを check しても、まだ NEEDS_CONFIRMATION のまま。
+    demo_2_check = store.process_move(
+        demo_2.nid, MoveRequest(expected_version=0, side="candidate", move="check", package=package)
+    )
+    assert demo_2_check.valid is True
+    assert store.get_view(demo_2.nid, "candidate").last_check.own_evaluation is Verdict.NEEDS_CONFIRMATION

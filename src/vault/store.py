@@ -24,6 +24,7 @@ from negotiation_core import (
 )
 
 from vault import budget as budget_math
+from vault import principal_answer
 from vault.api_models import (
     ControlRequest,
     ControlResponse,
@@ -37,6 +38,8 @@ from vault.api_models import (
     OpenNegotiationsPage,
     OpenNegotiationSummary,
     PolicyView,
+    PrincipalAnswerRequest,
+    PrincipalAnswerResponse,
     PrincipalNegotiationSummary,
     PutBlocklistRequest,
     PutPolicyRequest,
@@ -47,6 +50,7 @@ from vault.errors import (
     MovePreconditionFailed,
     NotFoundError,
     PolicyValidationError,
+    PrincipalDeletingError,
     TransactionRetryExhausted,
 )
 from vault.ids import generate_id
@@ -147,6 +151,55 @@ class VaultStore:
             raise
 
     # ------------------------------------------------------------------
+    # §3.8 手順 1 のガード(差し戻し対応 3): 依頼者が deleting なら、それが関わる操作を拒否する。
+    # 「依頼者を単位にする操作」(PUT/GET policy・PUT blocklist・本人の交渉一覧・作成)と、
+    # 「交渉を単位にする操作」(moves・control・view・events)の両方から使う共通下請け。
+    # ------------------------------------------------------------------
+
+    def _is_participant_deleting(
+        self, participant: Participant, txn: firestore.Transaction | None = None
+    ) -> bool:
+        """participant が本物(is_fictional=False)で、principals/{pid} が deleting なら True。
+
+        架空人物(テンプレート)には deleting の概念がないので、常に False。
+        txn を渡せば、そのトランザクションの一部として読む(moves・control で使う)。
+        """
+        if participant.is_fictional or participant.principal_id is None:
+            return False
+        snap = self._principal_ref(participant.principal_id).get(transaction=txn)
+        return snap.exists and snap.to_dict().get("deleting", False)
+
+    def _reject_if_any_participant_deleting(
+        self, doc: NegotiationDocument, nid: str, txn: firestore.Transaction | None = None
+    ) -> None:
+        """交渉を単位にする操作(moves・control)向け: 本物の参加者のどちらかが deleting なら
+        拒否する(§3.8 手順 1「以後、その依頼者が関わる操作はすべて拒否する」)。手番・side を
+        問わない: 交渉そのものが、間もなく手順 2 で取消になる対象だから。
+        """
+        if self._is_participant_deleting(doc.participants.candidate, txn) or self._is_participant_deleting(
+            doc.participants.employer, txn
+        ):
+            raise PrincipalDeletingError(f"a real participant of negotiation {nid!r} is being deleted")
+
+    def _reject_if_side_participant_deleting(self, doc: NegotiationDocument, side: Side, nid: str) -> None:
+        """読み出し(view・events)向け: 指定された側の本物の参加者が deleting なら拒否する。
+        相手側の読み出しは許す(相手が本物のとき、相手の記録は相手のものとして残るため)。
+        """
+        participant = doc.participants.candidate if side == "candidate" else doc.participants.employer
+        if self._is_participant_deleting(participant):
+            raise PrincipalDeletingError(f"principal for side={side!r} of negotiation {nid!r} is being deleted")
+
+    def _reject_if_principal_deleting(self, pid: str, snap=None) -> None:
+        """依頼者を単位にする操作向け(PUT/GET policy・PUT blocklist・本人の交渉一覧): pid が
+        deleting なら拒否する。すでに読み込み済みの DocumentSnapshot があれば渡せる
+        (get_policy のように、この後で同じ snap を使う場合に二重に読まないため)。
+        """
+        if snap is None:
+            snap = self._principal_ref(pid).get()
+        if snap.exists and snap.to_dict().get("deleting", False):
+            raise PrincipalDeletingError(f"principal {pid!r} is being deleted")
+
+    # ------------------------------------------------------------------
     # §3.3 PUT/GET .../policy、PUT .../blocklist
     # ------------------------------------------------------------------
 
@@ -160,6 +213,7 @@ class VaultStore:
         unknown_axes = [a for a in request.removed_axes if a not in AXIS_KEYS]
         if unknown_axes:
             raise PolicyValidationError(f"unknown axes in removed_axes: {unknown_axes}")
+        self._reject_if_principal_deleting(pid)
         update = {
             "policy": model_to_firestore(request.policy),
             "removed_axes": list(request.removed_axes),
@@ -170,6 +224,7 @@ class VaultStore:
 
     def get_policy(self, pid: str) -> PolicyView:
         snap = self._principal_ref(pid).get()
+        self._reject_if_principal_deleting(pid, snap)
         data = snap.to_dict() if snap.exists else None
         if not data or data.get("policy") is None:
             raise NotFoundError(f"principal has no policy: {pid}")
@@ -184,6 +239,7 @@ class VaultStore:
 
     def put_blocklist(self, pid: str, request: PutBlocklistRequest) -> None:
         """候補者のブロック先(企業 ID)を置き換える(§3.3)。"""
+        self._reject_if_principal_deleting(pid)
         self._principal_ref(pid).set({"blocklist": list(request.blocklist)}, merge=True)
 
     # ------------------------------------------------------------------
@@ -227,6 +283,13 @@ class VaultStore:
                 principal_data = candidate_principal_snap.to_dict() if candidate_principal_snap.exists else None
                 if not principal_data or principal_data.get("policy") is None:
                     raise NotFoundError(f"candidate principal has no policy: {cand_req.principal_id}")
+                # 差し戻し対応 3(§3.8 手順 1): 削除中の依頼者は、新しい交渉を作れない。
+                # ここは作成のトランザクションの中で依頼者の文書を読む箇所なので、この読み取りと
+                # delete_principal の手順 1(deleting を立てる書き込み)との競合は、
+                # Firestore のトランザクションの再試行(このトランザクションが読んだ文書が
+                # コミット前に変わっていれば abort・再試行される)によって解決される。
+                if principal_data.get("deleting", False):
+                    return CreateNegotiationResponse(status="refused", reason="principal_deleting")
                 candidate_policy = model_from_firestore(Policy, principal_data["policy"])
                 # 台帳 I-2: 本物の候補者の属性帯は、作成のたびに web から渡させず、
                 # principals/{pid} に保存済みの値を金庫が読む(交渉ごとに違う帯を渡せると、
@@ -409,6 +472,9 @@ class VaultStore:
                 self._write_shared_termination(txn, nid, doc, "timeout")
                 txn.set(negotiation_ref, model_to_firestore(doc))
                 return MoveResponse(version=doc.version, status=doc.status, valid=True, end_reason="timeout")
+
+            # 差し戻し対応 3(§3.8 手順 1): 本物の参加者(どちらか)が削除中なら拒否する。
+            self._reject_if_any_participant_deleting(doc, nid, txn)
 
             # --- 前提(§3.5)。どれか崩れていれば 409、何も消費しない ---
             if doc.status != "active":
@@ -654,6 +720,116 @@ class VaultStore:
         return _MoveOutcome(False, request.reason, view, None, None)
 
     # ------------------------------------------------------------------
+    # §4.4 途中確認の回答(principal-answer)
+    # ------------------------------------------------------------------
+
+    def process_principal_answer(self, nid: str, request: PrincipalAnswerRequest) -> PrincipalAnswerResponse:
+        """POST .../principal-answer(§3.3・§4.4)。手の操作と同じ扱いの前提を、1 つの
+        トランザクションで確かめてから、追記・評価し直し・状態と記録を行う。
+        """
+        negotiation_ref = self._negotiation_ref(nid)
+
+        def _txn(txn: firestore.Transaction) -> PrincipalAnswerResponse:
+            snap = negotiation_ref.get(transaction=txn)
+            if not snap.exists:
+                raise NotFoundError(nid)
+            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            now = self._clock.now()
+
+            # §3.4: 期限切れの判定は、トランザクションの最初で行う(手の操作と同じ)。
+            if doc.status != "judged" and self._is_expired(doc, now):
+                self._write_shared_termination(txn, nid, doc, "timeout")
+                txn.set(negotiation_ref, model_to_firestore(doc))
+                return PrincipalAnswerResponse(version=doc.version, status=doc.status, end_reason="timeout")
+
+            # --- 前提。1 つでも崩れていれば 409、何も消費しない(手の操作と同じ扱い) ---
+            if doc.version != request.expected_version:
+                raise MovePreconditionFailed(
+                    f"expected_version mismatch: have {doc.version}, got {request.expected_version}"
+                )
+            if (
+                doc.status != "awaiting_principal"
+                or doc.pending_question is None
+                or doc.pending_question.side != request.side
+                or doc.pending_question.package != request.package
+            ):
+                raise MovePreconditionFailed("no pending_question matches this principal-answer")
+
+            side = request.side
+            participant = doc.participants.candidate if side == "candidate" else doc.participants.employer
+
+            # --- 削除中の依頼者(本物だけが対象)は拒否する ---
+            principal_ref = None
+            principal_data: dict = {}
+            if not participant.is_fictional:
+                assert participant.principal_id is not None
+                principal_ref = self._principal_ref(participant.principal_id)
+                principal_snap = principal_ref.get(transaction=txn)
+                principal_data = principal_snap.to_dict() if principal_snap.exists else {}
+                if principal_data.get("deleting", False):
+                    raise MovePreconditionFailed("principal is being deleted")
+
+            anchor = principal_answer.anchor_from_package(request.package)
+            answer = request.answer
+
+            # --- 1. 追記。交渉用コピーには常に、本体には本物かつ中立なときだけ(§4.4) ---
+            assert doc.snapshots is not None
+            own_copy_policy = doc.snapshots.candidate if side == "candidate" else doc.snapshots.employer
+            new_copy_policy, _ = principal_answer.append_anchor_if_consistent(own_copy_policy, anchor, answer)
+            if side == "candidate":
+                doc.snapshots.candidate = new_copy_policy
+            else:
+                doc.snapshots.employer = new_copy_policy
+
+            if not participant.is_fictional:
+                removed_axes = list(principal_data.get("removed_axes", []))
+                is_neutral = principal_answer.is_neutral_for_all_removed_axes(anchor, removed_axes, side, answer)
+                if is_neutral and principal_data.get("policy") is not None:
+                    body_policy = model_from_firestore(Policy, principal_data["policy"])
+                    new_body_policy, _ = principal_answer.append_anchor_if_consistent(body_policy, anchor, answer)
+                    txn.set(principal_ref, {"policy": model_to_firestore(new_body_policy)}, merge=True)
+
+            # --- 2. 評価し直し(答えた側だけ。評価回数には数えない) ---
+            if doc.pending_offer is not None and doc.pending_offer.by != side:
+                doc.pending_offer.receiver_evaluation = evaluate(new_copy_policy, doc.pending_offer.package)
+
+            own_last_check = doc.last_check.candidate if side == "candidate" else doc.last_check.employer
+            if own_last_check is not None:
+                recomputed = EvaluatedPackage(
+                    package=own_last_check.package,
+                    own_evaluation=evaluate(new_copy_policy, own_last_check.package),
+                )
+                if side == "candidate":
+                    doc.last_check.candidate = recomputed
+                else:
+                    doc.last_check.employer = recomputed
+
+            # --- 3. status=active に戻し、期限を付け直し、答えた側の見え方にだけ記録する ---
+            doc.status = "active"
+            doc.pending_question = None
+            # 一時停止中は期限を進めない(§3.4 の不変条件: paused のときだけ deadline は
+            # null。control.pause/resume と同じ扱い)。
+            doc.deadline = None if doc.paused else self._fresh_deadline(doc, now)
+
+            own_evaluation_of_p = evaluate(new_copy_policy, request.package)
+            view = EventView(
+                seq=0,
+                kind="principal_answer",
+                package=request.package,
+                own_evaluation=own_evaluation_of_p,
+                answer=answer,
+            )
+            self._assign_seq(doc, side, view)
+            candidate_view = view if side == "candidate" else None
+            employer_view = view if side == "employer" else None
+            self._record_event(txn, nid, doc, candidate_view, employer_view)
+
+            txn.set(negotiation_ref, model_to_firestore(doc))
+            return PrincipalAnswerResponse(version=doc.version, status=doc.status, end_reason=None)
+
+        return self._run_transaction(_txn, contention_error=MovePreconditionFailed)
+
+    # ------------------------------------------------------------------
     # §3.4 control(一時停止・再開・取消)・expire
     # ------------------------------------------------------------------
 
@@ -666,7 +842,15 @@ class VaultStore:
             return None
         return min(now + delta, doc.expires_at)
 
-    def control(self, nid: str, request: ControlRequest) -> ControlResponse:
+    def control(
+        self, nid: str, request: ControlRequest, *, _bypass_deleting_guard: bool = False
+    ) -> ControlResponse:
+        """§3.4 の pause・resume・cancel。
+
+        _bypass_deleting_guard は delete_principal の手順 2 専用(公開 API からは渡さない)。
+        delete_principal は、まさに deleting にした依頼者自身の交渉を取消にする必要があるので、
+        通常の削除中ガード(差し戻し対応 3)にここで弾かれては手順が進まなくなってしまう。
+        """
         negotiation_ref = self._negotiation_ref(nid)
 
         def _txn(txn: firestore.Transaction) -> ControlResponse:
@@ -679,6 +863,9 @@ class VaultStore:
             # §3.4: control は期限切れの判定より先に処理する(expired チェックをしない)。
             if doc.status == "judged":
                 return ControlResponse(version=doc.version, status=doc.status, paused=doc.paused)
+
+            if not _bypass_deleting_guard:
+                self._reject_if_any_participant_deleting(doc, nid, txn)
 
             if request.action == "pause":
                 if doc.paused:
@@ -743,6 +930,7 @@ class VaultStore:
         if not snap.exists:
             raise NotFoundError(nid)
         doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+        self._reject_if_side_participant_deleting(doc, side, nid)
         counters = doc.counters.candidate if side == "candidate" else doc.counters.employer
 
         pending_offer_view = None
@@ -784,6 +972,8 @@ class VaultStore:
         neg_snap = self._negotiation_ref(nid).get()
         if not neg_snap.exists:
             raise NotFoundError(nid)
+        doc = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
+        self._reject_if_side_participant_deleting(doc, side, nid)
 
         field_path = f"views.{side}.seq"
         query = self._events(nid).where(filter=FieldFilter(field_path, ">", after_seq)).order_by(field_path)
@@ -798,6 +988,7 @@ class VaultStore:
                     package=view.package,
                     own_evaluation=view.own_evaluation.value if view.own_evaluation is not None else None,
                     reason=view.reason,
+                    answer=view.answer,
                     result=view.result,
                 )
             )
@@ -805,6 +996,7 @@ class VaultStore:
 
     def list_principal_negotiations(self, pid: str) -> list[PrincipalNegotiationSummary]:
         """§3.3 GET /v1/principals/{pid}/negotiations。終了理由・相手の回数・version は返さない。"""
+        self._reject_if_principal_deleting(pid)
         by_candidate = self._negotiations().where(
             filter=FieldFilter("participants.candidate.principal_id", "==", pid)
         )
@@ -869,3 +1061,112 @@ class VaultStore:
             for doc in page
         ]
         return OpenNegotiationsPage(items=items, next_cursor=next_cursor)
+
+    # ------------------------------------------------------------------
+    # §3.8 依頼者の削除
+    # ------------------------------------------------------------------
+
+    def _negotiation_ids_for_principal(self, pid: str) -> list[str]:
+        """pid が候補者側・求人側のどちらかとして関わる交渉の nid の一覧(重複なし)。
+
+        list_principal_negotiations と同じ 2 本の等価フィルタで探す。呼び出しのたびに
+        Firestore を読み直す(削除の各段が冪等に、そのつどの最新状態に基づいて進むように)。
+        """
+        neg_col = self._negotiations()
+        by_candidate = neg_col.where(filter=FieldFilter("participants.candidate.principal_id", "==", pid))
+        by_employer = neg_col.where(filter=FieldFilter("participants.employer.principal_id", "==", pid))
+        nids = {snap.id for snap in by_candidate.stream()}
+        nids.update(snap.id for snap in by_employer.stream())
+        return list(nids)
+
+    def _delete_negotiation_events(self, nid: str) -> None:
+        """交渉のイベント列を、カーソルで区切りながら明示的に消す(§3.8 手順 3)。
+
+        limit() で区切って削除してから読み直す: 削除済みの分は次の読み出しに現れないので、
+        コレクション全体を一度に読み込まずに済む(カーソルで区切るのと同じ効果になる)。
+        """
+        events_col = self._events(nid)
+        while True:
+            pending = list(events_col.limit(300).stream())
+            if not pending:
+                return
+            batch = self._db.batch()
+            for event_snap in pending:
+                batch.delete(event_snap.reference)
+            batch.commit()
+
+    def _null_out_side_views(self, nid: str, side: Side) -> None:
+        """イベント列の中の、side の見え方をすべて null にする(§3.8 手順 3)。
+
+        すでに null な記録はそのままにする(冪等)。相手の見え方・seq には触れない。
+        """
+        field_path = f"views.{side}"
+        batch = self._db.batch()
+        pending = 0
+        for event_snap in self._events(nid).stream():
+            views = event_snap.to_dict().get("views", {})
+            if views.get(side) is not None:
+                batch.update(event_snap.reference, {field_path: None})
+                pending += 1
+                if pending >= 400:
+                    batch.commit()
+                    batch = self._db.batch()
+                    pending = 0
+        if pending:
+            batch.commit()
+
+    def _process_negotiation_for_deletion(self, pid: str, nid: str) -> None:
+        """§3.8 手順 3。相手を見て、自分側の見え方を消すか、交渉を丸ごと消すか決める。"""
+        negotiation_ref = self._negotiation_ref(nid)
+        snap = negotiation_ref.get()
+        if not snap.exists:
+            return  # 冪等: すでに消えている
+
+        doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+        if doc.participants.candidate.principal_id == pid:
+            own_side: Side = "candidate"
+            other_participant = doc.participants.employer
+        elif doc.participants.employer.principal_id == pid:
+            own_side = "employer"
+            other_participant = doc.participants.candidate
+        else:
+            return  # 防御的: 通常は起こらない(この交渉は pid に関わっていない)
+
+        if other_participant.is_fictional:
+            self._delete_negotiation_events(nid)
+            negotiation_ref.delete()
+        else:
+            self._null_out_side_views(nid, own_side)
+
+    def delete_principal(self, pid: str) -> None:
+        """DELETE /v1/principals/{pid}(§3.8)。各段は冪等。すでに消えていれば成功を返す。
+
+        4 段(deleting にする・未終了の交渉を取消・交渉ごとの後始末・依頼者文書を消す)を
+        順に行う。途中で例外が飛んでも、呼び直せば残りの段から続けられる(各段が冪等なため、
+        すでに終わった段はそのつど no-op になる)。
+        """
+        principal_ref = self._principal_ref(pid)
+        snap = principal_ref.get()
+        if not snap.exists:
+            return  # 冪等: そもそもデータがない(すでに消えている)
+
+        # 1. deleting にする。以後、この依頼者が関わる操作(依頼者を単位にする PUT/GET
+        #    policy・PUT blocklist・本人の交渉一覧・作成、交渉を単位にする moves・control・
+        #    view・events)はすべて拒否される(差し戻し対応 3)。expire だけは例外(システムの
+        #    操作なので)。
+        if not snap.to_dict().get("deleting", False):
+            principal_ref.set({"deleting": True}, merge=True)
+
+        # 2. 関わる交渉のうち、終わっていないものに終了処理(cancelled)を行う。
+        #    control の cancel 分岐は request.side を参照しないので(§3.4)、ここでは
+        #    仮の値を渡す(どちらでも結果は変わらない)。まさに今 deleting にした依頼者自身の
+        #    交渉を取消にする必要があるので、通常の削除中ガードは bypass する。
+        for nid in self._negotiation_ids_for_principal(pid):
+            self.control(nid, ControlRequest(side="candidate", action="cancel"), _bypass_deleting_guard=True)
+
+        # 3. 関わる交渉ごとに、相手を見て後始末する。
+        for nid in self._negotiation_ids_for_principal(pid):
+            self._process_negotiation_for_deletion(pid, nid)
+
+        # 4. 依頼者の文書を消す(ポリシー・外した軸・ブロックリスト・帯・評価予算すべて)。
+        principal_ref.delete()

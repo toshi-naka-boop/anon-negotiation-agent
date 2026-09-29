@@ -39,6 +39,10 @@ VaultMoveKind = Literal["propose", "accept", "reject", "check", "ask_principal",
 # (スキーマ違反、タイムアウト、A2A のエラー)を登録する")。
 RegisteredInvalidReason = Literal["schema_invalid", "agent_timeout"]
 
+# POST .../principal-answer が受け付ける回答(§3.3・§4.4)。「受ける」は受けるアンカー、
+# 「受けない」は受けないアンカーへの追記に対応する。
+PrincipalAnswerKind = Literal["accept", "reject"]
+
 
 class SideCounters(VaultModel):
     """側ごとの回数(§3.1 counters)。両側で共有するものはない。"""
@@ -156,6 +160,7 @@ EventKind = Literal[
     "reject",
     "offer_rejected",
     "ask_principal",
+    "principal_answer",
     "pause",
     "resume",
     "final_result",
@@ -163,13 +168,19 @@ EventKind = Literal[
 
 
 class EventView(VaultModel):
-    """イベント 1 件の、片側だけの見え方(§3.2 の表)。"""
+    """イベント 1 件の、片側だけの見え方(§3.2 の表)。
+
+    answer は principal_answer 専用(§3.2: 「回答と、評価し直した結果」の「回答」の部分。
+    「評価し直した結果」は own_evaluation を使い回す)。reason は無効手の理由専用のまま
+    (意味の異なる値を混在させない)。
+    """
 
     seq: int
     kind: EventKind
     package: Package | None = None
     own_evaluation: Verdict | None = None
     reason: str | None = None
+    answer: PrincipalAnswerKind | None = None
     result: NegotiationResult | None = None
 
 
@@ -199,13 +210,14 @@ class EvaluationBudgetWindow(VaultModel):
 
 
 class PrincipalDocument(VaultModel):
-    """principals/{pid} 文書(§3.8。1b-1 で使うフィールドだけ)。
+    """principals/{pid} 文書(§3.8)。
 
     attribute_bands は候補者側だけで使う(差し戻し対応: 台帳 I-2。求人側の本物の
     依頼者はハッカソンにはいないため、求人側のこの文書には書かれない)。ポリシーと
     一緒に PUT /v1/principals/{pid}/policy で保存し、交渉の作成時はここから読む
     (作成のたびに web から渡させない。交渉ごとに違う帯を渡せると、求人側の
-    帯ごとのルールを探れてしまうため)。
+    帯ごとのルールを探れてしまうため)。deleting は本人の削除(§3.8)の 1 段目で立てる
+    印で、以後この依頼者が関わる principal-answer を拒否する(1b-2)。
     """
 
     policy: Policy | None = None
@@ -213,6 +225,7 @@ class PrincipalDocument(VaultModel):
     blocklist: list[str] = Field(default_factory=list)
     evaluation_budget: EvaluationBudgetWindow | None = None
     attribute_bands: CandidateAttributeBands | None = None
+    deleting: bool = False
 
 
 # --- §3.7 架空人物のテンプレート ---

@@ -1,8 +1,8 @@
-"""DV-09: converting statements into anchors (design.md §2.3, §12.2).
+"""DV-09: converting statements into anchors (design.md §2.3・§4.4, §12.2)。
 
 DV-09 の 1 つ目(§2.3 の例の 2 文が矛盾なく書き込める)と 2 つ目(受けるアンカーの補完は
-最も良い値になる)を確かめる。3 つ目(架空人物への途中確認の回答は交渉用コピーにだけ入り、
-テンプレートを変えない)は vault の状態機械が要る後の段で足す。
+最も良い値になる)、3 つ目(架空人物への途中確認の回答は交渉用コピーにだけ入り、
+テンプレートを変えない)を確かめる。
 """
 
 from negotiation_core.policy import Policy, is_contradictory
@@ -10,6 +10,16 @@ from negotiation_core.statements import PartialStatement, convert_statement_to_a
 from negotiation_core.vocabulary import best_value
 
 from sample_data import design_doc_example_policy
+from vault.api_models import MoveRequest, PrincipalAnswerRequest
+from vault.models import EmployerRule
+from vault.templates import get_template
+from vault_helpers import (
+    accept_all_policy,
+    demo_create_request,
+    needs_confirmation_policy,
+    put_candidate_and_employer_templates,
+    sample_package,
+)
 
 
 def test_design_doc_example_sentences_do_not_contradict():
@@ -94,3 +104,42 @@ def test_reject_anchor_also_fills_unmentioned_numeric_axes_with_best_value():
     assert anchor.salary == best_value("salary", "candidate") == 1500
     assert anchor.remote_days == best_value("remote_days", "candidate") == 5
     assert anchor.review_months == best_value("review_months", "candidate") == 6
+
+
+def test_fictional_candidates_principal_answer_only_enters_the_negotiation_copy(store):
+    # DV-09 (3): 架空人物(デモの候補者)への途中確認の回答は、交渉用コピーにだけ入り、
+    # テンプレートを変えない。
+    candidate_template, employer_template = put_candidate_and_employer_templates(
+        store._db,
+        candidate_policy=needs_confirmation_policy("candidate"),
+        employer_rules=[EmployerRule(when={}, policy=accept_all_policy("employer"))],
+    )
+    template_before = get_template(store._db, candidate_template.template_id)
+
+    result = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id)
+    )
+    assert result.status == "created"
+    nid = result.nid
+    package = sample_package()
+
+    ask_response = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="ask_principal", package=package)
+    )
+    assert ask_response.status == "awaiting_principal"
+
+    answer_response = store.process_principal_answer(
+        nid,
+        PrincipalAnswerRequest(
+            expected_version=ask_response.version, side="candidate", package=package, answer="accept"
+        ),
+    )
+    assert answer_response.status == "active"
+
+    # 交渉用コピーには受けるアンカーが増えている。
+    doc = store._negotiation_ref(nid).get().to_dict()
+    assert len(doc["snapshots"]["candidate"]["accept_anchors"]) == 1
+
+    # テンプレートは変わっていない(交渉用コピーにしか書き込まれない)。
+    template_after = get_template(store._db, candidate_template.template_id)
+    assert template_after == template_before

@@ -1,7 +1,7 @@
-"""FastAPI のリクエスト・レスポンス DTO(design.md §3.3 の API のうち、1b-1 で作る分)。
+"""FastAPI のリクエスト・レスポンス DTO(design.md §3.3 の API のうち、1b-1・1b-2 で作る分)。
 
 内部 HTTP・JSON。呼べるのは web だけという前提(§3.3)なので、認可はここでは行わない
-(§6.3 の対象ごとの権限確認は web 側の仕事。1b-1 の範囲外)。
+(§6.3 の対象ごとの権限確認は web 側の仕事。1b-1・1b-2 の範囲外)。
 """
 
 import datetime as dt
@@ -17,6 +17,7 @@ from vault.models import (
     NegotiationMode,
     NegotiationResult,
     NegotiationStatus,
+    PrincipalAnswerKind,
     RegisteredInvalidReason,
     VaultModel,
     VaultMoveKind,
@@ -117,7 +118,7 @@ class CreateNegotiationRequest(VaultModel):
 
 
 CreationRefusalReason = Literal[
-    "already_active", "budget_exhausted", "blocked", "attribute_bands_missing"
+    "already_active", "budget_exhausted", "blocked", "attribute_bands_missing", "principal_deleting"
 ]
 
 
@@ -156,6 +157,7 @@ class EventViewItem(VaultModel):
     package: Package | None = None
     own_evaluation: str | None = None
     reason: str | None = None
+    answer: PrincipalAnswerKind | None = None
     result: NegotiationResult | None = None
 
 
@@ -188,6 +190,28 @@ class MoveResponse(VaultModel):
     status: NegotiationStatus
     valid: bool
     error: str | None = None
+    end_reason: str | None = None
+
+
+# --- POST .../principal-answer ---
+
+
+class PrincipalAnswerRequest(VaultModel):
+    """POST /v1/negotiations/{nid}/principal-answer(§3.3・§4.4)。
+
+    pending_question と一致するとき(status・side・package のすべて)だけ受け付ける
+    (手の操作と同じ扱いで、不一致は 409。store.process_principal_answer を参照)。
+    """
+
+    expected_version: int = Field(ge=0)
+    side: Side
+    package: Package
+    answer: PrincipalAnswerKind
+
+
+class PrincipalAnswerResponse(VaultModel):
+    version: int
+    status: NegotiationStatus
     end_reason: str | None = None
 
 
@@ -255,6 +279,8 @@ __all__ = [
     "OpenNegotiationSummary",
     "OpenNegotiationsPage",
     "PolicyView",
+    "PrincipalAnswerRequest",
+    "PrincipalAnswerResponse",
     "PrincipalNegotiationSummary",
     "PutBlocklistRequest",
     "PutPolicyRequest",

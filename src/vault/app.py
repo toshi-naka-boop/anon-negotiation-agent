@@ -21,6 +21,8 @@ from vault.api_models import (
     NegotiationViewResponse,
     OpenNegotiationsPage,
     PolicyView,
+    PrincipalAnswerRequest,
+    PrincipalAnswerResponse,
     PrincipalNegotiationSummary,
     PutBlocklistRequest,
     PutPolicyRequest,
@@ -29,6 +31,7 @@ from vault.errors import (
     MovePreconditionFailed,
     NotFoundError,
     PolicyValidationError,
+    PrincipalDeletingError,
     TransactionRetryExhausted,
 )
 from vault.store import VaultStore
@@ -46,6 +49,10 @@ def create_app(store: VaultStore) -> FastAPI:
 
     @app.exception_handler(MovePreconditionFailed)
     async def _precondition_failed(request: Request, exc: MovePreconditionFailed) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(PrincipalDeletingError)
+    async def _principal_deleting(request: Request, exc: PrincipalDeletingError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(PolicyValidationError)
@@ -73,6 +80,12 @@ def create_app(store: VaultStore) -> FastAPI:
     @app.put("/v1/principals/{pid}/blocklist", status_code=204)
     def put_blocklist(pid: str, body: PutBlocklistRequest) -> None:
         store.put_blocklist(pid, body)
+
+    # --- §3.3・§3.8: DELETE 本人のデータを消す(冪等。すでに消えていても成功) ---
+
+    @app.delete("/v1/principals/{pid}", status_code=204)
+    def delete_principal(pid: str) -> None:
+        store.delete_principal(pid)
 
     # --- §3.3: 本人の交渉一覧 ---
 
@@ -102,11 +115,15 @@ def create_app(store: VaultStore) -> FastAPI:
     def get_events(nid: str, side: Side, after_seq: int = Query(default=0, ge=0)) -> list[EventViewItem]:
         return store.get_events(nid, side, after_seq)
 
-    # --- §3.3: moves・control・expire ---
+    # --- §3.3: moves・principal-answer・control・expire ---
 
     @app.post("/v1/negotiations/{nid}/moves", response_model=MoveResponse)
     def post_move(nid: str, body: MoveRequest) -> MoveResponse:
         return store.process_move(nid, body)
+
+    @app.post("/v1/negotiations/{nid}/principal-answer", response_model=PrincipalAnswerResponse)
+    def post_principal_answer(nid: str, body: PrincipalAnswerRequest) -> PrincipalAnswerResponse:
+        return store.process_principal_answer(nid, body)
 
     @app.post("/v1/negotiations/{nid}/control", response_model=ControlResponse)
     def post_control(nid: str, body: ControlRequest) -> ControlResponse:
