@@ -12,13 +12,14 @@
   "openIssueIds": [
     "I-1",
     "I-2",
-    "I-3"
+    "I-3",
+    "I-4"
   ],
   "requiredReads": [
     "design.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v10 はユーザー本人がこのセッションで承認済み（前提 P-1〜P-6 も確定）。委譲先は sonnet サブエージェント。baseline は main@efc6079、実装は feat/phase1-core ブランチ。① を 4 段に分けた: 1a negotiation_core（完了。コミット 9c559c5。呼び出し側が pytest 214 件の合格と条件タグを確認。1 回差し戻し）→ 1b vault（2 回に分けて委譲。1b-1 は完了（2026-09-29、呼び出し側が pytest 278 件の合格を確認。1 回差し戻し: 無効な check の手数、競合で再試行が尽きたときの 409/503、属性帯の金庫への保存（I-2）、条件の印。コミットはユーザーの承認待ち）。1b-2 は principal-answer と削除）→ 1c agents の受信口と検証 → 1d web（レフェリー骨格・見回り・依頼者セッション・利用記録・削除）。Firestore エミュレータは、gcloud を通さず（~/.config/gcloud に触れないため）JDK 21 で jar を直接起動する: java=/opt/homebrew/opt/openjdk@21/bin/java、jar=/opt/homebrew/share/google-cloud-sdk/platform/cloud-firestore-emulator/cloud-firestore-emulator.jar、`java -Duser.language=en -cp <jar> com.google.cloud.datastore.emulator.firestore.CloudFirestore start --host=127.0.0.1 --port=<port>`。各段の後に呼び出し側が pytest を実行し、条件タグ（# AC-xx 等）で網羅を確かめる。① を通したら反証（3 レンズ）。ユーザーの判断: itsdangerous は設計どおり使う（2026-09-28）。httpx を開発用に足してよい（FastAPI の TestClient 用。2026-09-29）。I-1 は面談を作る段で、ほかの実装時の気づきとまとめて設計書を直し、承認し直す（2026-09-29）。 I-2（属性帯は金庫に保存）と I-3（1 日の予算は固定の窓）もユーザーの判断で決定済み（2026-09-29）。設計書の文面の直しは I-1 とまとめて面談の段で承認し直す。",
+  "nextAction": "v10 はユーザー本人がこのセッションで承認済み（前提 P-1〜P-6 も確定）。委譲先は sonnet サブエージェント。baseline は main@efc6079、実装は feat/phase1-core ブランチ。① を 4 段に分けた: 1a negotiation_core（完了。コミット 9c559c5。呼び出し側が pytest 214 件の合格と条件タグを確認。1 回差し戻し）→ 1b vault（2 回に分けて委譲。1b-1 は完了（2026-09-29、呼び出し側が pytest 278 件の合格を確認。1 回差し戻し: 無効な check の手数、競合で再試行が尽きたときの 409/503、属性帯の金庫への保存（I-2）、条件の印。コミットはユーザーの承認待ち）。1b-2 は principal-answer と削除。完了（2026-09-29、呼び出し側が pytest 307 件の合格を確認。1 回差し戻し: 削除中の依頼者の操作の拒否を全操作に広げた。残った競合は I-4 として 1d で閉じる。コミットはユーザーの承認待ち））→ 1c agents の受信口と検証 → 1d web（レフェリー骨格・見回り・依頼者セッション・利用記録・削除）。Firestore エミュレータは、gcloud を通さず（~/.config/gcloud に触れないため）JDK 21 で jar を直接起動する: java=/opt/homebrew/opt/openjdk@21/bin/java、jar=/opt/homebrew/share/google-cloud-sdk/platform/cloud-firestore-emulator/cloud-firestore-emulator.jar、`java -Duser.language=en -cp <jar> com.google.cloud.datastore.emulator.firestore.CloudFirestore start --host=127.0.0.1 --port=<port>`。各段の後に呼び出し側が pytest を実行し、条件タグ（# AC-xx 等）で網羅を確かめる。① を通したら反証（3 レンズ）。ユーザーの判断: itsdangerous は設計どおり使う（2026-09-28）。httpx を開発用に足してよい（FastAPI の TestClient 用。2026-09-29）。I-1 は面談を作る段で、ほかの実装時の気づきとまとめて設計書を直し、承認し直す（2026-09-29）。 I-2（属性帯は金庫に保存）と I-3（1 日の予算は固定の窓）もユーザーの判断で決定済み（2026-09-29）。設計書の文面の直しは I-1 とまとめて面談の段で承認し直す。",
   "lastUpdated": "2026-09-29",
   "delegation": {
     "批評": "claude/design-critic(opus) + codex exec (gpt-5.6-sol, xhigh)",
