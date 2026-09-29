@@ -10,7 +10,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from negotiation_core import CandidateAttributeBands, EvaluatedPackage, Package, Policy, Side, Verdict
+from negotiation_core import (
+    CandidateAttributeBands,
+    EvaluatedPackage,
+    JobCategoryInfo,
+    Package,
+    Policy,
+    Side,
+    Verdict,
+)
 
 
 class VaultModel(BaseModel):
@@ -96,12 +104,24 @@ class NegotiationResult(VaultModel):
     package: Package | None = None
 
 
+def default_job_category_info() -> JobCategoryInfo:
+    """公開求人の区分情報の既定値(職種「その他」)。
+
+    テンプレート(U-09 のフィクスチャ)が区分情報を持たないときと、テンプレートを経由せずに
+    手で書いた交渉文書の読み出しで使う。design.md §2.7 は「公開求人の区分情報」の中身を決めて
+    いないので、negotiation_core.JobCategoryInfo(職種だけ)の最も無難な値を置く。
+    """
+    return JobCategoryInfo(job_category="other")
+
+
 class Participant(VaultModel):
     """§3.1 participants の側ごとの 1 エントリ。
 
     is_fictional=False なら principal_id、True なら template_id を持つ。
-    attribute_bands は候補者側だけ、job_id・company_id は求人側だけで使う
+    attribute_bands は候補者側だけ、job_id・company_id・job_category_info は求人側だけで使う
     (§3.7 の最終行により、1b-1 の範囲では求人側は常にテンプレート由来)。
+    job_category_info は TurnInput.counterparty(候補者側への入力)の元で、交渉の作成時に
+    テンプレートから写す(job_id と同じ扱い。1d-1 で追加)。
     """
 
     is_fictional: bool
@@ -110,6 +130,7 @@ class Participant(VaultModel):
     attribute_bands: CandidateAttributeBands | None = None
     job_id: str | None = None
     company_id: str | None = None
+    job_category_info: JobCategoryInfo | None = None
 
 
 class Participants(VaultModel):
@@ -254,13 +275,18 @@ class CandidateTemplate(VaultModel):
 
 
 class EmployerTemplate(VaultModel):
-    """架空の求人(フィクスチャの求人)のテンプレート(§3.7)。"""
+    """架空の求人(フィクスチャの求人)のテンプレート(§3.7)。
+
+    job_category_info は公開求人の区分情報(§2.7 の TurnInput.counterparty)。フィクスチャ(U-09)が
+    決まるまでは既定値(職種「その他」)にする(1d-1 で追加)。
+    """
 
     template_id: str
     side: Literal["employer"] = "employer"
     company_id: str
     job_id: str
     rules: list[EmployerRule] = Field(default_factory=list)
+    job_category_info: JobCategoryInfo = Field(default_factory=default_job_category_info)
 
 
 Template = CandidateTemplate | EmployerTemplate

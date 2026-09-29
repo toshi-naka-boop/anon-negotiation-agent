@@ -1,0 +1,141 @@
+"""web の金庫クライアント(design.md §3.3・§4.1)。
+
+前半は httpx.MockTransport で、HTTP の失敗を例外に変換する規則とページ送りを確かめる
+(金庫を動かさない)。後半は本物の金庫の app を ASGI のままつないで、見回りの一覧に
+mode と candidate_principal_id が載ることを確かめる(1d-1 で金庫の一覧に足した項目)。
+"""
+
+import datetime as dt
+import json
+
+import httpx
+import pytest
+from vault.api_models import ControlRequest, MoveRequest
+from vault_helpers import sample_package
+from web.vault_client import (
+    VaultClient,
+    VaultClientError,
+    VaultConflictError,
+    VaultNotFoundError,
+    VaultUnavailableError,
+)
+from web_helpers import create_demo_negotiation, create_live_negotiation
+
+
+def _client(handler) -> VaultClient:
+    return VaultClient(httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://vault"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (404, VaultNotFoundError),
+        (409, VaultConflictError),
+        (503, VaultUnavailableError),
+        (500, VaultClientError),
+        (422, VaultClientError),
+    ],
+)
+async def test_http_failures_become_typed_client_errors(status, error_type):
+    # 金庫の応答を、409(状態を読み直す)・503(あとで呼び直す)・404(交渉が消えた)に区別できる例外にする。
+    client = _client(lambda request: httpx.Response(status, json={"detail": "reason from the vault"}))
+
+    with pytest.raises(VaultClientError) as excinfo:
+        await client.expire("0123456789abcdef")
+
+    assert type(excinfo.value) is error_type
+    assert excinfo.value.status_code == status
+    assert "reason from the vault" in str(excinfo.value)
+
+
+@pytest.mark.anyio
+async def test_a_transport_failure_is_reported_as_unavailable():
+    # 通信そのものの失敗(接続できないなど)は、503 と同じ「あとで呼び直す」失敗として扱う。
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    client = _client(handler)
+    with pytest.raises(VaultUnavailableError):
+        await client.get_view("0123456789abcdef", "candidate")
+
+
+@pytest.mark.anyio
+async def test_list_open_negotiations_follows_the_cursor_until_the_last_page():
+    # 見回りの一覧(open=true)は、next_cursor がなくなるまで全ページを集める。
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc).isoformat()
+
+    def item(nid: str) -> dict:
+        return {
+            "nid": nid,
+            "status": "active",
+            "paused": False,
+            "deadline": now,
+            "expires_at": now,
+            "mode": "demo",
+            "candidate_principal_id": None,
+        }
+
+    seen_cursors: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["open"] == "true"
+        cursor = request.url.params.get("cursor")
+        seen_cursors.append(cursor)
+        if cursor is None:
+            return httpx.Response(200, json={"items": [item("aaaa"), item("bbbb")], "next_cursor": "bbbb"})
+        assert cursor == "bbbb"
+        return httpx.Response(200, json={"items": [item("cccc")], "next_cursor": None})
+
+    items = await _client(handler).list_open_negotiations()
+
+    assert [i.nid for i in items] == ["aaaa", "bbbb", "cccc"]
+    assert seen_cursors == [None, "bbbb"]
+
+
+@pytest.mark.anyio
+async def test_request_bodies_omit_unset_fields():
+    # accept・end のように package を持たない手は、package・reason を null で送らず、項目ごと省く。
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"version": 1, "status": "active", "valid": True})
+
+    client = _client(handler)
+    await client.post_move("0123456789abcdef", MoveRequest(expected_version=0, side="employer", move="accept"))
+    await client.post_move(
+        "0123456789abcdef",
+        MoveRequest(expected_version=1, side="candidate", move="propose", package=sample_package()),
+    )
+
+    assert bodies[0] == {"expected_version": 0, "side": "employer", "move": "accept"}
+    assert bodies[1]["package"]["salary"] == 700
+    assert "reason" not in bodies[1]
+
+
+@pytest.mark.anyio
+async def test_the_open_list_carries_mode_and_the_real_candidates_principal_id(store, vault_client):
+    # 見回りがタスクと stages/{nid}(本物の候補者の依頼者 ID を持つ。§6.2)を作り直せるように、
+    # 金庫の一覧に mode と candidate_principal_id が載る(候補者が架空人物なら None)。
+    demo_nid = create_demo_negotiation(store, mode="attack")
+    live_nid, pid = create_live_negotiation(store)
+
+    items = {item.nid: item for item in await vault_client.list_open_negotiations()}
+
+    assert items[demo_nid].mode == "attack"
+    assert items[demo_nid].candidate_principal_id is None
+    assert items[live_nid].mode == "live"
+    assert items[live_nid].candidate_principal_id == pid
+    assert items[live_nid].status == "active"
+
+
+@pytest.mark.anyio
+async def test_finished_negotiations_leave_the_open_list(store, vault_client):
+    # 見回りの一覧は judged でない交渉だけを返す(取消の後は載らない)。
+    nid = create_demo_negotiation(store)
+    assert [i.nid for i in await vault_client.list_open_negotiations()] == [nid]
+
+    await vault_client.control(nid, ControlRequest(side="candidate", action="cancel"))
+
+    assert await vault_client.list_open_negotiations() == []

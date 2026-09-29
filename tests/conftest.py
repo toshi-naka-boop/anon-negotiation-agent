@@ -12,6 +12,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -22,6 +23,7 @@ from vault.app import create_app
 from vault.clock import FixedClock
 from vault.config import DEFAULT_VAULT_CONFIG
 from vault.store import VaultStore
+from web.vault_client import VaultClient
 
 _JAVA_BIN = "/opt/homebrew/opt/openjdk@21/bin/java"
 _EMULATOR_JAR = (
@@ -32,6 +34,7 @@ _STARTUP_TIMEOUT_SECONDS = 30
 
 PROJECT_ID = "demo-vault-test"
 DATABASE_ID = "vault-db"
+DEFAULT_DATABASE_ID = "(default)"  # web 用(design.md §1.1)
 
 
 def _find_free_port() -> int:
@@ -115,6 +118,25 @@ def firestore_client(firestore_emulator_host: str) -> firestore.Client:
     client.close()
 
 
+@pytest.fixture(scope="session")
+def default_firestore_client(firestore_emulator_host: str) -> firestore.Client:
+    """(default) への Firestore クライアント(web 用。セッションで使い回す)。"""
+    client = firestore.Client(project=PROJECT_ID, database=DEFAULT_DATABASE_ID)
+    yield client
+    client.close()
+
+
+@pytest.fixture
+def default_db(default_firestore_client: firestore.Client, firestore_emulator_host: str) -> firestore.Client:
+    """(default) の全文書を消してから返す(web のテスト用。使うテストだけが消す)。"""
+    url = (
+        f"http://{firestore_emulator_host}/emulator/v1/projects/{PROJECT_ID}"
+        f"/databases/{DEFAULT_DATABASE_ID}/documents"
+    )
+    httpx.delete(url, timeout=10)
+    return default_firestore_client
+
+
 @pytest.fixture(autouse=True)
 def _clear_firestore_data(firestore_emulator_host: str) -> None:
     """テストごとに vault-db の全文書を消し、互いに影響しないようにする。"""
@@ -139,3 +161,27 @@ def store(firestore_client: firestore.Client, clock: FixedClock) -> VaultStore:
 @pytest.fixture
 def api_client(store: VaultStore) -> TestClient:
     return TestClient(create_app(store))
+
+
+@pytest.fixture(scope="module")
+def anyio_backend() -> str:
+    """非同期テスト(pytest.mark.anyio。anyio の pytest プラグインを使う)は asyncio だけで動かす。"""
+    return "asyncio"
+
+
+@pytest.fixture
+async def vault_client(store: VaultStore) -> AsyncIterator[VaultClient]:
+    """金庫の app を ASGI のまま(ネットワークを通さず)つないだ、web の金庫クライアント。"""
+    transport = httpx.ASGITransport(app=create_app(store))
+    async with httpx.AsyncClient(transport=transport, base_url="http://vault") as http:
+        yield VaultClient(http)
+
+
+@pytest.fixture
+async def web_env(store: VaultStore, clock: FixedClock, vault_client: VaultClient, default_db: firestore.Client):
+    """web 一式(レフェリー・見回り・段階開示の状態)。終わったら、動いているタスクを止める。"""
+    from web_helpers import make_web_env  # conftest の import 時に tests/ の部品を読み込まないよう、ここで読む
+
+    env = make_web_env(store, clock, vault_client, default_db)
+    yield env
+    await env.manager.stop_all()

@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
     "google-cloud-firestore>=2.32.0",
+    "httpx>=0.28.1",
     "pydantic>=2.13.5",
 ]
 
@@ -16,6 +17,5 @@ pythonpath = ["src"]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
