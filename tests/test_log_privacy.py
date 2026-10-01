@@ -7,7 +7,9 @@ ID が入っていると、交渉の時刻・失敗の理由・側を、ID か�
 - 主要な経路のログ(動かして、caplog で確かめる): レフェリーのエージェント失敗・タスクの異常終了、見回りの失敗、
   削除の流れの失敗、セッションの更新の失敗。確かめるログが実際に出ていること(空だから通るのではないこと)も確かめる。
 - uvicorn のアクセスログ(URL に ID が入る): 本番の起動口(create_app_from_env)を通すと ID が伏せられる。本物の
-  uvicorn のサーバで確かめる(対照として、起動口を通さなければ ID が出る)。
+  uvicorn のサーバで確かめる(対照として、起動口を通さなければ ID が出る)。web の起動口と、vault の起動口の両方で確かめる
+  (台帳 X-40 の残り)。ID を伏せる処理は、web と vault で共通の 1 か所(negotiation_core.log_privacy)にあり、vault は web に
+  依存しない。
 """
 
 import ast
@@ -21,8 +23,12 @@ import pytest
 import uvicorn
 from uvicorn.logging import AccessFormatter
 
+import negotiation_core.log_privacy as log_privacy_module
+import vault.app as vault_app_module
 import web.app as web_app_module
 from vault.api_models import ControlRequest
+from vault.app import create_app as create_vault_app
+from vault.app import create_app_from_env as create_vault_app_from_env
 from vault_helpers import accept_all_policy, sample_package
 from web.app import create_app, create_app_from_env, mask_ids_in_logs
 from web.referee import NegotiationContext, RefereeManager
@@ -417,3 +423,80 @@ async def test_a_real_uvicorn_server_logs_the_ids_unless_started_through_the_pro
     lines = await _serve_and_request(app, [f"/v1/principals/{_PID}/negotiations"])
 
     assert lines == [f"GET /v1/principals/{_PID}/negotiations HTTP/1.1 -> 401 Unauthorized"]
+
+
+# --- 金庫の uvicorn のアクセスログ(台帳 X-40 の残り) ---
+
+
+def _vault_production_app(firestore_client, monkeypatch):
+    """金庫の本番の起動口で作った app(Firestore のクライアントだけ、エミュレータの vault-db のものに差し替える)。"""
+    monkeypatch.setattr(vault_app_module, "_create_vault_db", lambda: firestore_client)
+    return create_vault_app_from_env()
+
+
+@pytest.mark.anyio
+async def test_a_real_uvicorn_server_started_through_the_vault_production_entry_point_logs_no_ids(
+    firestore_client, monkeypatch
+):
+    # X-40: 金庫の本番の起動口(create_app_from_env)で作った app を、本物の uvicorn のサーバで動かすと、アクセスログの URL に、
+    # 依頼者 ID・交渉 ID が出ない(エンドポイント・クエリ・ステータスは残る)。app は動いている(Firestore を読んだ応答が返る)。
+    app = _vault_production_app(firestore_client, monkeypatch)
+
+    lines = await _serve_and_request(
+        app,
+        [
+            f"/v1/principals/{_PID}/negotiations",
+            f"/v1/negotiations/{_NID}/events?side=candidate&after_seq=3",
+            f"/v1/demo/negotiations/{_NID}/events?side=employer",
+            f"/v1/principals/{_PID}/policy",
+        ],
+    )
+
+    assert lines == [
+        "GET /v1/principals/<id>/negotiations HTTP/1.1 -> 200 OK",
+        "GET /v1/negotiations/<id>/events?side=candidate&after_seq=3 HTTP/1.1 -> 404 Not Found",
+        "GET /v1/demo/negotiations/<id>/events?side=employer HTTP/1.1 -> 404 Not Found",
+        "GET /v1/principals/<id>/policy HTTP/1.1 -> 404 Not Found",
+    ]
+    assert all(_PID not in line and _NID not in line for line in lines)
+
+
+@pytest.mark.anyio
+async def test_a_real_uvicorn_server_logs_the_vault_ids_unless_started_through_the_production_entry_point(store):
+    # 対照(X-40): 起動口を通さずに(create_app で直接)作った金庫の app は、アクセスログの URL に ID をそのまま書く。
+    # 上の確認が、何も書かないサーバで通っているのではないことを示す。
+    lines = await _serve_and_request(
+        create_vault_app(store), [f"/v1/principals/{_PID}/negotiations", f"/v1/negotiations/{_NID}/view?side=candidate"]
+    )
+
+    assert lines == [
+        f"GET /v1/principals/{_PID}/negotiations HTTP/1.1 -> 200 OK",
+        f"GET /v1/negotiations/{_NID}/view?side=candidate HTTP/1.1 -> 404 Not Found",
+    ]
+
+
+def test_the_vault_production_entry_point_uses_the_vault_database_not_the_default_one(firestore_emulator_host):
+    # §1.1: 金庫は専用のデータベース vault-db を使う((default) は web 用)。本番の Firestore のクライアントの作り方が、
+    # vault-db を指していること(エミュレータの環境では、接続せずに作れる)。
+    client = vault_app_module._create_vault_db()
+    try:
+        assert client._database == "vault-db"
+    finally:
+        client.close()
+
+
+def test_the_web_and_the_vault_share_one_masking_function_and_the_vault_does_not_depend_on_the_web():
+    # X-40: ID を伏せる処理は、web と vault で共通の 1 か所(negotiation_core)にある。vault は web に依存しない
+    # (src/vault のどのファイルも、web を import しない)。
+    assert web_app_module.mask_ids_in_logs is vault_app_module.mask_ids_in_logs is log_privacy_module.mask_ids_in_logs
+    imported_from_the_web = []
+    for path in sorted((_SRC / "vault").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                modules = [node.module or ""]
+            else:
+                continue
+            imported_from_the_web += [(path.name, name) for name in modules if name == "web" or name.startswith("web.")]
+    assert imported_from_the_web == []

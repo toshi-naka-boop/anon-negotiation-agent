@@ -2,21 +2,26 @@
 
 呼ぶエージェントの種類(candidate・employer・attacker)、登録する手の中身、409 で状態を読み直すこと、
 待つ場面(一時停止・回答待ち・金庫が応えない・金庫の 500 などのエラー。台帳 L9-1)、交渉が消えたときの終わり方、
-手数を使い切った側の手番ではエージェントを呼ばないこと(台帳 L9-3)を確かめる。
+手数を使い切った側の手番ではエージェントを呼ばないこと(台帳 L9-3)、金庫が送り直しても直らないエラー(404・409 以外の 4xx)を
+返し続けたときは、見回りの間隔まで待ってからエージェントを呼び直すこと(台帳 L10-1)を確かめる。
 再試行・無効手の登録は tests/test_invalid_move_recovery.py、途中確認の回答は
 tests/test_answer_reevaluation.py、再開・見回りは tests/test_referee_resume.py にある。
 """
 
 import asyncio
+import datetime as dt
 
 import pytest
 from negotiation_core import AttackerTurnInput, TurnInput
 from vault.api_models import ControlRequest
+from vault.config import DEFAULT_VAULT_CONFIG
 from vault.models import EmployerRule
 from vault_helpers import needs_confirmation_policy, sample_package
+from web.config import DEFAULT_WEB_CONFIG
 from web.referee import NegotiationContext, RefereeManager, StepOutcome
 from web.vault_client import VaultClientError, VaultConflictError, VaultNotFoundError, VaultUnavailableError
 from web_helpers import (
+    FakeSleep,
     ScriptedAnswerer,
     create_demo_negotiation,
     create_live_negotiation,
@@ -334,6 +339,106 @@ async def test_the_run_loop_and_the_task_survive_a_vault_500_and_finish_the_nego
     assert task.exception() is None  # 例外で終わっていない
     assert env.sleep.calls == [env.config.wait_poll_interval_seconds]  # 500 の後に 1 回だけ待った
     assert store.get_view(nid, "candidate").status == "judged"
+
+
+class _AlwaysFailing:
+    """金庫のクライアントを包み、method を呼ぶたびに error を投げる(金庫が同じエラーを返し続ける場面の再現)。"""
+
+    def __init__(self, inner, method: str, error: VaultClientError) -> None:
+        self._inner = inner
+        self._method = method
+        self._error = error
+
+    def __getattr__(self, name: str):
+        if name != self._method:
+            return getattr(self._inner, name)
+
+        async def call(*args, **kwargs):
+            raise self._error
+
+        return call
+
+
+# 送り直しても直らないエラー(404・409 以外の 4xx)と、これまでどおりのもの(5xx・503)。待つ時間は、見回りの間隔と、読み直しの間隔。
+_SWEEP_INTERVAL = DEFAULT_WEB_CONFIG.sweeper.interval_seconds
+_POLL_INTERVAL = DEFAULT_WEB_CONFIG.referee.wait_poll_interval_seconds
+_VAULT_ERRORS_AND_WAITS = [
+    pytest.param(VaultClientError("vault returned 422: boom", 422), _SWEEP_INTERVAL, id="422"),
+    pytest.param(VaultClientError("vault returned 400: boom", 400), _SWEEP_INTERVAL, id="400"),
+    pytest.param(VaultClientError("vault returned 401: boom", 401), _SWEEP_INTERVAL, id="401"),
+    pytest.param(VaultClientError("vault returned 403: boom", 403), _SWEEP_INTERVAL, id="403"),
+    pytest.param(VaultClientError("vault returned 429: boom", 429), _SWEEP_INTERVAL, id="429"),
+    pytest.param(VaultClientError("vault returned 500: boom", 500), _POLL_INTERVAL, id="500"),
+    pytest.param(VaultClientError("vault returned 502: boom", 502), _POLL_INTERVAL, id="502"),
+    pytest.param(VaultUnavailableError("vault returned 503: down", 503), _POLL_INTERVAL, id="503"),
+]
+
+
+def test_the_wait_after_a_vault_4xx_is_the_sweep_interval():
+    # 台帳 L10-1: 送り直しても直らないエラーの後の待ちは、見回りの間隔(暫定 60 秒)。読み直しの間隔(暫定 2 秒)ではない。
+    assert (_SWEEP_INTERVAL, _POLL_INTERVAL) == (60, 2)
+    assert DEFAULT_WEB_CONFIG.referee.client_error_wait_seconds == DEFAULT_WEB_CONFIG.sweeper.interval_seconds
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("error", "expected_wait"), _VAULT_ERRORS_AND_WAITS)
+async def test_the_agent_is_not_called_again_until_the_wait_after_a_vault_error_has_passed(
+    store, web_env, error, expected_wait
+):
+    # 台帳 L10-1: 金庫が、手の登録(post_move)で、同じエラーを返し続ける。読み直すたびに、エージェント(LLM)を呼んでから登録するので、
+    # 待ち時間が短いと、LLM を呼び直し続ける。404・409 以外の 4xx(422 など)の後は、見回りの間隔(60 秒)待つまで、エージェントを
+    # 呼ばない。5xx・503 の後は、これまでどおり、読み直しの間隔(2 秒)。待ち時間は、止めた sleep(FakeSleep.blocking)で確かめる。
+    env = web_env
+    nid = create_demo_negotiation(store)
+    await env.restart(vault=_AlwaysFailing(env.vault, "post_move", error))
+    env.sleep.blocking = True
+    env.agents.script("candidate", *[move_dict("propose", sample_package())] * 3)
+    run = asyncio.create_task(env.referee(nid).run())
+    try:
+        await env.sleep.wait_for_calls(1)
+        for _ in range(20):  # 待っている間は、エージェントを呼ばない(待ち時間が過ぎるまで、何も起きない)
+            await asyncio.sleep(0)
+        assert env.sleep.calls == [expected_wait]
+        assert len(env.agents.calls) == 1  # 登録に失敗するまでに、エージェントを 1 回だけ呼んだ
+
+        env.sleep.tick()  # 待ち時間が過ぎた
+        await env.sleep.wait_for_calls(2)
+        assert env.sleep.calls == [expected_wait, expected_wait]
+        assert len(env.agents.calls) == 2  # 過ぎてから、次の 1 回を呼んだ
+    finally:
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+
+class _StopTheTest(BaseException):
+    """テストが、run() のループを止めるための合図(レフェリーの「約束にない例外は無効手にする」処理に飲み込まれないよう BaseException)。"""
+
+
+@pytest.mark.anyio
+async def test_a_vault_422_that_never_goes_away_costs_one_agent_call_per_sweep_interval(store, web_env):
+    # 台帳 L10-1: 金庫が 422 を返し続けても、手番の期限(5 分)で終わるまでの間に、エージェント(LLM)を呼ぶのは、見回りの間隔(60 秒)
+    # ごとに 1 回(5 回)。2 秒ごとに呼び直していたときは、同じ 5 分で約 150 回だった。時計は、待った秒数だけ進める。
+    env = web_env
+    nid = create_demo_negotiation(store)
+    await env.restart(vault=_AlwaysFailing(env.vault, "post_move", VaultClientError("vault returned 422: boom", 422)))
+    sleep = FakeSleep(env.clock, advance=True)
+    env.configure(sleep=sleep)
+    started = env.clock.now()
+    deadline = dt.timedelta(seconds=DEFAULT_VAULT_CONFIG.deadlines.move_deadline_seconds)  # 手番の期限(暫定 5 分)
+
+    def stop_when_the_move_deadline_has_passed(fake_sleep) -> None:
+        if env.clock.now() - started >= deadline:
+            raise _StopTheTest
+
+    sleep.hook = stop_when_the_move_deadline_has_passed
+    env.agents.script("candidate", *[move_dict("propose", sample_package())] * 200)
+
+    with pytest.raises(_StopTheTest):
+        await env.referee(nid).run()
+
+    calls_within_the_deadline = int(deadline.total_seconds() // _SWEEP_INTERVAL)  # 300 秒 ÷ 60 秒 = 5 回
+    assert sleep.calls == [_SWEEP_INTERVAL] * calls_within_the_deadline
+    assert len(env.agents.calls) == calls_within_the_deadline == 5
 
 
 def _vault_whose_view_fails_with(real_vault, error: VaultClientError):

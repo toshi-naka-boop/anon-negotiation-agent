@@ -312,10 +312,12 @@ async def test_an_internal_error_response_without_the_transient_mark_raises_valu
 
 @pytest.mark.parametrize("role", ["candidate", "employer"])
 async def test_attacker_input_rejected_by_the_other_endpoints_raises_value_error(role, recorded, stub_llm):
-    # §4.3・DV-04 (AttackerTurnInput を候補者側・求人側の受信口へ送ると、拒否されて ValueError。理由が分かる)
-    with pytest.raises(ValueError, match="principal_instruction") as exc_info:
+    # §4.3・DV-04 (AttackerTurnInput を候補者側・求人側の受信口へ送ると、拒否されて ValueError。理由が分かる:
+    # 余分な項目があるという種類と件数。項目の名前は、送り手が作れる値なので、エラーに載せない。台帳 X-43)
+    with pytest.raises(ValueError, match=r"<unknown>: extra_forbidden \(count=1\)") as exc_info:
         await send_turn(BASE_URL, role, turn_input_for("attacker"), nid=NID, timeout_s=5)
     assert type(exc_info.value) is ValueError
+    assert "principal_instruction" not in str(exc_info.value)
     assert stub_llm.requests == []
 
 

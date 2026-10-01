@@ -26,6 +26,9 @@ class RefereeConfig:
     agent_max_retries: int
     agent_retry_backoff_seconds: tuple[float, ...]
     wait_poll_interval_seconds: float
+    # 金庫が、送り直しても直らないエラー(404・409 以外の 4xx)を返した後に、次に試すまで待つ時間。見回りの間隔と同じ
+    # ([web.sweeper] interval_seconds から作る。台帳 L10-1)。
+    client_error_wait_seconds: float
 
 
 @dataclass(frozen=True)
@@ -100,14 +103,15 @@ def load_web_config(path: Path = _CONFIG_PATH) -> WebConfig:
     if web_raw is None:
         raise ValueError(f"{path} is missing the [web] section")
     try:
+        sweeper = SweeperConfig(interval_seconds=float(web_raw["sweeper"]["interval_seconds"]))
         referee_raw = web_raw["referee"]
         referee = RefereeConfig(
             agent_call_timeout_seconds=float(referee_raw["agent_call_timeout_seconds"]),
             agent_max_retries=int(referee_raw["agent_max_retries"]),
             agent_retry_backoff_seconds=tuple(float(v) for v in referee_raw["agent_retry_backoff_seconds"]),
             wait_poll_interval_seconds=float(referee_raw["wait_poll_interval_seconds"]),
+            client_error_wait_seconds=sweeper.interval_seconds,
         )
-        sweeper = SweeperConfig(interval_seconds=float(web_raw["sweeper"]["interval_seconds"]))
         session = SessionConfig(cookie_max_age_seconds=int(web_raw["session"]["cookie_max_age_seconds"]))
         principals = PrincipalsConfig(
             touch_interval_seconds=int(web_raw["principals"]["touch_interval_seconds"]),

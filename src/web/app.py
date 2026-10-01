@@ -10,16 +10,15 @@
   `Authorization: Bearer` で付ける(web.service_auth)。環境変数 SERVICE_AUTH_ENABLED=false で切る(ローカル・テスト)。
 - 署名の鍵は環境変数 SESSION_SIGNING_KEY から読む。コードに鍵を書かず、既定値も持たない。鍵がなければ
   起動を拒否する(MissingSessionKeyError)。base64url として読めて 32 バイト以上でなければ、これも起動を拒否する
-  (WeakSessionKeyError。台帳 X-39)。create_app_from_env・create_app のどちらでも同じ。
+  (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
+  乱数でない鍵)でも拒否する。create_app_from_env・create_app のどちらでも同じ。
 - ログに ID を残さない(§3.8。台帳 X-40)。本番の起動口(create_app_from_env)が、uvicorn のアクセスログの URL の ID を
-  伏せる(mask_ids_in_logs)。
+  伏せる(mask_ids_in_logs。vault の起動口と共通の処理で、negotiation_core.log_privacy にある)。
 """
 
 import asyncio
 import functools
-import logging
 import os
-import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
@@ -31,6 +30,7 @@ from google.cloud import firestore
 
 from agents.client import send_turn as agents_send_turn
 from agents.config import DEFAULT_AGENTS_CONFIG
+from negotiation_core.log_privacy import mask_ids_in_logs
 from vault.clock import Clock
 
 from web.api import DEMO_PATH_PREFIX, build_router
@@ -76,10 +76,11 @@ def create_app(
 ) -> FastAPI:
     """web の FastAPI アプリを作る。
 
-    session_key が空なら MissingSessionKeyError、base64url として読めない・32 バイト未満なら WeakSessionKeyError
-    (どちらも起動を拒否する。台帳 X-39)。send_turn を省くと、agents_base_url を束ねた agents.client.send_turn を使う
-    (本番の経路。token_provider があれば、agents の呼び出しに ID トークンを付ける)。テストは、スタブの send_turn か、
-    agents の app につないだ経路を差し込む。金庫への認証は、vault の AsyncClient 側に付ける(create_app_from_env)。
+    session_key が空なら MissingSessionKeyError、base64url として読めない・32 バイト未満・明らかに乱数でないなら
+    WeakSessionKeyError(どちらも起動を拒否する。台帳 X-39)。send_turn を省くと、agents_base_url を束ねた
+    agents.client.send_turn を使う(本番の経路。token_provider があれば、agents の呼び出しに ID トークンを付ける)。
+    テストは、スタブの send_turn か、agents の app につないだ経路を差し込む。金庫への認証は、vault の AsyncClient 側に
+    付ける(create_app_from_env)。
     """
     services = build_services(
         vault=vault,
@@ -158,43 +159,11 @@ def _open_vault_http_client(vault_url: str, auth: httpx.Auth | None) -> httpx.As
     )
 
 
-# 16 桁の 16 進数(依頼者 ID・交渉 ID。§2.7)。前後が 16 進数の文字でないものだけ。
-_ID_IN_TEXT = re.compile(r"(?<![0-9a-f])[0-9a-f]{16}(?![0-9a-f])")
-
-
-class _MaskIdsFilter(logging.Filter):
-    """ログの引数の文字列にある ID(16 桁の 16 進数)を `<id>` に置き換える(台帳 X-40)。
-
-    uvicorn のアクセスログは、`'%s - "%s %s HTTP/%s" %d'`(クライアント・メソッド・URL・版・ステータス)の形で、
-    URL(/v1/principals/{依頼者 ID}/...・/v1/negotiations/{交渉 ID}/...)をそのまま書く。引数の並びは変えない。
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.args, tuple):
-            record.args = tuple(_ID_IN_TEXT.sub("<id>", arg) if isinstance(arg, str) else arg for arg in record.args)
-        return True
-
-
-def mask_ids_in_logs() -> None:
-    """URL に ID が入るログから、ID を外す(台帳 X-40)。
-
-    §3.8: ログに残すのは、エンドポイント・side・手の種類・回数・判定結果だけ。
-    - uvicorn のアクセスログ(`uvicorn.access`): URL の ID を `<id>` に伏せる(エンドポイントとステータスは残す)。
-    - httpx のリクエストのログ: INFO で、金庫への呼び出しの URL(ID つき)を書くので、WARNING 以上にする。
-    本番の起動口が呼ぶ。何度呼んでも、フィルタは 1 つだけ。Cloud Run 自身のリクエストログ
-    (run.googleapis.com/requests)は、URL をそのまま持ち、アプリからは変えられないので、デプロイの設定で扱う。
-    """
-    access_logger = logging.getLogger("uvicorn.access")
-    if not any(isinstance(existing, _MaskIdsFilter) for existing in access_logger.filters):
-        access_logger.addFilter(_MaskIdsFilter())
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-
-
 def create_app_from_env(environ: Mapping[str, str] | None = None) -> FastAPI:
     """本番の起動口(`uvicorn web.app:create_app_from_env --factory --workers 1`)。環境変数から組み立てる。
 
     - SESSION_SIGNING_KEY: セッションクッキーの署名の鍵(必須。なければ MissingSessionKeyError、base64url として
-      読めない・32 バイト未満なら WeakSessionKeyError で、起動を拒否する)。作り方:
+      読めない・32 バイト未満・明らかに乱数でないなら WeakSessionKeyError で、起動を拒否する)。作り方:
       `python -c "import secrets; print(secrets.token_urlsafe(32))"`
     - VAULT_BASE_URL: 金庫の URL(必須)。
     - SERVICE_AUTH_ENABLED: サービス間の認証(Cloud Run の ID トークン。台帳 X-37)を使うか(true・false。未設定は true)。

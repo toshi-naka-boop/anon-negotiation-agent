@@ -139,7 +139,9 @@ agent_call_timeout_seconds = 60
 agent_max_retries = 3
 # 再試行の待ち時間(秒)。n 回目の再試行の前に n 番目の値だけ待つ(足りなければ最後の値)
 agent_retry_backoff_seconds = [1.0, 2.0, 4.0]
-# 一時停止中・途中確認の回答待ち・409 の後に、金庫の状態を読み直す間隔(秒)
+# 一時停止中・途中確認の回答待ち・409・金庫の一時的な失敗(503・500 など)の後に、金庫の状態を読み直す間隔(秒)
+# (金庫が、送り直しても直らないエラー(404・409 以外の 4xx)を返した後は、この間隔ではなく、[web.sweeper] の
+# interval_seconds(見回りの間隔)だけ待つ。台帳 L10-1: 2 秒ごとに LLM を呼び直さないため)
 wait_poll_interval_seconds = 2.0
 
 [web.sweeper]

@@ -13,6 +13,10 @@
 本物の候補者の交渉では、金庫への操作を 1 回ごとに、その依頼者のロックの下で行う(台帳 I-4。
 RefereeDeps.locks を渡したとき。エージェントを呼んでいる間はロックを持たない)。
 
+待って読み直す間隔は、既定では wait_poll_interval_seconds(暫定 2 秒)。ただし金庫が、送り直しても直らないエラー(404・409
+以外の 4xx。422 など)を返した後は、見回りの間隔(暫定 60 秒。client_error_wait_seconds)にする(台帳 L10-1)。読み直すたびに
+エージェント(LLM)を呼ぶので、直らないエラーで 2 秒ごとに呼び直すと、手番の期限で終わるまでの間に、LLM の呼び出しを使い果たす。
+
 ログには、側・手の種類・理由(列挙値)・例外の型名・金庫の HTTP ステータスだけを書く。交渉 ID・依頼者 ID・
 組み合わせの値は書かない(§3.8。台帳 X-40: ログは本人の削除の後も残り、ID から交渉の時刻・失敗の理由・側を
 たどれてしまう)。例外の型名だけを書くのは、検証エラーのメッセージに入力値が含まれるため。タスクの名前にも、ID を入れない。
@@ -139,6 +143,8 @@ class Referee:
     def __init__(self, context: NegotiationContext, deps: RefereeDeps) -> None:
         self._context = context
         self._deps = deps
+        # run() が、WAITING・RETRY の後に待つ秒数。step() が、その結果ごとに決める(台帳 L10-1)。
+        self._wait_seconds = deps.config.wait_poll_interval_seconds
         # 金庫への操作の口。本物の候補者の交渉なら、依頼者のロックの下で 1 回ずつ行う口にする(台帳 I-4)。
         self._vault: VaultClient | PrincipalScopedVault = deps.vault
         if deps.locks is not None and context.candidate_principal_id is not None:
@@ -155,10 +161,11 @@ class Referee:
             if outcome is StepOutcome.FINISHED:
                 return
             if outcome in (StepOutcome.WAITING, StepOutcome.RETRY):
-                await self._deps.sleep(self._deps.config.wait_poll_interval_seconds)
+                await self._deps.sleep(self._wait_seconds)
 
     async def step(self) -> StepOutcome:
         """金庫の状態を読み直して、手番の側について 1 手だけ進める(§4.1 の 1〜5)。"""
+        self._wait_seconds = self._deps.config.wait_poll_interval_seconds
         try:
             return await self._step()
         except VaultNotFoundError:
@@ -171,6 +178,10 @@ class Referee:
             # 404・409・503 以外(500・502・422 など)。タスクを落とすと、見回りが作り直すまで(最長 60 秒)交渉が止まる。
             # 落とさずに、待って読み直す(台帳 L9-1。金庫の読み取りの中で出た Aborted が 500 になり得る)。
             _log.error("vault call failed status=%s", exc.status_code)
+            if exc.status_code is not None and 400 <= exc.status_code < 500:
+                # 404・409 は上で扱った。それ以外の 4xx(422 など)は、送り直しても直らない。読み直しのたびにエージェント(LLM)を
+                # 呼ぶので、2 秒ごとに呼び直さず、見回りの間隔まで待つ(台帳 L10-1)。5xx は、これまでどおり(一時的かもしれない)。
+                self._wait_seconds = self._deps.config.client_error_wait_seconds
             return StepOutcome.WAITING
 
     async def _step(self) -> StepOutcome:

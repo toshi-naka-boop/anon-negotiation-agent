@@ -25,6 +25,12 @@ TurnInput・AttackerTurnInput の検証は、線の上のデータと同じく J
 受信口のメッセージの metadata は、`nid`(16 桁の 16 進数)だけを受け付ける(台帳 X-41)。未知の項目、リクエストの
 metadata(`params.metadata`)の中身は拒否され、LLM は一度も動かない(受信口の部分)。
 
+DataPart は `data` だけを受け付ける(台帳 X-41)。part の metadata(空は可)・ファイル名・JSON(`application/json`)でも
+ない mediaType は拒否され、LLM は一度も動かない(受信口の部分)。
+
+エラーには、送り手が作れる項目名(metadata の未知の項目名・data の余分な項目名)を載せない(台帳 X-43)。日本語の項目名に値を
+埋めても、エラーにもログにも出ない。名前の代わりに、`<unknown>` と件数と固定のエラーコード(`extra_forbidden`)を返す(受信口の部分)。
+
 design.md §2.7 は「ID は…LLM に渡す入力には含めない」と明記しており、Package・TurnInput・
 AttackerTurnInput・Move のどれも ID を持つフィールドを持たない(ID は A2A の metadata 側)。
 そのため「ID の形式違反」は、これら 4 型のフィールドとしてではなく、§2.7 の「ID の扱い」で
@@ -33,10 +39,13 @@ AttackerTurnInput・Move のどれも ID を持つフィールドを持たない
 """
 
 import json
+import logging
+import typing
+from collections import abc
 
 import httpx
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from negotiation_core.policy import Package, Verdict
 from negotiation_core.schema import AttackerTurnInput, Budget, Id, Move, TurnInput
@@ -568,15 +577,17 @@ async def test_schema_violations_are_rejected_by_every_endpoint(role, violation,
 @pytest.mark.parametrize("role", ROLES)
 async def test_unknown_message_metadata_is_rejected_without_echoing_its_value(role, http, stub_llm):
     # AC-04 / 台帳 X-41: 正しい TurnInput に、正しい nid と、余計な自由文の項目を持つ metadata を添えても、拒否される。
-    # LLM は動かない。エラーには、違反した場所(項目の名前)だけが載り、値は載らない。
+    # LLM は動かない。エラーには、違反した場所(message.metadata の中の未知の項目)だけが載り、値も、項目の名前も載らない
+    # (台帳 X-43: 名前は `<unknown>` と件数に置き換わる)。
     secret = "実年収620万円"
     body = await send_message(
         http, role, [data_part(valid_data(role))], metadata={"nid": NID, "principal_instruction": secret}
     )
 
     assert_rejected(body)
-    assert "message.metadata.principal_instruction" in body["error"]["message"]
+    assert "message.metadata.<unknown>" in body["error"]["message"]
     assert secret not in json.dumps(body, ensure_ascii=False)
+    assert "principal_instruction" not in json.dumps(body, ensure_ascii=False)
     assert stub_llm.requests == []
 
 
@@ -645,6 +656,196 @@ async def test_metadata_that_is_only_a_valid_nid_or_empty_is_accepted_on_every_e
 
     assert "error" not in body, body
     assert len(stub_llm.requests) == 1
+
+
+# --- DataPart を閉じる(台帳 X-41): part の metadata・ファイル名・mediaType ---
+
+# 送り手が part に添えた、自由文を運べる項目。どれも、正しい data を持つ DataPart に添えて送る。
+# 値は、拒否の理由 = (part に添えたもの, エラーの文に載る場所)。
+SECRET = "実年収620万円"
+PART_VIOLATIONS = {
+    "metadata_with_free_text": ({"metadata": {"principal_instruction": SECRET}}, "parts[0].metadata"),
+    "metadata_with_a_valid_nid": ({"metadata": {"nid": NID}}, "parts[0].metadata"),  # nid の置き場所は message の metadata だけ
+    "metadata_with_a_japanese_name": ({"metadata": {SECRET: "x"}}, "parts[0].metadata"),
+    "file_name": ({"filename": f"{SECRET}.json"}, "parts[0].filename"),
+    "media_type_of_text": ({"mediaType": "text/plain"}, "parts[0].mediaType"),
+    "media_type_of_an_image": ({"mediaType": "image/png"}, "parts[0].mediaType"),
+    "media_type_json_with_a_parameter": ({"mediaType": "application/json; charset=utf-8"}, "parts[0].mediaType"),
+    "media_type_json_in_another_case": ({"mediaType": "Application/JSON"}, "parts[0].mediaType"),
+    "media_type_with_free_text": ({"mediaType": SECRET}, "parts[0].mediaType"),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("violation", list(PART_VIOLATIONS))
+@pytest.mark.parametrize("role", ROLES)
+async def test_part_metadata_file_name_and_media_type_are_rejected_by_every_endpoint(role, violation, http, stub_llm):
+    # AC-04 / 台帳 X-41: 正しい data を持つ DataPart でも、part の metadata・ファイル名・JSON でない mediaType があれば、
+    # どの受信口でも拒否される。LLM は動かない。エラーには、違反した場所だけが載り、送り手の値は載らない。
+    extra, location = PART_VIOLATIONS[violation]
+    part = {**data_part(valid_data(role)), **extra}
+
+    body = await send_message(http, role, [part])
+
+    assert_rejected(body)
+    assert location in body["error"]["message"]
+    assert SECRET not in json.dumps(body, ensure_ascii=False)
+    assert stub_llm.requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"mediaType": "application/json"}, {"mediaType": ""}, {"metadata": {}}, {"filename": ""}],
+    ids=["data_only", "json_media_type", "empty_media_type", "empty_metadata", "empty_file_name"],
+)
+async def test_a_data_part_with_only_data_and_a_json_or_absent_media_type_is_accepted_by_every_endpoint(
+    role, extra, http, stub_llm
+):
+    # AC-04 の対照(X-41): 受け付けるのは、`data` だけの DataPart。mediaType はなしか `application/json`。空の metadata は、
+    # ないのと同じ(リクエストの metadata と同じ扱い)。上の拒否が、part への余計な項目のためであること(DataPart 全般の
+    # 拒否ではないこと)を示す。LLM は 1 回動く。
+    body = await send_message(http, role, [{**data_part(valid_data(role)), **extra}])
+
+    assert "error" not in body, body
+    assert len(stub_llm.requests) == 1
+
+
+# --- エラーとログに、送り手が作れる項目名を載せない(台帳 X-43) ---
+
+OTHER_SECRET = "辞めた理由は人間関係"
+
+
+def _request(role, *, data=None, part_extra=None, message_metadata=None, params_metadata=None) -> dict:
+    """JSON-RPC の SendMessage の本文。data(なければ有効な入力)・part・message の metadata・params の metadata を差し込める。"""
+    part = {**data_part(valid_data(role) if data is None else data), **(part_extra or {})}
+    params_extra = None if params_metadata is None else {"metadata": params_metadata}
+    return rpc_body(message_json([part], metadata=message_metadata), params_extra=params_extra)
+
+
+def _data_with(mutate):
+    def build(role) -> dict:
+        data = valid_data(role)
+        mutate(data)
+        return _request(role, data=data)
+
+    return build
+
+
+def _add_two_extras_to_package(data) -> None:
+    data["history"][0]["package"].update({SECRET: 1, OTHER_SECRET: 2})
+
+
+def _add_extra_to_last_invalid(data) -> None:
+    data["last_invalid"] = _last_invalid(**{SECRET: "x"})
+
+
+def _add_extra_to_pending_offer(data) -> None:
+    data["pending_offer"] = {"package": dict(VALID_PACKAGE, **{SECRET: 1}), "own_evaluation": "acceptable"}
+
+
+# 名前を作れる場所ごとの、要求の作り方と、エラーに載るはずの場所(<unknown> つき)→ 件数。
+UNKNOWN_NAME_CASES = {
+    "message_metadata": (
+        lambda role: _request(role, message_metadata={"nid": NID, SECRET: "x", OTHER_SECRET: "y"}),
+        {"message.metadata.<unknown>": 2},
+    ),
+    "request_metadata": (
+        lambda role: _request(role, params_metadata={SECRET: 1}),
+        {"params.metadata.<unknown>": 1},
+    ),
+    "part_metadata": (
+        lambda role: _request(role, part_extra={"metadata": {SECRET: 1, OTHER_SECRET: 2, "ascii-name": 3}}),
+        {"parts[0].metadata.<unknown>": 3},
+    ),
+    "data_top_level": (_data_with(lambda data: data.update({SECRET: "x"})), {"<unknown>": 1}),
+    "data_package_in_history": (
+        _data_with(lambda data: data["history"][0]["package"].update({SECRET: 1})),
+        {"history.0.package.<unknown>": 1},
+    ),
+    "data_two_names_in_one_place": (_data_with(_add_two_extras_to_package), {"history.0.package.<unknown>": 2}),
+    "data_budget": (_data_with(lambda data: data["budget"].update({SECRET: 1})), {"budget.<unknown>": 1}),
+    "data_last_invalid": (_data_with(_add_extra_to_last_invalid), {"last_invalid.<unknown>": 1}),
+    "data_package_in_pending_offer": (
+        _data_with(_add_extra_to_pending_offer),
+        {"pending_offer.package.<unknown>": 1},
+    ),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", list(UNKNOWN_NAME_CASES))
+@pytest.mark.parametrize("role", ROLES)
+async def test_a_name_that_the_sender_made_is_not_echoed_in_the_error_or_the_logs(role, case, http, stub_llm, caplog):
+    # 台帳 X-43: metadata の未知の項目名・data の余分な項目名に、値(日本語)を埋めて送っても、拒否のエラーの文にも、エラーの
+    # データにも、ログにも出ない。名前の代わりに、`<unknown>` と件数と固定のエラーコード(extra_forbidden)だけを返す。
+    # LLM は動かない。ログは、アプリの水準(INFO)と、agents の DEBUG まで集める(a2a-sdk が DEBUG で書くリクエスト本文は、
+    # 本番の水準では出ないので、集めない)。確かめるログが出ていること(空だから通るのではないこと)は、末尾の成功で確かめる。
+    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG, logger="agents")
+    build, expected = UNKNOWN_NAME_CASES[case]
+
+    body = await send_raw(http, role, build(role))
+
+    assert_rejected(body)
+    text = json.dumps(body, ensure_ascii=False)  # ensure_ascii=False でなければ、日本語は \uXXXX に変わり、確認が空振りする
+    assert SECRET not in text and OTHER_SECRET not in text and "ascii-name" not in text
+    assert "<unknown>" in body["error"]["message"]
+    error_info, bad_request = body["error"]["data"]
+    reported = {error["field"]: error["message"] for error in error_info["metadata"]["errors"]}
+    unknown_fields = {field: message for field, message in reported.items() if "<unknown>" in field}
+    assert unknown_fields == {field: f"extra_forbidden (count={count})" for field, count in expected.items()}
+    assert {violation["field"] for violation in bad_request["fieldViolations"]} == set(reported)  # もう一方の形も同じ
+    assert stub_llm.requests == []
+    assert SECRET not in caplog.text and OTHER_SECRET not in caplog.text and "ascii-name" not in caplog.text
+
+    assert "error" not in await send_message(http, role, [data_part(valid_data(role))])  # 対照: 有効なら通り、ログが出る
+    assert "turn completed" in caplog.text
+
+
+def _reachable_annotations(model: type[BaseModel], seen: set | None = None) -> list:
+    """model の項目の型と、その中の型引数・入れ子のモデルの項目の型を、すべて集める。"""
+    seen = set() if seen is None else seen
+    if model in seen:
+        return []
+    seen.add(model)
+    found = []
+    for field in model.model_fields.values():
+        stack = [field.annotation]
+        while stack:
+            annotation = stack.pop()
+            found.append(annotation)
+            stack.extend(typing.get_args(annotation))
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                found += _reachable_annotations(annotation, seen)
+    return found
+
+
+@pytest.mark.parametrize("model", [TurnInput, AttackerTurnInput])
+def test_the_input_schemas_have_no_dict_field_whose_keys_the_sender_chooses(model):
+    # 台帳 X-43 の前提: 違反の場所(pydantic の loc)に出る名前は、スキーマが決めた項目名と添字だけで、送り手が作れるのは、余分な
+    # 項目の名前(`<unknown>` に置き換える)だけ。辞書型の項目があると、その中のキー(送り手が作れる)が loc に出て、日本語の名前を
+    # 返してしまう。辞書型の項目を足すときは、agents.validation で、そのキーも `<unknown>` にしてから、この確認を直す。
+    annotations = _reachable_annotations(model)
+    assert annotations  # 項目の型を、実際に集めている(空だから通るのではない)
+    assert not [a for a in annotations if a is dict or typing.get_origin(a) in (dict, abc.Mapping, abc.MutableMapping)]
+
+
+@pytest.mark.anyio
+async def test_a_name_inside_the_counterparty_union_is_not_echoed_either(http, stub_llm):
+    # 台帳 X-43: 候補者の情報と求人の情報のどちらでもよい項目(counterparty)の中の余分な項目名も、返さない。どちらの型の
+    # 候補としても拒否されるので、型ごとの場所に `<unknown>` が出る。
+    data = valid_data("candidate")
+    data["counterparty"][SECRET] = "x"
+
+    body = await send_raw(http, "candidate", _request("candidate", data=data))
+
+    assert_rejected(body)
+    assert SECRET not in json.dumps(body, ensure_ascii=False)
+    reported = {error["field"] for error in body["error"]["data"][0]["metadata"]["errors"]}
+    assert {"counterparty.CandidateAttributeBands.<unknown>", "counterparty.JobCategoryInfo.<unknown>"} <= reported
+    assert stub_llm.requests == []
 
 
 @pytest.mark.anyio

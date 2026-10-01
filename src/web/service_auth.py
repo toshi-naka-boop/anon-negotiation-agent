@@ -9,6 +9,11 @@ agents のクライアント(agents.client.send_turn)は、呼び先のサービ
   `GET http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>`
   で、ヘッダ `Metadata-Flavor: Google` が必須。
 - トークンは audience ごとに持ち、期限(JWT の exp)の少し前(既定 5 分前)まで使い回す。署名は確かめない(受け取る側が確かめる)。
+- キャッシュする前に、トークンの未署名の claim(本文を base64url で読む)を確かめる(台帳 X-42): `aud` が要求した audience と
+  完全に一致すること、`exp` が有限で未来であること。合わなければキャッシュせず、取れなかったもの(ServiceAuthError)として扱う。
+  メタデータサーバが宛先違いのトークンを返しても、そのトークンを送らず、長く使い回さない(JWT の検証ライブラリは使わない)。
+- 呼び先が 401・403 で断ったら、その audience のキャッシュを捨て、トークンを取り直して、1 回だけ送り直す(IdTokenAuth。台帳 X-42)。
+  2 回目も断られたら、そのまま返す(送り直しを繰り返さない)。
 - 設定で入り切りできる: 環境変数 SERVICE_AUTH_ENABLED(true・false)。ローカルとテストでは false にして、メタデータ
   サーバを呼ばない(Authorization ヘッダも付かない)。本番の起動口(web.app.create_app_from_env)は、未設定なら true。
 - 使い方: 金庫は、`httpx.AsyncClient(base_url=..., auth=IdTokenAuth(provider, 金庫の URL))`。agents は、
@@ -20,6 +25,7 @@ agents のクライアント(agents.client.send_turn)は、呼び先のサービ
 
 import base64
 import json
+import math
 import os
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping
@@ -38,6 +44,8 @@ _METADATA_TIMEOUT_SECONDS = 5.0
 _TURN_OFF_HINT = f"set {SERVICE_AUTH_ENV}=false when running outside Cloud Run"
 # 期限(exp)のこの秒数前になったら、新しいトークンを取り直す(メタデータサーバのトークンの寿命は 1 時間)。
 REFRESH_MARGIN_SECONDS = 300.0
+# 呼び先(Cloud Run の IAM)がトークンを断ったときの HTTP ステータス。キャッシュを捨てて、取り直して、1 回だけ送り直す。
+_REJECTED_STATUS_CODES = frozenset({401, 403})
 
 
 class ServiceAuthError(httpx.TransportError):
@@ -60,16 +68,40 @@ def audience_for(service_url: str) -> str:
     return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
 
 
-def _expiry_of(token: str) -> float:
-    """ID トークン(JWT)の exp(UNIX 秒)。読めなければ ServiceAuthError。署名は確かめない。"""
+def _claims_of(token: str) -> dict:
+    """ID トークン(JWT)の claim(本文)を読む。読めなければ ServiceAuthError。署名は確かめない(受け取る側が確かめる)。"""
     try:
         payload = token.split(".")[1]
-        expiry = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["exp"]
-    except (IndexError, KeyError, TypeError, ValueError) as exc:  # binascii.Error・JSONDecodeError は ValueError
-        raise ServiceAuthError("the metadata server returned a value that is not an ID token (a JWT with exp)") from exc
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError) as exc:  # binascii.Error・JSONDecodeError・UnicodeDecodeError は ValueError
+        raise ServiceAuthError("the metadata server returned a value that is not an ID token (a JWT)") from exc
+    if not isinstance(claims, dict):
+        raise ServiceAuthError("the claims of the ID token are not a JSON object")
+    return claims
+
+
+def _checked_expiry(token: str, audience: str, now: float) -> float:
+    """トークンが audience 宛てで、期限が有限かつ未来なら、期限(exp。UNIX 秒)を返す。そうでなければ ServiceAuthError。
+
+    キャッシュする前に呼ぶ(台帳 X-42): 宛先違いのトークンや、期限の壊れたトークンを、キャッシュして使い回さないため。
+    `aud` は、文字列として audience と完全に一致しなければならない(配列・末尾のスラッシュ違いなども不可)。
+    署名は確かめない(受け取る側が確かめる)。トークンの値・claim の値は、エラーの文に入れない。
+    """
+    claims = _claims_of(token)
+    if claims.get("aud") != audience:
+        raise ServiceAuthError("the ID token is not for the requested audience")
+    expiry = claims.get("exp")
     if isinstance(expiry, bool) or not isinstance(expiry, int | float):
         raise ServiceAuthError("the ID token has an exp claim that is not a number")
-    return float(expiry)
+    try:
+        expires_at = float(expiry)
+    except OverflowError:  # float にできないほど大きい整数
+        raise ServiceAuthError("the ID token has an exp claim that is not finite") from None
+    if not math.isfinite(expires_at):
+        raise ServiceAuthError("the ID token has an exp claim that is not finite")
+    if expires_at <= now:
+        raise ServiceAuthError("the ID token has already expired (its exp claim is not in the future)")
+    return expires_at
 
 
 @dataclass(frozen=True)
@@ -97,13 +129,28 @@ class IdTokenProvider:
         self._cache: dict[str, _CachedToken] = {}
 
     async def token(self, audience: str) -> str:
-        """audience の ID トークン。期限まで margin 以上あるキャッシュがあればそれを、なければ取り直す。"""
+        """audience の ID トークン。期限まで margin 以上あるキャッシュがあればそれを、なければ取り直す。
+
+        取り直したトークンは、キャッシュする前に確かめる(audience 宛てで、期限が有限かつ未来)。合わなければ
+        キャッシュせず、ServiceAuthError(台帳 X-42)。
+        """
         cached = self._cache.get(audience)
         if cached is not None and cached.expires_at - self._now() > self._margin:
             return cached.token
         token = await self._fetch(audience)
-        self._cache[audience] = _CachedToken(token=token, expires_at=_expiry_of(token))
+        expires_at = _checked_expiry(token, audience, self._now())
+        self._cache[audience] = _CachedToken(token=token, expires_at=expires_at)
         return token
+
+    def invalidate(self, audience: str, token: str | None = None) -> None:
+        """audience のキャッシュを捨てる(呼び先がトークンを断ったとき。次の token() は、取り直す。台帳 X-42)。
+
+        token を渡したときは、キャッシュがそのトークンのときだけ捨てる。並行の要求が取り直した新しいトークンを、
+        遅れて届いた古いトークンの「断られた」で消さないため(台帳 X-44)。
+        """
+        cached = self._cache.get(audience)
+        if cached is not None and (token is None or cached.token == token):
+            del self._cache[audience]
 
     async def _fetch(self, audience: str) -> str:
         try:
@@ -130,6 +177,11 @@ class IdTokenAuth(httpx.Auth):
 
     service_url は、呼び先のサービスの URL(audience はこの URL から作る。audience_for)。AsyncClient 用
     (async_auth_flow だけを持つ)。トークンを取れなければ ServiceAuthError(通信エラーとして伝わる)。
+
+    呼び先が 401・403 で断ったら(Cloud Run の IAM は、アプリに届く前に断る)、その audience のキャッシュを捨て、
+    トークンを取り直して、同じリクエストを 1 回だけ送り直す(台帳 X-42)。2 回目も断られたら、そのトークンもキャッシュ
+    から捨て(次の呼び出しで、断られたトークンを送らないように。台帳 X-44)、その応答をそのまま返す。
+    送り直しは、1 つのリクエストにつき 1 回までで、繰り返さない。
     """
 
     def __init__(self, provider: IdTokenProvider, service_url: str) -> None:
@@ -137,8 +189,18 @@ class IdTokenAuth(httpx.Auth):
         self.audience = audience_for(service_url)
 
     async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
-        request.headers["Authorization"] = f"Bearer {await self._provider.token(self.audience)}"
-        yield request
+        await request.aread()  # 送り直しのために、本文を読み込んでおく(ストリームの本文は、1 回しか送れない)
+        first_token = await self._provider.token(self.audience)
+        request.headers["Authorization"] = f"Bearer {first_token}"
+        response = yield request
+        if response.status_code not in _REJECTED_STATUS_CODES:
+            return
+        self._provider.invalidate(self.audience, first_token)
+        second_token = await self._provider.token(self.audience)
+        request.headers["Authorization"] = f"Bearer {second_token}"
+        response = yield request
+        if response.status_code in _REJECTED_STATUS_CODES:
+            self._provider.invalidate(self.audience, second_token)  # 3 回目は送らない
 
 
 def id_token_provider_from_env(environ: Mapping[str, str] | None = None) -> IdTokenProvider | None:

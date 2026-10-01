@@ -6,12 +6,18 @@
 サービス間の認証は、Cloud Run の IAM(認証を必須にし、呼べるのは web のサービスアカウントだけ。§1.1)に任せ、
 アプリの中ではトークンを検証しない(台帳 X-37)。呼ぶ側(web)が、金庫の URL を audience にした ID トークンを付ける
 (web.service_auth)。
+
+本番の起動口は create_app_from_env(`uvicorn vault.app:create_app_from_env --factory`)。起動時に、uvicorn のアクセスログの
+URL から ID(依頼者 ID・交渉 ID)を伏せる(§3.8。台帳 X-40)。伏せる処理は web の起動口と共通で、negotiation_core にある
+(vault は web に依存しない)。
 """
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
+from google.cloud import firestore
 
 from negotiation_core import Side
+from negotiation_core.log_privacy import mask_ids_in_logs
 
 from vault.api_models import (
     ControlRequest,
@@ -31,6 +37,8 @@ from vault.api_models import (
     PutBlocklistRequest,
     PutPolicyRequest,
 )
+from vault.clock import SystemClock
+from vault.config import DEFAULT_VAULT_CONFIG
 from vault.errors import (
     MovePreconditionFailed,
     NotFoundError,
@@ -38,6 +46,7 @@ from vault.errors import (
     PrincipalDeletingError,
     TransactionRetryExhausted,
 )
+from vault.firestore_client import create_client
 from vault.store import VaultStore
 
 
@@ -145,3 +154,22 @@ def create_app(store: VaultStore) -> FastAPI:
         return store.expire(nid)
 
     return app
+
+
+def _create_vault_db() -> firestore.Client:
+    """vault-db の Firestore クライアント(本番用。(default) は web 用なので使わない。§1.1)。
+
+    接続先(プロジェクト・認証・エミュレータか)は環境で決まる。テストは、ここを差し替える。
+    """
+    return create_client()
+
+
+def create_app_from_env() -> FastAPI:
+    """本番の起動口(`uvicorn vault.app:create_app_from_env --factory`)。
+
+    環境変数は読まない: Firestore の接続先は、クライアントが環境から決める(Cloud Run では、サービスアカウントと
+    サービスの属するプロジェクト)。時計は SystemClock、暫定値は config/params.toml。
+    起動時に、uvicorn のアクセスログの URL から ID(依頼者 ID・交渉 ID)を伏せる(mask_ids_in_logs。台帳 X-40)。
+    """
+    mask_ids_in_logs()
+    return create_app(VaultStore(db=_create_vault_db(), clock=SystemClock(), config=DEFAULT_VAULT_CONFIG))

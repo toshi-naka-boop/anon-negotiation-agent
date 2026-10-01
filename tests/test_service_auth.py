@@ -10,6 +10,9 @@
 - 切ったとき(SERVICE_AUTH_ENABLED=false)は、ヘッダが付かず、メタデータサーバも呼ばない。
 - トークンを取れないときは、通信エラーとして伝わる(金庫のクライアントは「一時的に応えない」、agents のクライアントは
   ConnectionError になり、レフェリーが待って・再試行してやり直す)。トークンの値は、エラーの文に入らない。
+- 台帳 X-42: キャッシュする前に、トークンの `aud` が要求どおりで、`exp` が有限かつ未来であることを確かめる(合わなければ
+  キャッシュせず、取れなかったものとして扱う)。呼び先が 401・403 で断ったら、その audience のキャッシュを捨て、取り直して、
+  1 回だけ送り直す(2 回目も断られたら、それ以上は送り直さない)。金庫の呼び出しにも、agents の呼び出しにも効く。
 """
 
 import asyncio
@@ -26,6 +29,7 @@ import agents.client as agents_client_module
 import web.app as web_app_module
 import web.service_auth as service_auth_module
 from agents.client import send_turn
+from vault.api_models import MoveRequest
 from vault.app import create_app as create_vault_app
 from vault_helpers import put_candidate_and_employer_templates
 from web.app import bind_agents_client, create_app_from_env
@@ -40,7 +44,7 @@ from web.service_auth import (
     id_token_provider_from_env,
 )
 from web.session import SESSION_KEY_ENV
-from web.vault_client import VaultClient, VaultUnavailableError
+from web.vault_client import VaultClient, VaultClientError, VaultUnavailableError
 from web_app_helpers import build_web_env
 
 VAULT_URL = "https://vault-abc123-an.a.run.app"
@@ -54,15 +58,23 @@ def _b64(value: dict) -> str:
     return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
 
 
+def jwt_with_claims(claims: dict) -> str:
+    """claims を本文にした、署名のない JWT(署名は、受け取る側が確かめるので、ここでは要らない)。"""
+    return f"{_b64({'alg': 'RS256', 'typ': 'JWT'})}.{_b64(claims)}.signature"
+
+
 def make_jwt(*, audience: str, expires_at: float, serial: int) -> str:
-    """メタデータサーバが返す ID トークンに似た、署名のない JWT(署名は、受け取る側が確かめるので、ここでは要らない)。"""
-    return f"{_b64({'alg': 'RS256', 'typ': 'JWT'})}.{_b64({'aud': audience, 'exp': int(expires_at), 'n': serial})}.signature"
+    """メタデータサーバが返す ID トークンに似た、署名のない JWT。serial は、トークンを見分けるための番号。"""
+    return jwt_with_claims({"aud": audience, "exp": int(expires_at), "n": serial})
+
+
+_START = 1_800_000_000.0  # FakeClock の初期値(UNIX 秒)
 
 
 class FakeClock:
     """UNIX 秒を返す、進められる時計(IdTokenProvider の now に差し込む)。"""
 
-    def __init__(self, now: float = 1_800_000_000.0) -> None:
+    def __init__(self, now: float = _START) -> None:
         self.value = now
 
     def __call__(self) -> float:
@@ -208,9 +220,10 @@ def _provider_with(handler, now) -> IdTokenProvider:
         lambda request: httpx.Response(200, text="not-a-jwt"),
         lambda request: httpx.Response(200, text=""),
         lambda request: httpx.Response(200, text="a.!!!.c"),  # 本文が base64url でない
-        lambda request: httpx.Response(200, text=f"a.{_b64({'aud': 'x'})}.c"),  # exp がない
-        lambda request: httpx.Response(200, text=f"a.{_b64({'exp': 'tomorrow'})}.c"),  # exp が数でない
-        lambda request: httpx.Response(200, text=f"a.{_b64({'exp': True})}.c"),  # exp が真偽値
+        # 以下の 3 つは、aud を要求どおり(VAULT_URL)にして、exp だけを壊す(aud の違いで拒否されているのではないことを示す)
+        lambda request: httpx.Response(200, text=f"a.{_b64({'aud': VAULT_URL})}.c"),  # exp がない
+        lambda request: httpx.Response(200, text=f"a.{_b64({'aud': VAULT_URL, 'exp': 'tomorrow'})}.c"),  # exp が数でない
+        lambda request: httpx.Response(200, text=f"a.{_b64({'aud': VAULT_URL, 'exp': True})}.c"),  # exp が真偽値
         lambda request: httpx.Response(200, text=f"a.{base64.urlsafe_b64encode(b'[1]').decode()}.c"),  # 本文が辞書でない
     ],
     ids=["404", "503", "not_a_jwt", "empty", "payload_not_base64url", "no_exp", "exp_not_a_number", "exp_bool", "payload_list"],
@@ -265,7 +278,7 @@ async def test_a_failure_is_not_cached_and_the_next_call_asks_again(now):
 @pytest.mark.anyio
 async def test_the_token_never_appears_in_an_error_message(now):
     # X-37: トークンの値を、エラーの文に入れない(ログに残らないように)。壊れたトークンを返す応答でも、同じ。
-    secret = f"secret-token.{_b64({'exp': 'tomorrow'})}.signature"
+    secret = f"secret-token.{_b64({'aud': VAULT_URL, 'exp': 'tomorrow'})}.signature"
     provider = _provider_with(lambda request: httpx.Response(200, text=secret), now)
 
     with pytest.raises(ServiceAuthError) as excinfo:
@@ -300,16 +313,32 @@ def test_any_other_value_refuses_to_start(value):
 
 
 class RecordingTransport(httpx.AsyncBaseTransport):
-    """送ったリクエストを記録して、中の通信路に渡す(中の通信路がなければ、決まった応答を返す)。"""
+    """送ったリクエストを記録して、中の通信路に渡す(中の通信路がなければ、決まった応答を返す)。
 
-    def __init__(self, inner: httpx.AsyncBaseTransport | None = None, *, body: dict | None = None) -> None:
+    reject_first を指定すると、最初のその回数のリクエストは、中に渡さず、reject_status で断る(呼び先の IAM が
+    トークンを断る場面。台帳 X-42)。
+    """
+
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport | None = None,
+        *,
+        body: dict | None = None,
+        reject_first: int = 0,
+        reject_status: int = 401,
+    ) -> None:
         self.inner = inner
         self.body = body
+        self.reject_first = reject_first
+        self.reject_status = reject_status
         self.requests: list[httpx.Request] = []
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         await request.aread()
-        self.requests.append(request)
+        # 送り直しでは、同じ Request のヘッダを書き換えて送る(IdTokenAuth)ので、送った時点の写しを残す。
+        self.requests.append(httpx.Request(request.method, request.url, headers=request.headers, content=request.content))
+        if len(self.requests) <= self.reject_first:
+            return httpx.Response(self.reject_status, text="rejected before reaching the app")
         if self.inner is not None:
             return await self.inner.handle_async_request(request)
         return httpx.Response(200, json=self.body)
@@ -568,3 +597,252 @@ async def test_the_token_is_not_logged(caplog, provider, metadata):
     await provider.token(VAULT_URL)
 
     assert token not in caplog.text
+
+
+# --- 台帳 X-42: キャッシュする前に aud・exp を確かめる / 401・403 では、取り直して 1 回だけ送り直す ---
+
+_EXPIRE_BODY = {"version": 3, "status": "active", "expired": False}
+_MOVE_BODY = {"version": 1, "status": "active", "valid": True}
+
+# 使えないトークンの claim。どれも 1 か所だけが壊れている(ほかは、金庫宛てで、期限は 1 時間後)。
+_GOOD_CLAIMS = {"aud": VAULT_URL, "exp": _START + _TOKEN_LIFETIME}
+UNUSABLE_CLAIMS = {
+    "audience_of_another_service": {**_GOOD_CLAIMS, "aud": AGENTS_URL},
+    "audience_with_a_trailing_slash": {**_GOOD_CLAIMS, "aud": VAULT_URL + "/"},
+    "audience_in_another_case": {**_GOOD_CLAIMS, "aud": VAULT_URL.upper()},
+    "audience_in_a_list": {**_GOOD_CLAIMS, "aud": [VAULT_URL]},
+    "audience_is_null": {**_GOOD_CLAIMS, "aud": None},
+    "no_audience": {"exp": _START + _TOKEN_LIFETIME},
+    "already_expired": {**_GOOD_CLAIMS, "exp": _START - 1},
+    "expires_right_now": {**_GOOD_CLAIMS, "exp": _START},
+    "expiry_is_nan": {**_GOOD_CLAIMS, "exp": float("nan")},
+    "expiry_is_infinite": {**_GOOD_CLAIMS, "exp": float("inf")},
+    "expiry_is_negative_infinite": {**_GOOD_CLAIMS, "exp": float("-inf")},
+    "expiry_is_too_large_for_a_float": {**_GOOD_CLAIMS, "exp": 10**400},
+    "expiry_is_a_string": {**_GOOD_CLAIMS, "exp": str(int(_START + _TOKEN_LIFETIME))},
+    "no_expiry": {"aud": VAULT_URL},
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("claims", list(UNUSABLE_CLAIMS.values()), ids=list(UNUSABLE_CLAIMS))
+async def test_a_token_for_another_audience_or_without_a_future_expiry_is_refused_and_never_cached(claims, now):
+    # X-42: キャッシュする前に、aud が要求どおり(完全に一致)で、exp が有限かつ未来であることを確かめる。合わなければ
+    # キャッシュせず、取れなかったもの(ServiceAuthError。通信エラーの一種)として扱う。次の呼び出しは、メタデータサーバに聞き直す。
+    unusable = jwt_with_claims(claims)
+    asked: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.params["audience"])
+        if len(asked) == 1:
+            return httpx.Response(200, text=unusable)
+        return httpx.Response(
+            200, text=make_jwt(audience=VAULT_URL, expires_at=now() + _TOKEN_LIFETIME, serial=len(asked))
+        )
+
+    provider = _provider_with(respond, now)
+
+    with pytest.raises(ServiceAuthError) as excinfo:
+        await provider.token(VAULT_URL)
+
+    assert isinstance(excinfo.value, httpx.TransportError)
+    assert unusable not in str(excinfo.value)  # トークンの値は、エラーの文に入れない
+    token = await provider.token(VAULT_URL)
+    assert (_claims(token)["aud"], _claims(token)["n"]) == (VAULT_URL, 2)  # 壊れたトークンではなく、聞き直した新しいトークン
+    assert asked == [VAULT_URL, VAULT_URL]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"aud": VAULT_URL, "exp": _START + 3600.5},  # exp が小数
+        {"aud": VAULT_URL, "exp": _START + 10**9},  # 遠い未来(有限)
+    ],
+    ids=["fractional_expiry", "far_future_expiry"],
+)
+async def test_a_token_for_the_requested_audience_with_a_finite_future_expiry_is_accepted_and_cached(claims, now):
+    # X-42 の対照: 上の確認が、使えるトークンまで拒否しているのではないこと。要求どおりの aud で、有限で未来の exp なら通り、使い回される。
+    usable = jwt_with_claims(claims)
+    asked: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.params["audience"])
+        return httpx.Response(200, text=usable)
+
+    provider = _provider_with(respond, now)
+
+    assert await provider.token(VAULT_URL) == usable
+    assert await provider.token(VAULT_URL) == usable
+    assert asked == [VAULT_URL]
+
+
+@pytest.mark.anyio
+async def test_a_vault_call_never_carries_a_token_that_the_metadata_server_made_for_another_service(now):
+    # X-42 の破綻シナリオ: 金庫用に聞いたのに、メタデータサーバが agents 宛てのトークン(exp は 1 時間後)を返す。
+    # そのトークンを金庫に送らず(送れば、金庫の IAM に断られ続ける)、キャッシュもしない(55 分間使い回さない)。
+    other = make_jwt(audience=AGENTS_URL, expires_at=now() + _TOKEN_LIFETIME, serial=1)
+    asked: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.params["audience"])
+        return httpx.Response(200, text=other)
+
+    vault = RecordingTransport(body=_EXPIRE_BODY)
+    client = VaultClient(
+        httpx.AsyncClient(transport=vault, base_url=VAULT_URL, auth=IdTokenAuth(_provider_with(respond, now), VAULT_URL))
+    )
+
+    for _ in range(2):
+        with pytest.raises(VaultUnavailableError):  # レフェリーは、待って読み直す
+            await client.expire(_EXPIRE_PATH_NID)
+
+    assert vault.requests == []
+    assert asked == [VAULT_URL, VAULT_URL]  # キャッシュしていないので、呼び出しのたびに聞き直す
+
+
+def _vault_client(transport: httpx.AsyncBaseTransport, provider: IdTokenProvider) -> VaultClient:
+    return VaultClient(httpx.AsyncClient(transport=transport, base_url=VAULT_URL, auth=IdTokenAuth(provider, VAULT_URL)))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_vault_that_rejects_the_token_gets_a_new_token_and_the_same_request_once_more(status, provider, metadata):
+    # X-42: 金庫(Cloud Run の IAM)が 401・403 で断ったら、その audience のキャッシュを捨て、トークンを取り直して、同じ
+    # リクエストを 1 回だけ送り直す。成功すれば、呼び出し側には、何も起きなかったように見える。
+    vault = RecordingTransport(body=_MOVE_BODY, reject_first=1, reject_status=status)
+    client = _vault_client(vault, provider)
+    move = MoveRequest(expected_version=0, side="employer", move="accept")
+
+    response = await client.post_move(_EXPIRE_PATH_NID, move)
+
+    assert response.valid is True
+    rejected, resent = vault.requests
+    assert (rejected.method, rejected.url, rejected.content) == (resent.method, resent.url, resent.content)  # 本文も同じ
+    assert [_claims(_bearer(request))["n"] for request in (rejected, resent)] == [1, 2]  # 送り直しは、取り直したトークン
+    assert metadata.audiences == [VAULT_URL, VAULT_URL]
+    # 取り直したトークンは、キャッシュされて、次の呼び出しで使い回される(また取り直さない)。
+    await client.post_move(_EXPIRE_PATH_NID, move)
+    assert [_bearer(request) for request in vault.requests[1:]] == [_bearer(resent)] * 2
+    assert len(metadata.requests) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_second_rejection_is_returned_as_it_is_without_a_third_request(status, provider, metadata):
+    # X-42: 取り直したトークンでも断られたら、それ以上は送り直さない(繰り返しにしない)。2 回目の応答が、そのまま
+    # 呼び出し側に届く(金庫のクライアントの「その他の失敗」。通信エラーでも、成功でもない)。
+    vault = RecordingTransport(body=_EXPIRE_BODY, reject_first=1000, reject_status=status)
+    client = _vault_client(vault, provider)
+
+    with pytest.raises(VaultClientError) as excinfo:
+        await client.expire(_EXPIRE_PATH_NID)
+
+    assert type(excinfo.value) is VaultClientError
+    assert excinfo.value.status_code == status
+    assert len(vault.requests) == 2  # 1 回だけ送り直した
+    assert metadata.audiences == [VAULT_URL, VAULT_URL]  # 取り直しも 1 回だけ
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_token_rejected_on_the_resend_is_not_kept_and_the_next_call_gets_a_new_one(status, provider, metadata):
+    # X-44: 送り直しでも断られたら、そのトークンもキャッシュから捨てる。次の呼び出しは、断られたトークンを送らず、
+    # 取り直したトークンで送る。
+    vault = RecordingTransport(body=_EXPIRE_BODY, reject_first=2, reject_status=status)
+    client = _vault_client(vault, provider)
+
+    with pytest.raises(VaultClientError):
+        await client.expire(_EXPIRE_PATH_NID)
+    await client.expire(_EXPIRE_PATH_NID)  # 3 本目のリクエストは、呼び先に届く
+
+    assert [_claims(_bearer(request))["n"] for request in vault.requests] == [1, 2, 3]  # 断られた 2 を、送り直さない
+    assert metadata.audiences == [VAULT_URL] * 3
+
+
+@pytest.mark.anyio
+async def test_a_late_rejection_of_an_old_token_does_not_drop_a_newer_token_from_the_cache(provider, metadata):
+    # X-44: 並行の要求の一方が取り直した新しいトークンを、もう一方に遅れて届いた、古いトークンの「断られた」で消さない。
+    old = await provider.token(VAULT_URL)
+    provider.invalidate(VAULT_URL, old)  # 古いトークンが断られ、捨てた
+    new = await provider.token(VAULT_URL)  # 取り直した
+    provider.invalidate(VAULT_URL, old)  # 古いトークンについての「断られた」が、遅れて届いた
+
+    assert await provider.token(VAULT_URL) == new  # 新しいトークンは残っていて、取り直さない
+    assert len(metadata.requests) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [400, 404, 409, 422, 429, 500, 503])
+async def test_a_status_other_than_401_and_403_is_not_sent_again_and_keeps_the_token(status, provider, metadata):
+    # X-42: 送り直すのは、トークンを断られた(401・403)ときだけ。ほかの失敗は、1 回で返り、トークンも取り直さない。
+    vault = RecordingTransport(body=_EXPIRE_BODY, reject_first=1000, reject_status=status)
+    client = _vault_client(vault, provider)
+
+    with pytest.raises(VaultClientError) as excinfo:
+        await client.expire(_EXPIRE_PATH_NID)
+
+    assert excinfo.value.status_code == status
+    assert len(vault.requests) == 1
+    assert metadata.audiences == [VAULT_URL]
+
+
+@pytest.mark.anyio
+async def test_a_vault_call_fails_as_unavailable_when_the_token_cannot_be_renewed_after_a_rejection(now):
+    # X-42: 断られた後に、トークンを取り直せなければ(メタデータサーバが応えない)、通信エラーとして伝わる(金庫への
+    # 2 回目の送信はしない)。レフェリーは、待って読み直す。
+    asked: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        if len(asked) == 1:
+            return httpx.Response(200, text=make_jwt(audience=VAULT_URL, expires_at=now() + _TOKEN_LIFETIME, serial=1))
+        return httpx.Response(503, text="try later")
+
+    vault = RecordingTransport(body=_EXPIRE_BODY, reject_first=1000)
+    client = _vault_client(vault, _provider_with(respond, now))
+
+    with pytest.raises(VaultUnavailableError):
+        await client.expire(_EXPIRE_PATH_NID)
+
+    assert len(vault.requests) == 1 and len(asked) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_send_turn_gets_a_new_token_and_sends_once_more_when_agents_rejects_the_token(
+    status, agents_calls, provider, metadata, stub_llm
+):
+    # X-42: agents(Cloud Run の IAM)が 401・403 で断ったら、金庫の呼び出しと同じに、キャッシュを捨て、トークンを取り直して、
+    # 同じリクエストを 1 回だけ送り直す。送り直しが通れば、受信口は 1 回だけ動き、Move が返る。
+    agents_calls.reject_first, agents_calls.reject_status = 1, status  # 最初の 1 回は、app に渡さずに断る
+
+    data = await send_turn(
+        AGENTS_URL, "candidate", _turn_input(), nid=NID, timeout_s=5, auth=IdTokenAuth(provider, AGENTS_URL)
+    )
+
+    assert data["move"] == "propose"
+    rejected, resent = agents_calls.requests
+    assert (rejected.url, rejected.content) == (resent.url, resent.content)
+    assert [_claims(_bearer(request))["n"] for request in (rejected, resent)] == [1, 2]
+    assert metadata.audiences == [AGENTS_URL, AGENTS_URL]
+    assert len(stub_llm.requests) == 1
+
+
+@pytest.mark.anyio
+async def test_send_turn_stops_after_the_second_rejection_as_a_connection_error(
+    agents_calls, provider, metadata, stub_llm
+):
+    # X-42: agents が取り直したトークンも断ったら、それ以上は送り直さない。send_turn は ConnectionError(レフェリーが、待って
+    # 再試行する。受信口には届いていない)。
+    agents_calls.reject_first = 1000  # 何度でも断る
+
+    with pytest.raises(ConnectionError) as excinfo:
+        await send_turn(
+            AGENTS_URL, "candidate", _turn_input(), nid=NID, timeout_s=5, auth=IdTokenAuth(provider, AGENTS_URL)
+        )
+
+    assert type(excinfo.value) is ConnectionError
+    assert len(agents_calls.requests) == 2
+    assert metadata.audiences == [AGENTS_URL, AGENTS_URL]
+    assert stub_llm.requests == []

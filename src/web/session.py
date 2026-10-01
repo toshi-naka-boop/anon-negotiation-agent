@@ -8,6 +8,9 @@
 - 鍵は、base64url として読めて、デコードした長さが 32 バイト以上でなければならない(台帳 X-39)。弱い鍵では、
   /start で得た自分のクッキーから鍵を総当たりして、他人のクッキーを偽造できる。満たさなければ起動を拒否する。
   鍵の作り方: `python -c "import secrets; print(secrets.token_urlsafe(32))"`(32 バイトの乱数を base64url にした 43 文字)
+- デコードした鍵の中で、異なるバイト値が 16 種類未満なら、明らかに乱数でないので、これも起動を拒否する(全部ゼロ・短い繰り返しなど。
+  32 バイトの乱数なら、平均でおよそ 30 種類になる)。乱数かどうかは検査しきれない(連番など、種類の多い既知の値は通る)ので、
+  本番の鍵は、上の作り方で Secret Manager に入れる(デプロイの確認項目)。
 - 時刻は注入できる(呼び出し側が now を渡す)ので、テストは sleep せずに期限を確かめられる。
 
 ID を発行するのは、開始ページの GET だけ(web.api の start_page)。この module は、発行の条件は
@@ -33,6 +36,8 @@ SESSION_KEY_ENV = "SESSION_SIGNING_KEY"
 
 # 署名の鍵の最小の長さ(base64url をデコードした後のバイト数。HMAC-SHA256 の出力と同じ 256 ビット)。
 MIN_SESSION_KEY_BYTES = 32
+# デコードした鍵に含まれる、異なるバイト値の最小の種類数(これ未満は、明らかに乱数でないとして拒否する。台帳 X-39)。
+MIN_DISTINCT_KEY_BYTE_VALUES = 16
 # 鍵の作り方(エラーの文に載せる)。
 _KEY_RECIPE = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
 _BASE64URL_RE = re.compile(r"[A-Za-z0-9_-]+={0,2}")
@@ -47,14 +52,14 @@ class MissingSessionKeyError(RuntimeError):
 
 
 class WeakSessionKeyError(RuntimeError):
-    """署名の鍵が弱い(base64url として読めない、またはデコードして 32 バイト未満)。web は、この場合に起動を拒否する(§6.3)。
+    """署名の鍵が弱い(base64url として読めない・デコードして 32 バイト未満・明らかに乱数でない)。web は、この場合に起動を拒否する(§6.3)。
 
     エラーの文に、鍵の値は入れない。
     """
 
 
-def _decoded_length(key: str) -> int | None:
-    """key が base64url として読めれば、デコードしたバイト数。読めなければ None。
+def _decode_key(key: str) -> bytes | None:
+    """key が base64url として読めれば、デコードしたバイト列。読めなければ None。
 
     使える文字は A-Z・a-z・0-9・`-`・`_`(標準の base64 の `+`・`/` は不可)。末尾の `=`(パディング)は、あってもなくてもよい。
     """
@@ -62,29 +67,36 @@ def _decoded_length(key: str) -> int | None:
         return None
     padded = key + "=" * (-len(key) % 4)
     try:
-        return len(base64.b64decode(padded.replace("-", "+").replace("_", "/"), validate=True))
+        return base64.b64decode(padded.replace("-", "+").replace("_", "/"), validate=True)
     except binascii.Error:
         return None
 
 
 def validate_session_key(key: str) -> None:
-    """署名の鍵が、base64url として読めて、デコードした長さが 32 バイト以上であることを確かめる。
+    """署名の鍵が、base64url として読めて、デコードした長さが 32 バイト以上で、明らかに乱数でないものでないことを確かめる。
 
-    満たさなければ WeakSessionKeyError(鍵の値はエラーの文に入れない)。鍵の作り方(32 バイトの乱数):
+    満たさなければ WeakSessionKeyError(鍵の値はエラーの文に入れない)。明らかに乱数でないとは、デコードした鍵の中の、
+    異なるバイト値が 16 種類未満のもの(全部ゼロ・短い繰り返しなど。台帳 X-39)。鍵の作り方(32 バイトの乱数):
     `python -c "import secrets; print(secrets.token_urlsafe(32))"`
     """
-    length = _decoded_length(key)
-    if length is None or length < MIN_SESSION_KEY_BYTES:
+    raw = _decode_key(key)
+    if raw is None or len(raw) < MIN_SESSION_KEY_BYTES:
         raise WeakSessionKeyError(
             f"the session signing key ({SESSION_KEY_ENV}) must be a base64url string that decodes to at least "
             f"{MIN_SESSION_KEY_BYTES} bytes; generate one with: {_KEY_RECIPE}"
+        )
+    if len(set(raw)) < MIN_DISTINCT_KEY_BYTE_VALUES:
+        raise WeakSessionKeyError(
+            f"the session signing key ({SESSION_KEY_ENV}) is clearly not random (it has fewer than "
+            f"{MIN_DISTINCT_KEY_BYTE_VALUES} distinct byte values, as in a run of one byte or a short repeating "
+            f"pattern); generate one with: {_KEY_RECIPE}"
         )
 
 
 def load_session_key(environ: Mapping[str, str] | None = None) -> str:
     """環境変数 SESSION_SIGNING_KEY から署名の鍵を読み、強さを確かめる(起動時の確認)。
 
-    なければ MissingSessionKeyError、base64url として読めない・32 バイト未満なら WeakSessionKeyError
+    なければ MissingSessionKeyError、base64url として読めない・32 バイト未満・明らかに乱数でないなら WeakSessionKeyError
     (どちらも、web は起動を拒否する)。前後の空白は取り除く(Secret Manager に `print` の出力をそのまま入れると、
     値の末尾に改行が付くため)。鍵の作り方: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
     """

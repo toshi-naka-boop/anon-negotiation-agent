@@ -3,8 +3,10 @@
 DV-01・DV-16 が確かめる「ID の発行の条件」「クッキーの延長」とは別に、ここでは、クッキーそのものの性質を
 確かめる: 署名付き・HttpOnly・Secure・SameSite=Lax・寿命 29 日、署名の中にも期限を入れ、サーバ側でも
 期限切れを受け付けない、署名の鍵はコードにも既定値にも持たず、なければ起動を拒否する。
+鍵は、base64url で 32 バイト以上で、異なるバイト値が 16 種類以上(明らかに乱数でないものを弾く)でなければ、起動を拒否する(台帳 X-39)。
 """
 
+import base64
 import datetime as dt
 import re
 import secrets
@@ -17,6 +19,7 @@ from agents.wire import ROLES
 from web.app import bind_agents_client, create_app, create_app_from_env
 from web.config import DEFAULT_WEB_CONFIG, load_web_config
 from web.session import (
+    MIN_DISTINCT_KEY_BYTE_VALUES,
     MIN_SESSION_KEY_BYTES,
     SESSION_COOKIE_NAME,
     SESSION_KEY_ENV,
@@ -194,10 +197,30 @@ def test_a_base64url_key_of_at_least_32_bytes_is_accepted_everywhere(key, defaul
     assert create_app(vault=object(), default_db=default_db, session_key=key) is not None
 
 
-@pytest.mark.parametrize("key", list(WEAK_KEYS.values()), ids=list(WEAK_KEYS))
+def _b64url(raw: bytes) -> str:
+    """バイト列を、パディングなしの base64url にする(`secrets.token_urlsafe` と同じ形)。"""
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+# 長さ(32 バイト以上)と形(base64url)は満たすが、異なるバイト値が 16 種類未満で、明らかに乱数でない鍵(台帳 X-39)。
+NOT_RANDOM_KEYS = {
+    "32_zero_bytes": "A" * 43,  # 全部ゼロ(base64url で A が 43 個)
+    "32_ff_bytes": _b64url(b"\xff" * 32),
+    "one_byte_repeated": _b64url(b"k" * 32),
+    "two_byte_pattern": _b64url(b"\x01\x02" * 16),
+    "four_byte_pattern": _b64url(b"abcd" * 8),
+    "a_phrase_repeated": _b64url(b"change-me-later-ok!" * 2),  # 読める文を繰り返しただけ
+    "64_bytes_of_ten_digits": _b64url(b"0123456789" * 7),  # 長くても、種類は 10
+    "15_distinct_values": _b64url((bytes(range(15)) * 3)[:32]),  # 16 種類の 1 つ下(境目)
+}
+
+
+@pytest.mark.parametrize(
+    "key", [*WEAK_KEYS.values(), *NOT_RANDOM_KEYS.values()], ids=[*WEAK_KEYS, *NOT_RANDOM_KEYS]
+)
 def test_a_weak_signing_key_is_refused_by_every_way_of_starting_the_service(key, default_db, monkeypatch):
-    # X-39: 弱い鍵(base64url として読めない・32 バイト未満)では起動しない。環境変数から読む経路も、アプリを直接
-    # 組み立てる経路も、署名の道具そのものも、同じ条件で拒否する(MissingSessionKeyError とは別の、鍵が弱いという例外)。
+    # X-39: 弱い鍵(base64url として読めない・32 バイト未満・明らかに乱数でない)では起動しない。環境変数から読む経路も、
+    # アプリを直接組み立てる経路も、署名の道具そのものも、同じ条件で拒否する(MissingSessionKeyError とは別の、鍵が弱いという例外)。
     with pytest.raises(WeakSessionKeyError):
         validate_session_key(key)
     with pytest.raises(WeakSessionKeyError):
@@ -240,6 +263,47 @@ def test_the_key_boundary_is_32_bytes():
     with pytest.raises(WeakSessionKeyError):
         validate_session_key(_KEY_31_BYTES)
     validate_session_key(_KEY_32_BYTES)
+
+
+def test_a_key_that_is_clearly_not_random_is_refused_with_a_message_that_never_contains_the_key():
+    # X-39: 全部ゼロ・短い繰り返しの鍵は、長さと形が合っていても拒否する。エラーの文に、乱数でないという理由と、鍵の作り方を
+    # 書く。鍵の値は書かない。
+    assert NOT_RANDOM_KEYS["32_zero_bytes"] == _b64url(bytes(32))  # 全部ゼロの鍵の形(32 バイトなので、長さの条件は満たす)
+    assert len(base64.urlsafe_b64decode(NOT_RANDOM_KEYS["32_zero_bytes"] + "=")) == MIN_SESSION_KEY_BYTES
+    secret_pattern = b"s3cret-key-pattern!"  # 異なるバイト値は 13 種類。2 回繰り返して 38 バイト
+    assert len(set(secret_pattern)) < MIN_DISTINCT_KEY_BYTE_VALUES
+    pattern_key = _b64url(secret_pattern * 2)
+    for key in (*NOT_RANDOM_KEYS.values(), pattern_key):
+        for call in (
+            lambda: validate_session_key(key),
+            lambda: load_session_key({SESSION_KEY_ENV: key}),
+            lambda: SessionCodec(key, max_age_seconds=_MAX_AGE),
+        ):
+            with pytest.raises(WeakSessionKeyError) as excinfo:
+                call()
+            message = str(excinfo.value)
+            assert "not random" in message and str(MIN_DISTINCT_KEY_BYTE_VALUES) in message
+            assert _KEY_RECIPE in message and SESSION_KEY_ENV in message
+            assert key not in message and secret_pattern.decode() not in message
+
+
+def test_the_distinct_byte_value_boundary_is_16():
+    # X-39: 異なるバイト値が 15 種類は拒否、16 種類は受け付ける(境目)。32 バイトの乱数は、平均でおよそ 30 種類になる。
+    assert MIN_DISTINCT_KEY_BYTE_VALUES == 16
+    fifteen = _b64url((bytes(range(15)) * 3)[:32])
+    sixteen = _b64url(bytes(range(16)) * 2)  # 32 バイト、16 種類
+    with pytest.raises(WeakSessionKeyError):
+        validate_session_key(fifteen)
+    validate_session_key(sixteen)
+
+
+def test_keys_made_with_the_recommended_recipe_are_never_refused_for_looking_non_random():
+    # X-39 の対照: 推奨の作り方(`secrets.token_urlsafe(32)`)の鍵は、いつも通る。32 バイトの乱数が 16 種類未満になる確率は
+    # 約 3e-17 なので、2000 個作っても、この確認が偶然に落ちることはない(基準を高くしすぎた誤りがあれば、ここで落ちる)。
+    for _ in range(2000):
+        key = secrets.token_urlsafe(32)
+        validate_session_key(key)
+        assert len(set(base64.urlsafe_b64decode(key + "="))) >= MIN_DISTINCT_KEY_BYTE_VALUES
 
 
 def test_the_source_code_contains_no_signing_key():
