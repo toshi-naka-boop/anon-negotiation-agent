@@ -193,11 +193,13 @@ def build_web_env(
     agents_base_url: str | None = None,
     use_stub_agents: bool = True,
     run_referees: bool = False,
+    token_provider=None,
 ) -> WebAppEnv:
     """web の app を組み立てる。vault には、金庫のクライアントを包んだもの(止める仕掛けなど)も渡せる。
 
     use_stub_agents=False にすると、send_turn を差し込まず、agents_base_url を束ねた本物の
     agents.client.send_turn を使う(結合のテスト)。run_referees の既定は False(モジュールの docstring を参照)。
+    token_provider を渡すと、本物の send_turn は、agents の呼び出しにサービス間の ID トークンを付ける(台帳 X-37)。
     """
     agents = IdleAgents()
     sleep = FakeSleep(clock)
@@ -206,6 +208,8 @@ def build_web_env(
         kwargs["agents_base_url"] = agents_base_url
     if use_stub_agents:
         kwargs["send_turn"] = agents
+    if token_provider is not None:
+        kwargs["token_provider"] = token_provider
     app = create_app(
         vault=vault,
         default_db=default_db,

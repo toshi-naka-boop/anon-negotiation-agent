@@ -2,11 +2,12 @@
 
 レフェリー・見回りが使う口(view・events・moves・principal-answer・control・expire・見回りの一覧
 (open=true))と、本人の操作・削除の流れが使う口(policy の PUT・GET、blocklist の PUT、本人の削除、
-本人の交渉一覧、交渉の作成)を持つ。リクエスト・レスポンスの型は vault.api_models をそのまま使う
-(同じ形を二重に書かない)。
+本人の交渉一覧、交渉の作成)と、デモ用の読み出しの口(demo の events。台帳 X-38)を持つ。
+リクエスト・レスポンスの型は vault.api_models をそのまま使う(同じ形を二重に書かない)。
 
-サービス間の認証(ID トークン)はデプロイの段で足す。ここでは httpx.AsyncClient を受け取るだけ
-なので、本番は base_url を金庫の URL にした AsyncClient を、テストは金庫の app をつないだ
+サービス間の認証(Cloud Run の ID トークン。台帳 X-37)は、この httpx.AsyncClient の認証(`auth=`)として
+付ける(web.service_auth.IdTokenAuth。本番の AsyncClient を作る web.app が付ける)。ここでは httpx.AsyncClient を
+受け取るだけなので、本番は base_url を金庫の URL にした AsyncClient を、テストは金庫の app をつないだ
 AsyncClient(httpx.ASGITransport)を渡す。
 
 金庫の応答は次の例外に変換する。レフェリー・見回りは、409 と一時的な失敗を区別して扱う。
@@ -136,6 +137,18 @@ class VaultClient:
         """GET /v1/negotiations/{nid}/events?side=&after_seq=。イベント列のその側の見え方。"""
         data = await self._send(
             "GET", f"/v1/negotiations/{nid}/events", params={"side": side, "after_seq": after_seq}
+        )
+        return [EventViewItem.model_validate(item, strict=False) for item in data]
+
+    async def get_demo_events(self, nid: str, side: Side, after_seq: int = 0) -> list[EventViewItem]:
+        """GET /v1/demo/negotiations/{nid}/events?side=&after_seq=。デモ用の読み出し(台帳 X-38)。
+
+        金庫が、交渉の文書(正本)の mode が demo・attack で、候補者が架空人物のときだけ、通常の events と同じ
+        応答を返す。それ以外(本物の利用者の交渉・存在しない交渉・交渉 ID の形でない値)は、交渉があるかどうかを
+        知らせないよう、どれも 404(VaultNotFoundError)。
+        """
+        data = await self._send(
+            "GET", f"/v1/demo/negotiations/{nid}/events", params={"side": side, "after_seq": after_seq}
         )
         return [EventViewItem.model_validate(item, strict=False) for item in data]
 

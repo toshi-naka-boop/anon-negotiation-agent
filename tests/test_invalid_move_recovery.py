@@ -12,7 +12,8 @@
 web(レフェリー)の部分(末尾。1d-1): 台本のエージェントのスキーマ違反が invalid として登録され、
 次の TurnInput.last_error に理由が入り、直した手で交渉が続くこと。一時的なエラー
 (ConnectionError・TimeoutError)は再試行されて無効手にならず、再試行を使い切ったら agent_timeout に
-なること。ValueError(受信口が拒否した)は再試行せず schema_invalid にすること。
+なること。ValueError(受信口が拒否した、または一時的と印のない失敗。台帳 L9-5)は再試行せず schema_invalid にすること
+(LLM の出力が JSON でないなどの失敗を、本物の agents の受信口を通して確かめるのは tests/test_web_integration.py)。
 """
 
 from dataclasses import replace
@@ -433,7 +434,8 @@ async def test_retries_used_up_become_an_agent_timeout_invalid_move(store, web_e
 
 @pytest.mark.anyio
 async def test_value_error_from_the_receiver_is_not_retried_and_becomes_schema_invalid(store, web_env):
-    # 受信口が拒否した(ValueError)のは、同じ入力を送り直しても直らないので、再試行せず schema_invalid にする。
+    # 受信口が拒否した、または一時的と印のない失敗を返した(どちらも ValueError)のは、同じ入力を送り直しても直らないので、
+    # 再試行せず schema_invalid にする。
     env = web_env
     nid = create_demo_negotiation(store)
     env.agents.script("candidate", ValueError("receiver rejected the message"))

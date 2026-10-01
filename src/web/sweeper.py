@@ -11,9 +11,11 @@
 
 依頼者の見回り(30 日使われていない依頼者の削除。§4.1・§6.3)は、別の見回り(web.principal_sweeper)。
 
-本物の候補者の交渉の stages/{nid} の作成は、その依頼者のロックの下で行う(locks を渡したとき。台帳 I-4)。
+本物の候補者の交渉の stages/{nid} の作成は、その依頼者のロックの下で行う(locks と meta を渡したとき。台帳 I-4)。
 一覧を読んだ後に本人の削除が済むと、古い一覧から段の状態を作り直して、削除した依頼者の文書が
-残ってしまう。そのため、ロックを取った後に、金庫にその交渉が(削除中でなく)残っていることを確かめる。
+残ってしまう。そのため、ロックを取った後に、web の利用記録 principals_meta を見て、依頼者が(削除中でも
+削除済みでもなく)使える状態であることを確かめる(台帳 C-41)。金庫の交渉を見て確かめる形では、相手が本物の
+交渉(削除した側の見え方だけを消して、交渉の文書は残る。§3.8 の手順 3)で、「ある」と読んでしまうため。
 """
 
 import asyncio
@@ -26,9 +28,10 @@ from vault.clock import Clock, SystemClock
 
 from web.config import DEFAULT_WEB_CONFIG, SweeperConfig
 from web.locks import PrincipalLocks
+from web.principals_meta import DELETION_ACTIVE, PrincipalsMetaStore
 from web.referee import NegotiationContext, RefereeManager, Sleep
 from web.stages import StageStore
-from web.vault_client import VaultClient, VaultConflictError, VaultNotFoundError
+from web.vault_client import VaultClient
 
 _log = logging.getLogger(__name__)
 
@@ -58,7 +61,11 @@ class Sweeper:
         sleep: Sleep = asyncio.sleep,
         config: SweeperConfig = DEFAULT_WEB_CONFIG.sweeper,
         locks: PrincipalLocks | None = None,
+        meta: PrincipalsMetaStore | None = None,
     ) -> None:
+        if (locks is None) != (meta is None):
+            # 片方だけでは、本物の候補者の段の状態を、確かめずに作る(または、ロックなしで確かめる)ことになる。
+            raise ValueError("locks and meta must be given together")
         self._vault = vault
         self._stages = stages
         self._referees = referees
@@ -66,6 +73,7 @@ class Sweeper:
         self._sleep = sleep
         self._config = config
         self._locks = locks
+        self._meta = meta
 
     async def run(self) -> None:
         """起動時に 1 回、その後は interval_seconds ごとに見回る。止めるにはタスクを cancel する。"""
@@ -104,9 +112,7 @@ class Sweeper:
             return await action(item, report)
         except Exception as exc:
             report.errors += 1
-            _log.error(
-                "sweep step failed nid=%s step=%s error=%s", item.nid, action.__name__, type(exc).__name__
-            )
+            _log.error("sweep step failed step=%s error=%s", action.__name__, type(exc).__name__)
             return False
 
     async def _ensure_stage(self, item: OpenNegotiationSummary, report: SweepReport) -> bool:
@@ -115,24 +121,25 @@ class Sweeper:
             created = await self._stages.ensure(item.nid, principal_id)
         else:
             async with self._locks.lock(principal_id):
-                if not await self._negotiation_remains(item.nid):
+                if not await self._principal_is_active(principal_id):
                     return False
                 created = await self._stages.ensure(item.nid, principal_id)
         if created:
             report.stages_created += 1
         return created
 
-    async def _negotiation_remains(self, nid: str) -> bool:
-        """金庫にその交渉が(依頼者が削除中でなく)残っているか。ロックを持ったまま確かめる(台帳 I-4)。
+    async def _principal_is_active(self, principal_id: str) -> bool:
+        """依頼者が、利用記録 principals_meta の上で使える状態か。ロックを持ったまま確かめる(台帳 I-4・C-41)。
 
-        見つからない(404。削除の流れが消した)・依頼者が削除中(409)なら False: 一覧を読んだ後に
-        削除が進んだので、段の状態は作らない。金庫が応えないときは、例外のまま伝える(次の見回りでやり直す)。
+        利用記録がない(削除済み。面談を送っていない依頼者は、金庫に交渉を持てない)・削除中
+        (deletion_state=deleting)なら False: 一覧を読んだ後に削除の流れが進んだので、段の状態は作らない
+        (削除の流れが依頼者 ID で段の状態を消すので、作り直すと残ってしまう)。削除の流れは、印を立てる前に
+        同じロックを取って最後まで持つので、ここで見える状態は、途中ではなく、前の流れが済んだ後のもの。
+        利用記録を読めないときは、例外のまま伝える(次の見回りでやり直す)。
         """
-        try:
-            await self._vault.get_view(nid, "candidate")
-        except (VaultNotFoundError, VaultConflictError):
-            return False
-        return True
+        assert self._meta is not None  # locks と一緒に渡される(__init__ で確かめている)
+        meta = await self._meta.get(principal_id)
+        return meta is not None and meta.deletion_state == DELETION_ACTIVE
 
     async def _expire_if_due(self, item: OpenNegotiationSummary, report: SweepReport) -> bool:
         """期限を過ぎていれば expire を呼ぶ。終了処理(timeout)をしたら True。"""

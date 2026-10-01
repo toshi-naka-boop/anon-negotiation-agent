@@ -5,6 +5,10 @@
 デモ用のエンドポイントは、本物の依頼者には触れない(web と vault の両方で確かめる)。依頼者 ID は開始ページの
 GET でしか発行されない。
 
+デモ用の読み出しは、web の段の状態(stages。補助)と金庫のデモ用の口(正本。台帳 X-38)の両方で確かめる。
+段の状態が欠けている・壊れている本物の交渉も、読めない(段の状態だけに頼ると、欠けを「架空」と読んで、本物の
+依頼者の側の見え方を返してしまう)。
+
 「メーターの区間の API は、本物の利用者の交渉の ID を拒否する」は ③(推定区間メーター)なので、ここでは確かめない。
 
 金庫は本物の vault の app を ASGI のままつなぎ、web の app へは Browser(クッキーを持つ httpx のクライアント)
@@ -19,6 +23,7 @@ from pydantic import ValidationError
 from vault.api_models import CandidateParticipantRequest, CreateNegotiationRequest, EmployerParticipantRequest, MoveRequest
 from vault_helpers import new_id, put_candidate_and_employer_templates, sample_package
 from web.session import SESSION_COOKIE_NAME
+from web.vault_client import VaultNotFoundError, VaultUnavailableError
 from web_app_helpers import interview_body
 from web_helpers import create_demo_negotiation
 
@@ -236,6 +241,137 @@ async def test_demo_endpoints_cannot_touch_real_principals(web_app):
     assert document["mode"] == "demo"
     assert document["participants"]["candidate"]["is_fictional"] is True
     assert document["participants"]["candidate"]["principal_id"] is None
+
+
+def _record_demo_reads(web_app, monkeypatch) -> list[tuple]:
+    """web が金庫のデモ用の読み出しを呼ぶたびに、(交渉 ID, side, 結果または例外)を記録する(呼び出しそのものは、そのまま通す)。"""
+    calls: list[tuple] = []
+    original = web_app.vault.get_demo_events
+
+    async def recording(nid, side, after_seq=0):
+        try:
+            result = await original(nid, side, after_seq)
+        except Exception as exc:
+            calls.append((nid, side, type(exc).__name__))
+            raise
+        calls.append((nid, side, "ok"))
+        return result
+
+    monkeypatch.setattr(web_app.vault, "get_demo_events", recording)
+    return calls
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["demo", "attack"])
+async def test_the_demo_read_is_served_by_the_vaults_demo_endpoint(web_app, monkeypatch, mode):
+    # X-38: デモ用の読み出しは、金庫のデモ用の口(GET /v1/demo/negotiations/{nid}/events)から返す(通常の events の口ではない)。
+    # 応答は、通常の events と同じ(両側。after_seq も同じ)。
+    nid = create_demo_negotiation(web_app.store, mode=mode)
+    web_app.store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="check", package=sample_package())
+    )
+    await web_app.services.sweeper.sweep_once()  # 架空の候補者の交渉にも、段の状態を作る(§6.2)
+    calls = _record_demo_reads(web_app, monkeypatch)
+    demo = web_app.browser()
+
+    for side in ("candidate", "employer"):
+        response = await demo.get(f"/v1/demo/negotiations/{nid}/events", side=side)
+        assert response.status_code == 200
+        assert response.json() == [event.model_dump(mode="json") for event in web_app.store.get_events(nid, side)]
+    after = await demo.get(f"/v1/demo/negotiations/{nid}/events", side="candidate", after_seq=1)
+    assert after.json() == []  # after_seq も、金庫のデモ用の口に渡っている(check は seq 1)
+
+    assert calls == [(nid, "candidate", "ok"), (nid, "employer", "ok"), (nid, "candidate", "ok")]
+
+
+_STAGE_DOCUMENTS = {
+    "document_missing": None,  # 段の状態がない(まだ作っていない・消えた)
+    "field_missing": {"nid": "{nid}", "stage": 0},  # candidate_principal_id の項目が欠けている(移行・障害復旧・古い文書)
+    "field_none_looks_fictional": {"nid": "{nid}", "candidate_principal_id": None, "stage": 0},  # 壊れて、架空と読める
+    "someone_elses_principal": {"nid": "{nid}", "candidate_principal_id": "0123456789abcdef", "stage": 0},
+    "wrong_type": {"nid": "{nid}", "candidate_principal_id": 12345, "stage": 0},
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("variant", list(_STAGE_DOCUMENTS))
+async def test_a_real_negotiation_cannot_be_read_from_the_demo_endpoint_whatever_its_stage_document_says(
+    web_app, monkeypatch, variant
+):
+    # X-38 / DV-01: 本物の交渉の stages/{nid} が、欠けている・壊れている(項目がない・架空と読める・型が違う)ときも、
+    # 未認証のデモの口から、本物の依頼者の側の見え方を読めない(403)。web の段の状態だけに頼ると、欠けや壊れた文書で、
+    # 本物の交渉が「架空」と読まれて、金庫から返ってきてしまう。金庫が自分の文書(mode と、候補者が架空人物か)で断る。
+    browser = web_app.browser()
+    pid = await browser.register()
+    nid = await browser.create_negotiation(pid, web_app.put_employer_template())
+    web_app.store.process_move(  # 本物の依頼者の側に、読まれてはならない記録(確認手。評価つき)を作る
+        nid, MoveRequest(expected_version=0, side="candidate", move="check", package=sample_package())
+    )
+    stage_ref = web_app.default_db.collection("stages").document(nid)
+    document = _STAGE_DOCUMENTS[variant]
+    if document is None:
+        stage_ref.delete()
+    else:
+        stage_ref.set({key: nid if value == "{nid}" else value for key, value in document.items()})
+    calls = _record_demo_reads(web_app, monkeypatch)
+    demo = web_app.browser()  # クッキーのない訪問者
+
+    for side in ("candidate", "employer"):
+        response = await demo.get(f"/v1/demo/negotiations/{nid}/events", side=side)
+        assert response.status_code == 403, (variant, side, response.text)
+        assert response.json() == {"detail": "forbidden"}
+
+    # 対照: 本人は、同じ交渉の自分の側のイベントを、通常の口から読める(読まれてはならない記録は、実際にある)。
+    own = await browser.get(f"/v1/negotiations/{nid}/events")
+    assert [event["kind"] for event in own.json()] == ["check"]
+    if variant == "field_none_looks_fictional":
+        # web の確認(補助)は通るので、止めたのは金庫(正本): デモ用の口が、本物の交渉を 404 で断り、web が 403 に写した。
+        assert calls == [(nid, "candidate", "VaultNotFoundError"), (nid, "employer", "VaultNotFoundError")]
+    else:
+        assert calls == []  # web の確認(補助)が先に断った。金庫のデモ用の口は呼んでいない
+
+
+@pytest.mark.anyio
+async def test_a_stage_document_without_the_candidate_principal_id_is_not_read_as_fictional(web_app):
+    # X-38: 段の状態の判定(補助)。candidate_principal_id が null(架空の候補者)のときだけ「架空」。項目が欠けた文書は、
+    # 「架空」と読まない(以前は .get(...) is None で、欠けも「架空」になっていた)。ない文書・本物・交渉 ID の形でない値も False。
+    stages = web_app.services.stages
+    collection = web_app.default_db.collection("stages")
+    nids = {name: f"{index:016x}" for index, name in enumerate(["fictional", "missing_field", "real", "absent"], start=1)}
+    collection.document(nids["fictional"]).set({"nid": nids["fictional"], "candidate_principal_id": None, "stage": 0})
+    collection.document(nids["missing_field"]).set({"nid": nids["missing_field"], "stage": 0})
+    collection.document(nids["real"]).set({"nid": nids["real"], "candidate_principal_id": "0123456789abcdef", "stage": 0})
+
+    verdicts = {name: await stages.is_fictional_negotiation(nid) for name, nid in nids.items()}
+
+    assert verdicts == {"fictional": True, "missing_field": False, "real": False, "absent": False}
+    assert await stages.is_fictional_negotiation("not-a-negotiation-id") is False
+    assert await stages.is_fictional_negotiation("../stages") is False
+
+
+@pytest.mark.anyio
+async def test_a_vault_404_on_the_demo_read_is_mapped_to_403_without_the_vaults_detail(web_app, monkeypatch):
+    # X-38: 金庫のデモ用の口が 404(本物の交渉・存在しない交渉)を返したら、web はこれまでどおり 403 に写す。金庫の detail は返さない。
+    # 金庫が応えないとき(503)は、これまでどおり 503(あとで呼び直してよい)。
+    nid = create_demo_negotiation(web_app.store)
+    await web_app.services.sweeper.sweep_once()
+    demo = web_app.browser()
+
+    async def not_found(nid, side, after_seq=0):
+        raise VaultNotFoundError(f"vault returned 404: {nid}", 404)
+
+    monkeypatch.setattr(web_app.vault, "get_demo_events", not_found)
+    refused = await demo.get(f"/v1/demo/negotiations/{nid}/events", side="candidate")
+    assert (refused.status_code, refused.json()) == (403, {"detail": "forbidden"})
+    assert nid not in refused.text
+
+    async def unavailable(nid, side, after_seq=0):
+        raise VaultUnavailableError("vault says: secret detail", 503)
+
+    monkeypatch.setattr(web_app.vault, "get_demo_events", unavailable)
+    down = await demo.get(f"/v1/demo/negotiations/{nid}/events", side="candidate")
+    assert (down.status_code, down.json()) == (503, {"detail": "temporarily_unavailable"})
+    assert "secret detail" not in down.text
 
 
 def test_the_vault_also_refuses_demo_or_attack_negotiations_that_involve_a_real_principal(api_client):

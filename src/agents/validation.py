@@ -5,7 +5,9 @@ A2A のエラー(InvalidParamsError)を返し、LLM は一度も動かない。
 
 - parts が 1 件だけで、それが DataPart(TextPart・ファイルの Part は受け付けない)。
 - `data` が、その受信口の型(TurnInput または AttackerTurnInput)として有効。
-- ID(`nid`)は metadata から取り、形式(16 桁の 16 進数)を検査する。LLM への入力には入れない。
+- メッセージの metadata は、`nid`(16 桁の 16 進数)だけを受け付ける。未知の項目は拒否する(台帳 X-41。自由な
+  文字列を、A2A の層まで通さないため)。`nid` は省略してよい。LLM への入力には入れない。
+- リクエストの metadata(`params.metadata`)は、空かなしだけを受け付ける。
 
 検証の中身は negotiation_core.schema の型(TurnInput・AttackerTurnInput・Id)そのもので、
 ここに別の検証規則は持たない(§4.3「検証コードは negotiation_core.schema の 1 つだけ」)。
@@ -16,7 +18,7 @@ A2A のエラー(InvalidParamsError)を返し、LLM は一度も動かない。
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from a2a.types import Message
@@ -26,8 +28,8 @@ from pydantic import TypeAdapter, ValidationError
 from agents.wire import part_kind, struct_to_python, value_to_python
 from negotiation_core.schema import AttackerTurnInput, Id, TurnInput
 
-# metadata に載せる ID のキー(§2.7)。今は交渉 ID だけ。
-_ID_METADATA_KEYS = ("nid",)
+# メッセージの metadata に載せてよい項目(§2.7)。今は交渉 ID だけ。これ以外の項目は拒否する(台帳 X-41)。
+_MESSAGE_METADATA_KEYS = frozenset({"nid"})
 _ID_ADAPTER: TypeAdapter[str] = TypeAdapter(Id)
 
 # エラーに載せる違反の最大件数と、場所の文字列の最大長(送り手が場所の名前を作れるため)。
@@ -56,15 +58,33 @@ def _violations(exc: ValidationError, prefix: str = "") -> list[dict[str, str]]:
     return result[:_MAX_REPORTED_VIOLATIONS]
 
 
-def _check_ids(metadata: Mapping[str, Any], where: str) -> None:
-    """metadata に ID があれば、形式を検査する(ID の形式違反は拒否。AC-04)。"""
-    for key in _ID_METADATA_KEYS:
-        if key not in metadata:
-            continue
+def _unknown_fields(prefix: str, keys: Iterable[str]) -> list[dict[str, str]]:
+    """未知の項目の違反の一覧(場所と種類だけ。値は載せない)。
+
+    送り手が項目の名前を作れるので、名前は、文字と長さを絞った形で載せる(`_violations` と同じ扱い)。
+    """
+    return [
+        {"field": _UNSAFE_FIELD_CHARS.sub("?", f"{prefix}.{key}")[:_MAX_FIELD_NAME_LENGTH], "message": "extra_forbidden"}
+        for key in keys
+    ][:_MAX_REPORTED_VIOLATIONS]
+
+
+def _check_message_metadata(metadata: Mapping[str, Any]) -> None:
+    """message.metadata は、`nid`(16 桁の 16 進数)だけを受け付ける。未知の項目・ID の形式違反は拒否(AC-04・台帳 X-41)。"""
+    unknown = [key for key in metadata if key not in _MESSAGE_METADATA_KEYS]
+    if unknown:
+        raise _reject("unknown field in message.metadata", _unknown_fields("message.metadata", unknown))
+    if "nid" in metadata:
         try:
-            _ID_ADAPTER.validate_python(metadata[key])
+            _ID_ADAPTER.validate_python(metadata["nid"])
         except ValidationError as exc:
-            raise _reject(f"invalid ID in {where}", _violations(exc, prefix=f"{where}.{key}")) from None
+            raise _reject("invalid ID in message.metadata", _violations(exc, prefix="message.metadata.nid")) from None
+
+
+def _check_request_metadata(metadata: Mapping[str, Any]) -> None:
+    """リクエストの metadata(`params.metadata`)は、空かなしだけを受け付ける(台帳 X-41)。"""
+    if metadata:
+        raise _reject("params.metadata must be empty", _unknown_fields("params.metadata", metadata))
 
 
 def validate_request(
@@ -88,8 +108,8 @@ def validate_request(
         name = _PART_KIND_NAMES.get(kind or "", "an empty part")
         raise _reject(f"parts[0] is {name}; only a DataPart is accepted")
 
-    _check_ids(struct_to_python(message.metadata), "message.metadata")
-    _check_ids(request_metadata, "params.metadata")
+    _check_message_metadata(struct_to_python(message.metadata))
+    _check_request_metadata(request_metadata)
 
     data = value_to_python(parts[0].data)
     if not isinstance(data, dict):

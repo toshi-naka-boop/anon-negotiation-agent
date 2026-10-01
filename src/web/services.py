@@ -82,6 +82,7 @@ def build_services(
         sleep=sleep,
         config=config.sweeper,
         locks=locks,
+        meta=meta,
     )
     principal_sweeper = PrincipalSweeper(
         meta=meta, deletion=deletion, clock=clock, sleep=sleep, config=config.principal_sweeper

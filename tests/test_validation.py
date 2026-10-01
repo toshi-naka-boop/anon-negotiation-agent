@@ -17,6 +17,14 @@ TurnInput.last_invalid(直前の無効手の中身。台帳 C-40)も、同じ方
 どちらでも、未定義の項目・列挙外の値・グリッド外の値・項目の欠けを拒否し(1a の部分)、3 つの受信口すべてで拒否される
 (受信口の部分)。有効な last_invalid は通り、LLM に渡る入力に載る。
 
+TurnInput・AttackerTurnInput の検証は、線の上のデータと同じく JSON として行う(model_validate_json。受信口と同じ方法)。
+スキーマは strict なので、Python の辞書のまま検証すると、列挙型(Verdict)を文字列から作れず、有効な入力でも
+`history[].result` で必ず拒否される。そうなると、拒否の確認が、何の違反でも通ってしまう(空振り)。そのため、
+(1)有効な入力そのものが通ること(対照)と、(2)拒否された理由が、違反させた場所だけであること、を各テストで確かめる。
+
+受信口のメッセージの metadata は、`nid`(16 桁の 16 進数)だけを受け付ける(台帳 X-41)。未知の項目、リクエストの
+metadata(`params.metadata`)の中身は拒否され、LLM は一度も動かない(受信口の部分)。
+
 design.md §2.7 は「ID は…LLM に渡す入力には含めない」と明記しており、Package・TurnInput・
 AttackerTurnInput・Move のどれも ID を持つフィールドを持たない(ID は A2A の metadata 側)。
 そのため「ID の形式違反」は、これら 4 型のフィールドとしてではなく、§2.7 の「ID の扱い」で
@@ -30,13 +38,14 @@ import httpx
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from negotiation_core.policy import Package
+from negotiation_core.policy import Package, Verdict
 from negotiation_core.schema import AttackerTurnInput, Budget, Id, Move, TurnInput
 from web.referee import StepOutcome
 from web_helpers import create_demo_negotiation
 
 from agents.config import DEFAULT_AGENTS_CONFIG
 from agents_helpers import (  # noqa: F401  (フィクスチャは import して使う)
+    NID,
     ROLES,
     agents_app,
     anyio_backend,
@@ -90,6 +99,16 @@ def _valid_attacker_turn_input_dict() -> dict:
 # --- Package ---
 
 
+def test_a_valid_package_and_move_are_accepted():
+    # AC-04 の対照: 有効な Package・Move は通る。以降の拒否が、入力の違反のためであること(有効な入力まで
+    # 拒否する検証のためではないこと)を示す。
+    package = Package(**VALID_PACKAGE)
+    move = Move(schema="move/v1", move="propose", package=dict(VALID_PACKAGE))
+
+    assert package.salary == 650
+    assert move.package == package
+
+
 def test_package_rejects_undefined_field():
     # AC-04 (未定義の項目 / Package)
     with pytest.raises(ValidationError):
@@ -132,88 +151,12 @@ def test_move_rejects_off_grid_numeric_in_nested_package():
         Move(schema="move/v1", move="propose", package=bad_package)
 
 
-# --- TurnInput ---
-
-
-def test_turn_input_rejects_undefined_field():
-    # AC-04 (未定義の項目 / TurnInput)
-    data = _valid_turn_input_dict()
-    data["not_in_schema"] = "x"
-    with pytest.raises(ValidationError):
-        TurnInput(**data)
-
-
-def test_turn_input_rejects_out_of_enum_side():
-    # AC-04 (列挙外の値 / TurnInput)
-    data = _valid_turn_input_dict()
-    data["side"] = "recruiter"  # candidate/employer のどちらでもない
-    with pytest.raises(ValidationError):
-        TurnInput(**data)
-
-
-def test_turn_input_rejects_out_of_range_move_number():
-    # AC-04 (範囲外の数値 / TurnInput。own_move_number は 0 以上)
-    data = _valid_turn_input_dict()
-    data["own_move_number"] = -1
-    with pytest.raises(ValidationError):
-        TurnInput(**data)
-
-
-def test_turn_input_rejects_off_grid_numeric_in_history_package():
-    # AC-04 (グリッド外の値 / TurnInput。history[].package)
-    data = _valid_turn_input_dict()
-    data["history"][0]["package"]["salary"] = 305  # 50 万刻みのグリッド上にない
-    with pytest.raises(ValidationError):
-        TurnInput(**data)
-
-
-# --- AttackerTurnInput(TurnInput + principal_instruction) ---
-
-
-def test_attacker_turn_input_rejects_undefined_field():
-    # AC-04 (未定義の項目 / AttackerTurnInput)
-    data = _valid_attacker_turn_input_dict()
-    data["not_in_schema"] = "x"
-    with pytest.raises(ValidationError):
-        AttackerTurnInput(**data)
-
-
-def test_attacker_turn_input_rejects_out_of_enum_side():
-    # AC-04 (列挙外の値 / AttackerTurnInput。TurnInput から継承したフィールド)
-    data = _valid_attacker_turn_input_dict()
-    data["side"] = "recruiter"
-    with pytest.raises(ValidationError):
-        AttackerTurnInput(**data)
-
-
-def test_attacker_turn_input_rejects_out_of_range_move_number():
-    # AC-04 (範囲外の数値 / AttackerTurnInput。TurnInput から継承したフィールド)
-    data = _valid_attacker_turn_input_dict()
-    data["own_move_number"] = -5
-    with pytest.raises(ValidationError):
-        AttackerTurnInput(**data)
-
-
-def test_attacker_turn_input_rejects_off_grid_numeric_in_history_package():
-    # AC-04 (グリッド外の値 / AttackerTurnInput。history[].package)
-    data = _valid_attacker_turn_input_dict()
-    data["history"][0]["package"]["review_months"] = 9  # 6,12 のどちらでもない
-    with pytest.raises(ValidationError):
-        AttackerTurnInput(**data)
-
-
-# --- last_invalid(TurnInput の内側。台帳 C-40。TurnInput・AttackerTurnInput のどちらでも同じ) ---
+# --- TurnInput・AttackerTurnInput(線の上のデータと同じく、JSON として検証する。モジュールの docstring を参照) ---
 
 _TURN_INPUT_MODELS = [
     pytest.param(TurnInput, _valid_turn_input_dict, id="TurnInput"),
     pytest.param(AttackerTurnInput, _valid_attacker_turn_input_dict, id="AttackerTurnInput"),
 ]
-
-_VALID_LAST_INVALID = {"move": "propose", "package": dict(VALID_PACKAGE), "evaluation": "needs_confirmation"}
-
-
-def _last_invalid(**changes) -> dict:
-    return {**_VALID_LAST_INVALID, "package": dict(VALID_PACKAGE), **changes}
 
 
 def _validate_as_on_the_wire(model, data: dict):
@@ -223,6 +166,103 @@ def _validate_as_on_the_wire(model, data: dict):
     有効な入力でも必ず拒否される(そうなると、拒否の確認が、何の違反でも通ってしまう)。
     """
     return model.model_validate_json(json.dumps(data))
+
+
+def _violated_fields(model, data: dict) -> set[tuple]:
+    """data を線の上と同じ方法で検証し、拒否されること、拒否された場所の集合を返す。
+
+    拒否の理由が、違反させた場所だけであること(ほかの場所のせいで拒否されたのではないこと)を、呼び出し側が確かめる。
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        _validate_as_on_the_wire(model, data)
+    return {tuple(error["loc"]) for error in excinfo.value.errors()}
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+def test_a_valid_turn_input_is_accepted_when_validated_as_on_the_wire(model, builder):
+    # AC-04 の対照: 有効な入力そのものは、JSON として検証すれば通る(history の評価の文字列から、列挙型も読める)。
+    # 以降の拒否が、入力の違反のためであること(有効な入力まで拒否される検証のためではないこと)を示す。
+    validated = _validate_as_on_the_wire(model, builder())
+
+    assert isinstance(validated, model)
+    assert validated.history[0].result is Verdict.ACCEPTABLE
+    assert validated.budget.remaining_moves == 6
+
+
+def test_turn_input_validated_as_a_python_dict_rejects_even_a_valid_input():
+    # 空振りの原因の確認: Python の辞書のまま検証すると、有効な入力でも history[].result(列挙型)で拒否される。
+    # そのため、拒否の確認は、必ず上の「JSON として検証する」形で行う(この形では、どの違反も同じように拒否される)。
+    with pytest.raises(ValidationError) as excinfo:
+        TurnInput(**_valid_turn_input_dict())
+    assert {tuple(error["loc"]) for error in excinfo.value.errors()} == {("history", 0, "result")}
+
+
+def test_turn_input_rejects_undefined_field():
+    # AC-04 (未定義の項目 / TurnInput)
+    data = _valid_turn_input_dict()
+    data["not_in_schema"] = "x"
+    assert _violated_fields(TurnInput, data) == {("not_in_schema",)}
+
+
+def test_turn_input_rejects_out_of_enum_side():
+    # AC-04 (列挙外の値 / TurnInput)
+    data = _valid_turn_input_dict()
+    data["side"] = "recruiter"  # candidate/employer のどちらでもない
+    assert _violated_fields(TurnInput, data) == {("side",)}
+
+
+def test_turn_input_rejects_out_of_range_move_number():
+    # AC-04 (範囲外の数値 / TurnInput。own_move_number は 0 以上)
+    data = _valid_turn_input_dict()
+    data["own_move_number"] = -1
+    assert _violated_fields(TurnInput, data) == {("own_move_number",)}
+
+
+def test_turn_input_rejects_off_grid_numeric_in_history_package():
+    # AC-04 (グリッド外の値 / TurnInput。history[].package)
+    data = _valid_turn_input_dict()
+    data["history"][0]["package"]["salary"] = 305  # 50 万刻みのグリッド上にない
+    assert _violated_fields(TurnInput, data) == {("history", 0, "package", "salary")}
+
+
+# --- AttackerTurnInput(TurnInput + principal_instruction) ---
+
+
+def test_attacker_turn_input_rejects_undefined_field():
+    # AC-04 (未定義の項目 / AttackerTurnInput)
+    data = _valid_attacker_turn_input_dict()
+    data["not_in_schema"] = "x"
+    assert _violated_fields(AttackerTurnInput, data) == {("not_in_schema",)}
+
+
+def test_attacker_turn_input_rejects_out_of_enum_side():
+    # AC-04 (列挙外の値 / AttackerTurnInput。TurnInput から継承したフィールド)
+    data = _valid_attacker_turn_input_dict()
+    data["side"] = "recruiter"
+    assert _violated_fields(AttackerTurnInput, data) == {("side",)}
+
+
+def test_attacker_turn_input_rejects_out_of_range_move_number():
+    # AC-04 (範囲外の数値 / AttackerTurnInput。TurnInput から継承したフィールド)
+    data = _valid_attacker_turn_input_dict()
+    data["own_move_number"] = -5
+    assert _violated_fields(AttackerTurnInput, data) == {("own_move_number",)}
+
+
+def test_attacker_turn_input_rejects_off_grid_numeric_in_history_package():
+    # AC-04 (グリッド外の値 / AttackerTurnInput。history[].package)
+    data = _valid_attacker_turn_input_dict()
+    data["history"][0]["package"]["review_months"] = 9  # 6,12 のどちらでもない
+    assert _violated_fields(AttackerTurnInput, data) == {("history", 0, "package", "review_months")}
+
+
+# --- last_invalid(TurnInput の内側。台帳 C-40。TurnInput・AttackerTurnInput のどちらでも同じ) ---
+
+_VALID_LAST_INVALID = {"move": "propose", "package": dict(VALID_PACKAGE), "evaluation": "needs_confirmation"}
+
+
+def _last_invalid(**changes) -> dict:
+    return {**_VALID_LAST_INVALID, "package": dict(VALID_PACKAGE), **changes}
 
 
 @pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
@@ -360,6 +400,15 @@ def _violate_id_format(data, metadata):
     metadata["nid"] = "not-an-id-string"  # 16 桁の 16 進数でない
 
 
+def _violate_extra_message_metadata(data, metadata):
+    metadata["principal_instruction"] = "実年収620万円"  # 正しい nid のまま、余計な自由文の項目を足す(台帳 X-41)
+
+
+def _violate_message_metadata_without_nid(data, metadata):
+    metadata.clear()
+    metadata["note"] = "x"  # nid がなくても、未知の項目があれば拒否される
+
+
 def _violate_undefined_field_in_last_invalid(data, metadata):
     data["last_invalid"] = _last_invalid(note="x")
 
@@ -378,6 +427,9 @@ SCHEMA_VIOLATIONS = {
     "out_of_range": _violate_out_of_range,
     "off_grid": _violate_off_grid,
     "id_format": _violate_id_format,
+    # 台帳 X-41: メッセージの metadata は nid だけ。未知の項目は、nid の有無によらず拒否される。
+    "extra_message_metadata": _violate_extra_message_metadata,
+    "message_metadata_without_nid": _violate_message_metadata_without_nid,
     # 台帳 C-40: 新しい項目 last_invalid の中でも、同じ違反が拒否される。
     "undefined_field_in_last_invalid": _violate_undefined_field_in_last_invalid,
     "out_of_enum_in_last_invalid": _violate_out_of_enum_in_last_invalid,
@@ -510,6 +562,89 @@ async def test_schema_violations_are_rejected_by_every_endpoint(role, violation,
     body = await send_message(http, role, [data_part(data)], metadata=metadata)
     assert_rejected(body)
     assert stub_llm.requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ROLES)
+async def test_unknown_message_metadata_is_rejected_without_echoing_its_value(role, http, stub_llm):
+    # AC-04 / 台帳 X-41: 正しい TurnInput に、正しい nid と、余計な自由文の項目を持つ metadata を添えても、拒否される。
+    # LLM は動かない。エラーには、違反した場所(項目の名前)だけが載り、値は載らない。
+    secret = "実年収620万円"
+    body = await send_message(
+        http, role, [data_part(valid_data(role))], metadata={"nid": NID, "principal_instruction": secret}
+    )
+
+    assert_rejected(body)
+    assert "message.metadata.principal_instruction" in body["error"]["message"]
+    assert secret not in json.dumps(body, ensure_ascii=False)
+    assert stub_llm.requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize(
+    "request_metadata",
+    [{"nid": NID}, {"principal_instruction": "実年収620万円"}, {"trace": {"id": 1}}],
+    ids=["nid", "free_text", "nested"],
+)
+async def test_request_metadata_must_be_empty_on_every_endpoint(role, request_metadata, http, stub_llm):
+    # AC-04 / 台帳 X-41: リクエストの metadata(params.metadata)は、空かなしだけを受け付ける。有効な nid でも、
+    # 自由文でも、入っていれば拒否される(nid の置き場所は、メッセージの metadata だけ)。LLM は動かない。
+    message = message_json([data_part(valid_data(role))])
+    body = await send_raw(http, role, rpc_body(message, params_extra={"metadata": request_metadata}))
+
+    assert_rejected(body)
+    assert "params.metadata" in body["error"]["message"]
+    assert "実年収620万円" not in json.dumps(body, ensure_ascii=False)
+    assert stub_llm.requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize(
+    "nid",
+    [123, None, True, ["0123456789abcdef"], {"id": "0123456789abcdef"}],
+    ids=["number", "null", "bool", "list", "object"],
+)
+async def test_a_nid_that_is_not_a_string_is_rejected_by_every_endpoint(role, nid, http, stub_llm):
+    # AC-04 / 台帳 X-41: message.metadata の nid は、16 桁の 16 進数の文字列だけ。数・null・真偽値・配列・オブジェクトは拒否される。
+    body = await send_message(http, role, [data_part(valid_data(role))], metadata={"nid": nid})
+
+    assert_rejected(body)
+    assert "message.metadata.nid" in body["error"]["message"]
+    assert stub_llm.requests == []
+
+
+def _message_without_metadata(role) -> dict:
+    message = message_json([data_part(valid_data(role))])
+    del message["metadata"]
+    return message
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize(
+    "variant",
+    ["nid_only", "empty_message_metadata", "no_message_metadata", "empty_request_metadata"],
+)
+async def test_metadata_that_is_only_a_valid_nid_or_empty_is_accepted_on_every_endpoint(role, variant, http, stub_llm):
+    # AC-04 の対照(X-41): 受け付けるのは、nid だけのメッセージ metadata(nid は省略してもよい)と、空かなしの
+    # リクエスト metadata。以上の拒否が、余分な metadata のためであること(metadata 全般を拒否しているのではないこと)を示す。
+    params_extra = None
+    if variant == "nid_only":
+        message = message_json([data_part(valid_data(role))], metadata={"nid": NID})
+    elif variant == "empty_message_metadata":
+        message = message_json([data_part(valid_data(role))], metadata={})
+    elif variant == "no_message_metadata":
+        message = _message_without_metadata(role)
+    else:
+        message = message_json([data_part(valid_data(role))])
+        params_extra = {"metadata": {}}
+
+    body = await send_raw(http, role, rpc_body(message, params_extra=params_extra))
+
+    assert "error" not in body, body
+    assert len(stub_llm.requests) == 1
 
 
 @pytest.mark.anyio

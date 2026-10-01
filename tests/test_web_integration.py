@@ -7,6 +7,7 @@ web の app・agents の app・金庫の app を、すべて本物のまま ASGI
 - デモの交渉が、web の API で作られ、判定(judged)まで進む。
 - 本物の候補者が、面談の送信 → 交渉の作成の API を通って、判定まで進む(段の状態にも期限の項目は付かない)。
 - 起動(lifespan)で、交渉の見回りと依頼者の見回りが動き、見回りがレフェリーのタスクを作る。
+- LLM の出力が JSON でないなど、一時的でない失敗は、再試行されずに schema_invalid として登録される(台帳 L9-5)。
 """
 
 import asyncio
@@ -173,3 +174,35 @@ async def test_the_startup_runs_both_sweepers_and_the_sweeper_starts_the_referee
     wired.sleep.tick()
     await asyncio.sleep(0)
     assert len(wired.sleep.calls) == calls_at_shutdown
+
+
+@pytest.mark.anyio
+async def test_a_model_output_that_is_not_json_is_not_retried_and_is_registered_as_schema_invalid(
+    store, wired, stub_llm
+):
+    # 台帳 L9-5: LLM の出力が JSON でない(一時的でない失敗)。agents の受信口は印のない失敗を返し、クライアントはそれを
+    # ValueError にするので、レフェリーは再試行せず、手番ごとに 1 回だけ呼んで schema_invalid として登録する。
+    # 同じ側の無効手が 3 回続いて、金庫が交渉を止める(stopped_invalid)。以前は、ConnectionError にして 4 回ずつ送り直し
+    # (temperature 0 では、同じ失敗を繰り返す)、理由も agent_timeout になっていた。
+    stub_llm.behavior = lambda _request: "this is not a JSON object"
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    browser = wired.browser()
+
+    created = await browser.post(
+        "/v1/demo/negotiations",
+        {
+            "request_id": "request-demo1",
+            "candidate_template_id": candidate_template.template_id,
+            "employer_template_id": employer_template.template_id,
+        },
+    )
+    assert created.status_code == 200
+    nid = created.json()["nid"]
+    await asyncio.wait_for(wired.services.referees.task(nid), 30)
+
+    events = store.get_events(nid, "candidate")
+    assert [(e.kind, e.reason) for e in events] == [("invalid", "schema_invalid")] * 3 + [("final_result", None)]
+    assert len(stub_llm.requests) == 3  # 無効手 1 回につき、LLM は 1 回(再試行なら 12 回)
+    assert wired.sleep.calls == []  # 再試行の待ち時間(1・2・4 秒)を取っていない
+    document = store._negotiation_ref(nid).get().to_dict()
+    assert (document["status"], document["end_reason"]) == ("judged", "stopped_invalid")

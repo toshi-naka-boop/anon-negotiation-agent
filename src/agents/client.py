@@ -11,9 +11,13 @@ a2a-sdk のクライアントで、受信口へ TurnInput(または AttackerTurn
 |---|---|
 | 時間切れ(timeout_s。全体の壁時計) | `TimeoutError` |
 | A2A の通信エラー(接続できない・HTTP エラー・応答の形が A2A でない) | `ConnectionError` |
-| 受信口が返した一時的なエラー(LLM の 429・5xx・時間切れ) | `ConnectionError` |
-| 受信口が返したそのほかの失敗(実行の失敗) | `ConnectionError`(レフェリーが再試行し、駄目なら agent_timeout にする) |
+| 受信口が返した一時的なエラー(LLM の 429・5xx・時間切れ。`transient` の印つき) | `ConnectionError`(レフェリーが再試行し、駄目なら agent_timeout にする) |
+| 受信口が返した、一時的と印のない失敗(LLM の出力が JSON でない・ADK の検証エラーなど。台帳 L9-5) | `ValueError`(同じ入力を送り直しても直らないので、レフェリーは再試行せず schema_invalid にする) |
 | 受信口が入力を拒否した(壁 1。スキーマ違反・大きすぎる本文など) | `ValueError` |
+
+認証(台帳 X-37): `auth` を渡すと、その httpx の認証(`web.service_auth.IdTokenAuth`。呼び先の URL を audience にした
+ID トークンを `Authorization: Bearer` で付ける)を、この呼び出しの HTTP クライアントに付ける。渡さなければ付けない
+(ローカル・テスト)。agents の側は、Cloud Run の IAM で認証を必須にする(§1.1)ので、アプリの中での検証はしない。
 """
 
 import asyncio
@@ -87,11 +91,13 @@ async def send_turn(
     *,
     nid: str,
     timeout_s: float,
+    auth: httpx.Auth | None = None,
 ) -> dict:
     """role の受信口へ turn_input を 1 回だけ送り、返ってきた DataPart の `data`(dict)を返す。
 
     base_url は agents サービスの URL(例: `https://agents.example`)。送り先は `{base_url}/a2a/{role}`。
     `nid`(交渉 ID)は A2A のメッセージの metadata に載せる。LLM には渡らない(§2.7)。
+    `auth` は、この呼び出しの HTTP クライアントに付ける認証(サービス間の ID トークン。台帳 X-37)。
     失敗の伝え方はモジュールの docstring の表のとおり。
     """
     if role not in ROLES:
@@ -110,6 +116,8 @@ async def send_turn(
         # httpx の時間切れは段階ごと(接続・読み取りなど)なので、全体の上限を別に掛ける。
         async with asyncio.timeout(timeout_s):
             async with _open_http_client(timeout_s) as http:
+                if auth is not None:
+                    http.auth = auth
                 client = ClientFactory(ClientConfig(httpx_client=http, streaming=False)).create(_card_for(url))
                 async for event in client.send_message(request):
                     response = event
@@ -122,9 +130,11 @@ async def send_turn(
     except A2AClientError as exc:  # 通信の失敗(接続できない・HTTP エラー・応答が JSON でない)
         raise ConnectionError(f"could not talk to the agent endpoint: {exc}") from exc
     except A2AError as exc:  # 受信口が返した、入力の拒否以外の失敗
-        transient = isinstance(exc.data, dict) and exc.data.get(TRANSIENT_ERROR_KEY) == "true"
-        kind = "a temporary error" if transient else "an error"
-        raise ConnectionError(f"the agent endpoint returned {kind}: {exc}") from exc
+        if isinstance(exc.data, dict) and exc.data.get(TRANSIENT_ERROR_KEY) == "true":
+            raise ConnectionError(f"the agent endpoint returned a temporary error: {exc}") from exc
+        # 一時的と印のない失敗(LLM の出力が JSON でない・ADK の検証エラーなど)は、temperature 0 では送り直しても同じ
+        # 失敗を繰り返す。ConnectionError(再試行する)にせず、ValueError(再試行しない)にする(台帳 L9-5)。
+        raise ValueError(f"the agent endpoint returned a non-transient failure: {exc}") from exc
     except httpx.HTTPError as exc:
         raise ConnectionError(f"could not talk to the agent endpoint: {type(exc).__name__}") from exc
     except (ValueError, TypeError, KeyError, ParseError) as exc:

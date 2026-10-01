@@ -5,12 +5,17 @@
   サーバ側でも期限切れを受け付けない(ブラウザがクッキーを捨てる前提には頼らない)。
 - クッキーは HttpOnly・Secure・SameSite=Lax、寿命(Max-Age)は暫定 29 日(config/params.toml)。
 - 署名の鍵は環境変数から読む。コードに鍵を書かず、既定値も持たない(鍵がなければ起動を拒否する)。
+- 鍵は、base64url として読めて、デコードした長さが 32 バイト以上でなければならない(台帳 X-39)。弱い鍵では、
+  /start で得た自分のクッキーから鍵を総当たりして、他人のクッキーを偽造できる。満たさなければ起動を拒否する。
+  鍵の作り方: `python -c "import secrets; print(secrets.token_urlsafe(32))"`(32 バイトの乱数を base64url にした 43 文字)
 - 時刻は注入できる(呼び出し側が now を渡す)ので、テストは sleep せずに期限を確かめられる。
 
 ID を発行するのは、開始ページの GET だけ(web.api の start_page)。この module は、発行の条件は
 決めず、署名・検証・クッキーの形だけを持つ。
 """
 
+import base64
+import binascii
 import datetime as dt
 import hashlib
 import os
@@ -26,6 +31,12 @@ from negotiation_core import ID_PATTERN
 SESSION_COOKIE_NAME = "principal_session"
 SESSION_KEY_ENV = "SESSION_SIGNING_KEY"
 
+# 署名の鍵の最小の長さ(base64url をデコードした後のバイト数。HMAC-SHA256 の出力と同じ 256 ビット)。
+MIN_SESSION_KEY_BYTES = 32
+# 鍵の作り方(エラーの文に載せる)。
+_KEY_RECIPE = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+_BASE64URL_RE = re.compile(r"[A-Za-z0-9_-]+={0,2}")
+
 # 署名の用途を分けるための固定の文字列(鍵ではない)。別の用途に同じ鍵を使っても、署名が流用されない。
 _SALT = "tenshokuagent.web.principal-session.v1"
 _ID_RE = re.compile(ID_PATTERN)
@@ -35,15 +46,56 @@ class MissingSessionKeyError(RuntimeError):
     """署名の鍵がない(または空)。web は、この場合に起動を拒否する(既定値を持たない。§6.3)。"""
 
 
+class WeakSessionKeyError(RuntimeError):
+    """署名の鍵が弱い(base64url として読めない、またはデコードして 32 バイト未満)。web は、この場合に起動を拒否する(§6.3)。
+
+    エラーの文に、鍵の値は入れない。
+    """
+
+
+def _decoded_length(key: str) -> int | None:
+    """key が base64url として読めれば、デコードしたバイト数。読めなければ None。
+
+    使える文字は A-Z・a-z・0-9・`-`・`_`(標準の base64 の `+`・`/` は不可)。末尾の `=`(パディング)は、あってもなくてもよい。
+    """
+    if _BASE64URL_RE.fullmatch(key) is None:
+        return None
+    padded = key + "=" * (-len(key) % 4)
+    try:
+        return len(base64.b64decode(padded.replace("-", "+").replace("_", "/"), validate=True))
+    except binascii.Error:
+        return None
+
+
+def validate_session_key(key: str) -> None:
+    """署名の鍵が、base64url として読めて、デコードした長さが 32 バイト以上であることを確かめる。
+
+    満たさなければ WeakSessionKeyError(鍵の値はエラーの文に入れない)。鍵の作り方(32 バイトの乱数):
+    `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+    """
+    length = _decoded_length(key)
+    if length is None or length < MIN_SESSION_KEY_BYTES:
+        raise WeakSessionKeyError(
+            f"the session signing key ({SESSION_KEY_ENV}) must be a base64url string that decodes to at least "
+            f"{MIN_SESSION_KEY_BYTES} bytes; generate one with: {_KEY_RECIPE}"
+        )
+
+
 def load_session_key(environ: Mapping[str, str] | None = None) -> str:
-    """環境変数 SESSION_SIGNING_KEY から署名の鍵を読む。なければ MissingSessionKeyError。"""
+    """環境変数 SESSION_SIGNING_KEY から署名の鍵を読み、強さを確かめる(起動時の確認)。
+
+    なければ MissingSessionKeyError、base64url として読めない・32 バイト未満なら WeakSessionKeyError
+    (どちらも、web は起動を拒否する)。前後の空白は取り除く(Secret Manager に `print` の出力をそのまま入れると、
+    値の末尾に改行が付くため)。鍵の作り方: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+    """
     source = os.environ if environ is None else environ
-    key = source.get(SESSION_KEY_ENV, "")
-    if not key.strip():
+    key = source.get(SESSION_KEY_ENV, "").strip()
+    if not key:
         raise MissingSessionKeyError(
             f"the environment variable {SESSION_KEY_ENV} is not set; "
-            "the web service refuses to start without a session signing key"
+            f"the web service refuses to start without a session signing key (generate one with: {_KEY_RECIPE})"
         )
+    validate_session_key(key)
     return key
 
 
@@ -64,6 +116,7 @@ class SessionCodec:
     def __init__(self, secret_key: str, *, max_age_seconds: int) -> None:
         if not secret_key or not secret_key.strip():
             raise MissingSessionKeyError("the session signing key must not be empty")
+        validate_session_key(secret_key)  # base64url で 32 バイト以上(create_app の経路でも、弱い鍵では起動しない)
         self._serializer = URLSafeSerializer(
             secret_key,
             salt=_SALT,

@@ -1,7 +1,8 @@
 """レフェリーの 1 手ごとの流れ(design.md §4.1)。
 
 呼ぶエージェントの種類(candidate・employer・attacker)、登録する手の中身、409 で状態を読み直すこと、
-待つ場面(一時停止・回答待ち・金庫が応えない)、交渉が消えたときの終わり方を確かめる。
+待つ場面(一時停止・回答待ち・金庫が応えない・金庫の 500 などのエラー。台帳 L9-1)、交渉が消えたときの終わり方、
+手数を使い切った側の手番ではエージェントを呼ばないこと(台帳 L9-3)を確かめる。
 再試行・無効手の登録は tests/test_invalid_move_recovery.py、途中確認の回答は
 tests/test_answer_reevaluation.py、再開・見回りは tests/test_referee_resume.py にある。
 """
@@ -14,7 +15,7 @@ from vault.api_models import ControlRequest
 from vault.models import EmployerRule
 from vault_helpers import needs_confirmation_policy, sample_package
 from web.referee import NegotiationContext, RefereeManager, StepOutcome
-from web.vault_client import VaultUnavailableError
+from web.vault_client import VaultClientError, VaultConflictError, VaultNotFoundError, VaultUnavailableError
 from web_helpers import (
     ScriptedAnswerer,
     create_demo_negotiation,
@@ -269,6 +270,171 @@ async def test_referee_waits_out_a_vault_that_is_temporarily_unavailable(store, 
     assert await referee.step() is StepOutcome.WAITING
     assert env.agents.calls == []
     assert await referee.step() is StepOutcome.MOVED
+
+
+class _FailingOnce:
+    """金庫のクライアントを包み、method の最初の 1 回だけ、status の VaultClientError を投げる(金庫の 500 などの再現)。"""
+
+    def __init__(self, inner, method: str, status: int) -> None:
+        self._inner = inner
+        self._method = method
+        self._status = status
+        self.failed = 0
+
+    def __getattr__(self, name: str):
+        attribute = getattr(self._inner, name)
+        if name != self._method:
+            return attribute
+
+        async def call(*args, **kwargs):
+            if not self.failed:
+                self.failed += 1
+                raise VaultClientError(f"vault returned {self._status}: boom", self._status)
+            return await attribute(*args, **kwargs)
+
+        return call
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [500, 502, 422, 403])
+@pytest.mark.parametrize("method", ["get_view", "get_events", "post_move"])
+async def test_referee_waits_out_a_vault_error_other_than_404_409_and_503_instead_of_crashing(
+    store, web_env, method, status
+):
+    # 台帳 L9-1: 金庫が 404・409・503 以外(500・502 など)を返しても、step() は例外を投げず、待って読み直す(WAITING)。
+    # タスクを落とすと、見回りが作り直すまで(最長 60 秒)交渉が止まる。金庫の読み取りの中で出た Aborted が 500 になり得る。
+    env = web_env
+    package = sample_package()
+    nid = create_demo_negotiation(store)
+    flaky = _FailingOnce(env.vault, method, status)
+    await env.restart(vault=flaky)
+    env.agents.script("candidate", move_dict("propose", package), move_dict("propose", package))
+    referee = env.referee(nid)
+
+    assert await referee.step() is StepOutcome.WAITING  # 落とさずに、待つ
+    assert flaky.failed == 1
+    assert await referee.step() is StepOutcome.MOVED  # 読み直して、続ける
+    assert [e.kind for e in store.get_events(nid, "candidate")] == ["propose"]  # 二重には登録されていない
+
+
+@pytest.mark.anyio
+async def test_the_run_loop_and_the_task_survive_a_vault_500_and_finish_the_negotiation(store, web_env):
+    # 台帳 L9-1: run() も、タスクとして動かしたときも、金庫の 500 で落ちない。間隔を空けて読み直し、交渉を終わりまで進める。
+    env = web_env
+    nid = create_demo_negotiation(store)
+    await env.restart(vault=_FailingOnce(env.vault, "get_view", 500))
+    env.agents.script("candidate", move_dict("propose", sample_package()))
+    env.agents.script("employer", move_dict("accept"))
+    manager = RefereeManager(env.deps)
+
+    assert manager.start(NegotiationContext(nid=nid, mode="demo", candidate_principal_id=None))
+    task = manager.task(nid)
+    await asyncio.wait_for(task, 30)
+
+    assert task.exception() is None  # 例外で終わっていない
+    assert env.sleep.calls == [env.config.wait_poll_interval_seconds]  # 500 の後に 1 回だけ待った
+    assert store.get_view(nid, "candidate").status == "judged"
+
+
+def _vault_whose_view_fails_with(real_vault, error: VaultClientError):
+    """get_view だけが error を投げる金庫のクライアント(ほかの口は、本物のまま)。"""
+
+    class Failing:
+        def __getattr__(self, name):
+            return getattr(real_vault, name)
+
+        async def get_view(self, nid, side):
+            raise error
+
+    return Failing()
+
+
+@pytest.mark.anyio
+async def test_a_404_a_409_and_a_503_keep_their_own_outcomes(store, web_env):
+    # 台帳 L9-1 の対照: 404(交渉が消えた)は終わり、409(状態が変わった)は読み直し、503(一時的)は待つ。それ以外だけを
+    # 新しく「待つ」にした(区別が崩れていないこと)。
+    env = web_env
+    nid = create_demo_negotiation(store)
+    real_vault = env.vault
+    cases = [
+        (VaultNotFoundError("gone", 404), StepOutcome.FINISHED),
+        (VaultConflictError("changed", 409), StepOutcome.RETRY),
+        (VaultUnavailableError("down", 503), StepOutcome.WAITING),
+    ]
+
+    for error, expected in cases:
+        await env.restart(vault=_vault_whose_view_fails_with(real_vault, error))
+        assert await env.referee(nid).step() is expected
+
+    assert env.agents.calls == []
+
+
+@pytest.mark.anyio
+async def test_the_referee_does_not_call_the_agent_when_the_candidates_moves_are_used_up(store, web_env):
+    # 台帳 L9-3: 手番が回ってきた側の残りの手数が 0 なら、エージェント(LLM)を呼ばない(呼んでも、金庫は手を受け付けずに
+    # stopped_budget で終わらせるので、最長 60 秒のむだになる)。呼ばずに、金庫に手(end)を登録して、停止の判定を効かせる。
+    # 候補者が提案して求人側が断る、を 6 回(手数 6)。7 回目の候補者の手番では、エージェントを呼ばずに終わる。
+    env = web_env
+    spy = SpyVault(env.vault)
+    await env.restart(vault=spy)
+    package = sample_package()
+    nid = create_demo_negotiation(store)
+    env.agents.script("candidate", *[move_dict("propose", package)] * 6)  # 7 つ目はない: 呼ばれたらテストの誤りとして失敗する
+    env.agents.script("employer", *[move_dict("reject")] * 6)
+
+    outcomes = await drive(env.referee(nid), max_steps=20)
+
+    assert outcomes == [StepOutcome.MOVED] * 12 + [StepOutcome.FINISHED]
+    assert len(env.agents.calls_for("candidate")) == 6  # 7 回目は呼んでいない
+    assert len(env.agents.calls_for("employer")) == 6
+    assert store.get_view(nid, "candidate").budget.remaining_moves == 0
+    assert (spy.move_requests[-1].side, spy.move_requests[-1].move) == ("candidate", "end")  # 金庫に登録した手
+    document = store._negotiation_ref(nid).get().to_dict()
+    assert (document["status"], document["end_reason"]) == ("judged", "stopped_budget")  # 金庫の停止の判定が効いた
+    view = store.get_view(nid, "candidate")
+    assert (view.result.likelihood, view.result.package) == ("none", None)
+
+
+@pytest.mark.anyio
+async def test_the_referee_does_not_call_the_agent_when_the_employers_moves_are_used_up(store, web_env):
+    # 台帳 L9-3: 求人側でも同じ。求人側が、スキーマ違反の無効手(手数に数える)を挟みながら 6 手を使い切ると、次の求人側の
+    # 手番では、エージェントを呼ばずに終わる。候補者は 3 回提案しただけ(手数は残っている)。
+    env = web_env
+    spy = SpyVault(env.vault)
+    await env.restart(vault=spy)
+    package = sample_package()
+    nid = create_demo_negotiation(store)
+    garbage = {"schema": "move/v1", "move": "withdraw"}  # 無効手。有効な手を挟めば、連続無効手の上限(3)には届かない
+    env.agents.script("candidate", *[move_dict("propose", package)] * 3)
+    env.agents.script("employer", garbage, garbage, move_dict("reject"), garbage, garbage, move_dict("reject"))
+
+    outcomes = await drive(env.referee(nid), max_steps=20)
+
+    assert outcomes[-1] is StepOutcome.FINISHED
+    assert len(env.agents.calls_for("candidate")) == 3
+    assert len(env.agents.calls_for("employer")) == 6  # 7 回目は呼んでいない
+    assert store.get_view(nid, "employer").budget.remaining_moves == 0
+    assert (spy.move_requests[-1].side, spy.move_requests[-1].move) == ("employer", "end")
+    document = store._negotiation_ref(nid).get().to_dict()
+    assert (document["status"], document["end_reason"]) == ("judged", "stopped_budget")
+
+
+@pytest.mark.anyio
+async def test_the_agent_is_still_called_while_the_side_has_a_move_left(store, web_env):
+    # 台帳 L9-3 の対照: 残りの手数が 1 つでもあれば、エージェントを呼ぶ(最後の 1 手も、エージェントが打つ)。
+    # 候補者の 6 手目(残り 1)で、候補者のエージェントは呼ばれる。
+    env = web_env
+    package = sample_package()
+    nid = create_demo_negotiation(store)
+    env.agents.script("candidate", *[move_dict("propose", package)] * 6)
+    env.agents.script("employer", *[move_dict("reject")] * 5)
+    referee = env.referee(nid)
+
+    for _ in range(11):  # 候補者の提案 6 回と、求人側の断り 5 回
+        assert await referee.step() is StepOutcome.MOVED
+
+    assert store.get_view(nid, "candidate").budget.remaining_moves == 0  # 6 手目まで、エージェントが打った
+    assert len(env.agents.calls_for("candidate")) == 6
 
 
 @pytest.mark.anyio

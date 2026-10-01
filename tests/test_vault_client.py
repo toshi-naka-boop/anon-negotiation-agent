@@ -94,6 +94,32 @@ async def test_list_open_negotiations_follows_the_cursor_until_the_last_page():
 
 
 @pytest.mark.anyio
+async def test_get_demo_events_calls_the_demo_endpoint_and_a_404_is_not_found():
+    # 台帳 X-38: デモ用の読み出しは、金庫のデモ用の口(通常の events の口ではない)を呼ぶ。側と after_seq を渡す。
+    # 金庫が本物の交渉・存在しない交渉を断る 404 は、VaultNotFoundError(web が 403 に写す)。
+    seen: list[tuple[str, dict]] = []
+    event = {"seq": 2, "kind": "check", "package": sample_package().model_dump(mode="json"), "own_evaluation": "acceptable"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, dict(request.url.params)))
+        if "0123456789abcdef" in request.url.path:
+            return httpx.Response(200, json=[event])
+        return httpx.Response(404, json={"detail": "fedcba9876543210"})
+
+    client = _client(handler)
+
+    events = await client.get_demo_events("0123456789abcdef", "employer", after_seq=1)
+    with pytest.raises(VaultNotFoundError):
+        await client.get_demo_events("fedcba9876543210", "candidate")
+
+    assert [(e.seq, e.kind, e.own_evaluation) for e in events] == [(2, "check", "acceptable")]
+    assert seen == [
+        ("/v1/demo/negotiations/0123456789abcdef/events", {"side": "employer", "after_seq": "1"}),
+        ("/v1/demo/negotiations/fedcba9876543210/events", {"side": "candidate", "after_seq": "0"}),
+    ]
+
+
+@pytest.mark.anyio
 async def test_request_bodies_omit_unset_fields():
     # accept・end のように package を持たない手は、package・reason を null で送らず、項目ごと省く。
     bodies: list[dict] = []

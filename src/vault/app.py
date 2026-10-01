@@ -2,6 +2,10 @@
 
 ここでは FastAPI のルーティングと、VaultStore の例外を HTTP ステータスへ変換するだけを行う。
 秘密に触れる判断はすべて VaultStore(と、その先の negotiation_core)が行う。
+
+サービス間の認証は、Cloud Run の IAM(認証を必須にし、呼べるのは web のサービスアカウントだけ。§1.1)に任せ、
+アプリの中ではトークンを検証しない(台帳 X-37)。呼ぶ側(web)が、金庫の URL を audience にした ID トークンを付ける
+(web.service_auth)。
 """
 
 from fastapi import FastAPI, Query, Request

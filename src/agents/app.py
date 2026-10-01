@@ -13,6 +13,9 @@ a2a-sdk のサーバで、受信口ごとに自前の AgentExecutor(agents.execu
 - 受信本文の上限は 32 KB(設定ファイル)。超えたら、LLM を動かさずに A2A のエラーを返す。
 - agents はストレージを持たない。A2A のタスクは保存せず(受け取った入力を保持しない)、
   ADK のセッションも実行のたびに作って捨てる(§1.1・§4.2)。
+- サービス間の認証は、Cloud Run の IAM(認証を必須にし、呼べるのは web のサービスアカウントだけ。§1.1)に任せ、
+  アプリの中ではトークンを検証しない(台帳 X-37)。呼ぶ側(web)が、agents の URL を audience にした ID トークンを
+  付ける(agents.client.send_turn の auth。web.service_auth)。
 
 調査事項 R-1(ADK の `to_a2a` で置き換えられるか)の結論: 置き換えない。ADK 2.10 の `to_a2a` /
 `A2aAgentExecutor` では、次の制御ができない(または、実験的な部品を組み替えて、ADK の内部の

@@ -37,9 +37,6 @@ from agents_helpers import (  # noqa: F401  (フィクスチャは import して
 
 pytestmark = pytest.mark.anyio
 
-# NID とは別の、metadata に載せる ID(リクエストの metadata 側にも載せて、どちらも LLM に入らないことを見る)。
-OTHER_ID = "fedcba9876543210"
-
 
 def _expected_llm_text(role, data) -> str:
     """受信口が LLM に渡す入力(検証済みの値を JSON にしたもの)。スキーマの型を通した、決まった形。"""
@@ -65,15 +62,15 @@ async def test_llm_input_is_the_instruction_and_the_turn_input_only(role, http, 
 
 @pytest.mark.parametrize("role", ROLES)
 async def test_ids_in_metadata_never_reach_the_llm(role, http, stub_llm):
-    # AC-03 (metadata の ID(nid)は、LLM に渡る入力のどこにも出てこない。メッセージ側・リクエスト側のどちらでも)
+    # AC-03 (メッセージの metadata の ID(nid)は、LLM に渡る入力のどこにも出てこない。リクエストの metadata は、
+    # 台帳 X-41 で空かなしだけを受け付けるので、ID を載せる場所はメッセージ側だけ。拒否の確認は tests/test_validation.py)
     message = message_json([data_part(valid_data(role))], metadata={"nid": NID})
-    body = await send_raw(http, role, rpc_body(message, params_extra={"metadata": {"nid": OTHER_ID}}))
+    body = await send_raw(http, role, rpc_body(message))
     assert "error" not in body, body
 
     assert len(stub_llm.requests) == 1
     dump = stub_llm.requests[0].dump
     assert NID not in dump
-    assert OTHER_ID not in dump
     # メッセージ ID・コンテキスト ID・タスク ID(A2A が作る識別子)も入っていない
     assert message["messageId"] not in dump
 

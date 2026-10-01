@@ -11,6 +11,7 @@ gcloud コマンドは使わない(~/.config/gcloud に触れないため)。JDK
 """
 
 import datetime as dt
+import logging
 import os
 import queue
 import socket
@@ -140,6 +141,20 @@ def default_db(firestore_project_id: str) -> firestore.Client:
     client.close()
 
 
+@pytest.fixture(autouse=True)
+def _restore_logging_state():
+    """本番の起動口(web.app.create_app_from_env)が変える、ログの設定を、テストごとに元に戻す(台帳 X-40)。
+
+    uvicorn のアクセスログの ID を伏せるフィルタと、httpx のログの水準。残ると、あとのテストのログの確認が、
+    実行の順番に左右される。
+    """
+    access_logger, httpx_logger = logging.getLogger("uvicorn.access"), logging.getLogger("httpx")
+    filters, level = list(access_logger.filters), httpx_logger.level
+    yield
+    access_logger.filters[:] = filters
+    httpx_logger.setLevel(level)
+
+
 @pytest.fixture
 def clock() -> FixedClock:
     """sleep せず進められるテスト用の時計。"""
@@ -182,8 +197,12 @@ async def web_env(store: VaultStore, clock: FixedClock, vault_client: VaultClien
 
 @pytest.fixture
 def session_key() -> str:
-    """セッションクッキーの署名の鍵(テスト用。コードにも既定値にも持たず、テストがここで与える。design.md §6.3)。"""
-    return "test-only-session-signing-key-0123456789abcdef"
+    """セッションクッキーの署名の鍵(テスト用。コードにも既定値にも持たず、テストがここで与える。design.md §6.3)。
+
+    本番と同じ条件(base64url で 32 バイト以上。台帳 X-39)を満たす。`secrets.token_urlsafe(32)` で作った値を、
+    テストが毎回同じになるよう固定してある(テスト専用の値。本番の鍵には使わない)。
+    """
+    return "4lNFNQsa4lwGod8A39IKlAQ2fCIdRPgGra7q8CQGuj0"
 
 
 @pytest.fixture

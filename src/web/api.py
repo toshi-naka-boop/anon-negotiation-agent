@@ -12,8 +12,9 @@
 - 依頼者 ID は、開始ページの GET(/start)でしか発行しない。ほかのルートは、クッキーがなければ 401 で、
   ID を発行しない。有効なクッキーがあれば、開始ページを開き直しても ID は変わらない。
 - デモ用のエンドポイント(/v1/demo/...)は、セッションを見ない。本物の依頼者には触れない: 交渉は
-  架空人物のテンプレートからだけ作り(モードは demo 固定)、読めるのは、候補者が架空人物と分かっている
-  交渉(デモ・攻撃)だけ。金庫の側でも、demo・attack の交渉は本物の依頼者を持てない(作成の検証)。
+  架空人物のテンプレートからだけ作り(モードは demo 固定)、読めるのは、候補者が架空人物の交渉(デモ・攻撃)
+  だけ。読み出しは、web の段の状態(stages。補助)と、金庫のデモ用の読み出しの口(正本。台帳 X-38)の両方で確かめ、
+  どちらかが断れば 403。金庫の側でも、demo・attack の交渉は本物の依頼者を持てない(作成の検証)。
 
 金庫に書く前に、利用記録 principals_meta がなければならない(面談の送信が作る。§5 の手順 9)。
 ブロックリストの登録と交渉の作成は、面談を送っていない(利用記録がない)依頼者には 409 で断る。
@@ -53,6 +54,7 @@ from web.deletion import DeletionOutcome
 from web.referee import NegotiationContext
 from web.services import WebServices
 from web.session import PrincipalSession
+from web.vault_client import VaultNotFoundError
 
 _log = logging.getLogger(__name__)
 
@@ -268,11 +270,16 @@ def build_router(services: WebServices) -> APIRouter:
     ) -> list[EventViewItem]:
         """架空人物の側の見え方(§3.2。推定区間メーターなどに使う)。
 
-        読めるのは、候補者が架空人物と分かっている交渉(デモ・攻撃)だけ。本物の利用者の交渉・存在しない
-        交渉・段の状態がまだない交渉は、どれも 403(本物の依頼者の側の見え方を、ここから読めないように)。
+        読めるのは、候補者が架空人物の交渉(デモ・攻撃)だけ。本物の利用者の交渉・存在しない交渉・段の状態が
+        まだない(または項目が欠けた)交渉は、どれも 403(本物の依頼者の側の見え方を、ここから読めないように)。
+        確認は 2 段: web の段の状態(補助)と、金庫のデモ用の読み出しの口(正本。mode が demo・attack で、候補者が
+        架空人物のときだけ返す)。段の状態が壊れていても、金庫が本物の交渉を断る(404 を 403 に写す。台帳 X-38)。
         """
         if not await services.stages.is_fictional_negotiation(nid):
             raise HTTPException(status_code=403, detail="forbidden")
-        return await vault.get_events(nid, side, after_seq)
+        try:
+            return await vault.get_demo_events(nid, side, after_seq)
+        except VaultNotFoundError:
+            raise HTTPException(status_code=403, detail="forbidden") from None
 
     return router

@@ -93,12 +93,17 @@ class StageStore:
         if _NID_RE.fullmatch(nid) is None:
             return False  # Firestore の文書 ID にできない形の値は、そもそも交渉 ID ではない
         snap = self._db.collection(STAGES_COLLECTION).document(nid).get()
-        return snap.exists and snap.to_dict().get("candidate_principal_id") is None
+        if not snap.exists:
+            return False
+        data = snap.to_dict()
+        # 項目が欠けた文書は、架空と読まない(.get(...) is None では、欠けも「架空」になってしまう。台帳 X-38)。
+        return "candidate_principal_id" in data and data["candidate_principal_id"] is None
 
     async def is_fictional_negotiation(self, nid: str) -> bool:
         """nid が、候補者が架空人物の交渉(デモ・攻撃)と分かっているか(§6.3 のデモ用エンドポイントの確認)。
 
-        段の状態がない(まだ作っていない)交渉、本物の候補者の交渉、交渉 ID の形でない値は False
+        これは web の補助の確認(金庫の確認が正本。台帳 X-38)。段の状態がない(まだ作っていない)交渉、
+        candidate_principal_id の項目が欠けた文書、本物の候補者の交渉、交渉 ID の形でない値は False
         (拒否する側に倒す)。
         """
         return await asyncio.to_thread(self._is_fictional_sync, nid)

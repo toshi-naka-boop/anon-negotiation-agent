@@ -13,8 +13,9 @@
 本物の候補者の交渉では、金庫への操作を 1 回ごとに、その依頼者のロックの下で行う(台帳 I-4。
 RefereeDeps.locks を渡したとき。エージェントを呼んでいる間はロックを持たない)。
 
-ログには、交渉 ID・側・手の種類・理由(列挙値)・例外の型名だけを書く。組み合わせの値は書かない
-(例外の型名だけを書くのは、検証エラーのメッセージに入力値が含まれるため)。
+ログには、側・手の種類・理由(列挙値)・例外の型名・金庫の HTTP ステータスだけを書く。交渉 ID・依頼者 ID・
+組み合わせの値は書かない(§3.8。台帳 X-40: ログは本人の削除の後も残り、ID から交渉の時刻・失敗の理由・側を
+たどれてしまう)。例外の型名だけを書くのは、検証エラーのメッセージに入力値が含まれるため。タスクの名前にも、ID を入れない。
 """
 
 import asyncio
@@ -35,6 +36,7 @@ from web.locks import PrincipalLocks, PrincipalScopedVault
 from web.turn_input import build_turn_input, to_attacker_turn_input
 from web.vault_client import (
     VaultClient,
+    VaultClientError,
     VaultConflictError,
     VaultNotFoundError,
     VaultUnavailableError,
@@ -55,9 +57,10 @@ class SendTurn(Protocol):
 
     agents 側の src/agents/client.py が、先頭に base_url を足した形で持つ。呼び出し側が
     base_url を束ねてから渡す。返すのは Move の dict で、次の例外を投げる約束。
-    - ConnectionError: 一時的な通信エラー(再試行する)
+    - ConnectionError: 一時的な通信エラー・受信口が返した一時的なエラー(再試行する)
     - TimeoutError: 時間切れ(再試行する)
-    - ValueError: 受信口が拒否した(再試行せず schema_invalid にする)
+    - ValueError: 受信口が拒否した、または一時的と印のない失敗(LLM の出力が JSON でないなど。送り直しても直らないので、
+      再試行せず schema_invalid にする。台帳 L9-5)
     """
 
     async def __call__(
@@ -164,6 +167,11 @@ class Referee:
             return StepOutcome.RETRY  # 状態が変わった。読み直してから進める(§4.1 の 3)
         except VaultUnavailableError:
             return StepOutcome.WAITING  # 金庫が一時的に応えない。待って読み直す
+        except VaultClientError as exc:
+            # 404・409・503 以外(500・502・422 など)。タスクを落とすと、見回りが作り直すまで(最長 60 秒)交渉が止まる。
+            # 落とさずに、待って読み直す(台帳 L9-1。金庫の読み取りの中で出た Aborted が 500 になり得る)。
+            _log.error("vault call failed status=%s", exc.status_code)
+            return StepOutcome.WAITING
 
     async def _step(self) -> StepOutcome:
         view, side = await self._read_turn_view()
@@ -208,14 +216,20 @@ class Referee:
 
     async def _take_turn(self, side: Side, view: NegotiationViewResponse) -> StepOutcome:
         nid = self._context.nid
-        events = await self._vault.get_events(nid, side)
-        turn_input: TurnInput | AttackerTurnInput = build_turn_input(side=side, view=view, events=events)
-        role = self._context.agent_role(side)
-        if role == "attacker":
-            source = self._deps.attacker_instruction
-            turn_input = to_attacker_turn_input(turn_input, source(nid) if source is not None else "")
+        if view.budget.remaining_moves == 0:
+            # 手番が回ってきた側の残りの手数が 0。エージェント(LLM)を呼んでも、金庫は手を受け付けずに終了処理
+            # (stopped_budget)を行う(手を処理する前の停止の判定。§3.5)ので、呼び出しがむだになる(最長 60 秒)。
+            # 呼ばずに、金庫に手(end)を登録して、停止の判定を効かせる(台帳 L9-3)。
+            request = MoveRequest(expected_version=view.version, side=side, move="end")
+        else:
+            events = await self._vault.get_events(nid, side)
+            turn_input: TurnInput | AttackerTurnInput = build_turn_input(side=side, view=view, events=events)
+            role = self._context.agent_role(side)
+            if role == "attacker":
+                source = self._deps.attacker_instruction
+                turn_input = to_attacker_turn_input(turn_input, source(nid) if source is not None else "")
+            request = await self._ask_agent(role, turn_input, side=side, version=view.version)
 
-        request = await self._ask_agent(role, turn_input, side=side, version=view.version)
         response = await self._vault.post_move(nid, request)
         return StepOutcome.FINISHED if response.status == "judged" else StepOutcome.MOVED
 
@@ -223,34 +237,33 @@ class Referee:
         self, role: AgentRole, turn_input: TurnInput | AttackerTurnInput, *, side: Side, version: int
     ) -> MoveRequest:
         """エージェントを呼び、金庫に登録するリクエストにする。失敗は無効手(invalid)の登録にする。"""
-        nid = self._context.nid
         try:
             raw = await self._call_agent(role, turn_input)
             move = Move.model_validate(raw)
         except ValueError:
-            # 受信口が拒否した(ValueError)と、返ってきた dict が Move のスキーマに合わない
-            # (pydantic の ValidationError は ValueError の一種)を、どちらも schema_invalid にする。
+            # 受信口が拒否した・一時的と印のない失敗を返した(どちらも ValueError。台帳 L9-5)と、返ってきた dict が
+            # Move のスキーマに合わない(pydantic の ValidationError は ValueError の一種)を、どれも schema_invalid にする。
             return self._invalid_request(side, version, "schema_invalid")
         except (ConnectionError, TimeoutError):
             return self._invalid_request(side, version, "agent_timeout")  # 再試行を使い切った
         except Exception as exc:
             # 約束にない例外。この手番を無効手にして、3 回続けば金庫が交渉を止める(§3.5)。
             # タスクごと落とすと、見回りが作り直すたびに同じ失敗を繰り返すため。
-            _log.error("agent call failed nid=%s side=%s error=%s", nid, side, type(exc).__name__)
+            _log.error("agent call failed side=%s error=%s", side, type(exc).__name__)
             return self._invalid_request(side, version, "agent_timeout")
 
         package = move.package if move.move in _MOVES_WITH_PACKAGE else None
         return MoveRequest(expected_version=version, side=side, move=move.move, package=package)
 
     def _invalid_request(self, side: Side, version: int, reason: RegisteredInvalidReason) -> MoveRequest:
-        _log.info("registering invalid move nid=%s side=%s reason=%s", self._context.nid, side, reason)
+        _log.info("registering invalid move side=%s reason=%s", side, reason)
         return MoveRequest(expected_version=version, side=side, move="invalid", reason=reason)
 
     async def _call_agent(self, role: AgentRole, turn_input: TurnInput | AttackerTurnInput) -> dict:
         """エージェントを 1 回呼ぶ。上限(暫定 60 秒)は、再試行の待ち時間を含む(§4.1)。
 
         一時的なエラー(ConnectionError)と時間切れ(TimeoutError)は、待ち時間を空けて最大
-        agent_max_retries 回まで再試行する。ValueError(受信口が拒否した)は再試行しない。
+        agent_max_retries 回まで再試行する。ValueError(受信口が拒否した・一時的でない失敗)は再試行しない。
         再試行を使い切る、または上限の時間が尽きたら、最後の例外をそのまま投げる。
         """
         config = self._deps.config
@@ -308,7 +321,8 @@ class RefereeManager:
             return False
         # 終わったタスクは覚えておかない(長く動くプロセスで、交渉の数だけ増え続けないように)。
         self._tasks = {nid: task for nid, task in self._tasks.items() if not task.done()}
-        task = asyncio.create_task(Referee(context, self._deps).run(), name=f"referee-{context.nid}")
+        # タスクの名前に、交渉 ID を入れない(例外のときの記録に名前が出る。台帳 X-40)。
+        task = asyncio.create_task(Referee(context, self._deps).run(), name="referee")
         task.add_done_callback(_log_task_end)
         self._tasks[context.nid] = task
         return True
@@ -326,4 +340,4 @@ def _log_task_end(task: asyncio.Task) -> None:
         return
     exc = task.exception()  # 取り出しておく(「取り出されなかった例外」の警告を避ける)
     if exc is not None:
-        _log.error("referee task ended with an error task=%s error=%s", task.get_name(), type(exc).__name__)
+        _log.error("referee task ended with an error error=%s", type(exc).__name__)

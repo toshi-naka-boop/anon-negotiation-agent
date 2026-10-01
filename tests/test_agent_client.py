@@ -4,8 +4,9 @@ A2A で 1 回だけ送り、返ってきた DataPart の `data`(dict)をその�
 失敗は組み込みの例外だけで伝える。
 
 - 時間切れ → TimeoutError
-- A2A の通信エラーと、受信口が返した一時的なエラー(そのほかの実行の失敗も) → ConnectionError
-- 受信口が入力を拒否した(壁 1) → ValueError
+- A2A の通信エラーと、受信口が返した一時的なエラー(`transient` の印つき) → ConnectionError
+- 受信口が入力を拒否した(壁 1)、または、一時的と印のない失敗(LLM の出力が JSON でない・ADK の検証エラーなど。
+  台帳 L9-5。送り直しても直らないので、レフェリーは再試行しない) → ValueError
 - 成功 → dict
 
 通信は、HTTP サーバを立てずに、httpx の ASGITransport でアプリにつなぐ。クライアントが待たされる場面
@@ -20,7 +21,8 @@ from typing import Any
 import httpx
 import pytest
 from google.genai import errors as genai_errors
-from negotiation_core.schema import AttackerTurnInput, TurnInput
+from negotiation_core.schema import AttackerTurnInput, Move, TurnInput
+from pydantic import ValidationError
 
 import agents.client as client_module
 from agents.app import create_app
@@ -235,16 +237,74 @@ async def test_transient_endpoint_error_raises_connection_error_and_is_not_retri
     assert len(stub_llm.requests) == 1
 
 
-async def test_other_endpoint_failure_raises_connection_error(recorded, stub_llm):
-    # §4.3 (一時的でない実行の失敗も、ConnectionError。「拒否」の ValueError にはしない)
+def _adk_validation_error() -> ValidationError:
+    """モデルの出力をスキーマで検証して失敗したときの、pydantic の検証エラー(ADK が投げ得るもの)。"""
+    try:
+        Move.model_validate({"schema": "move/v1", "move": "withdraw"})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("the invalid move must be rejected")
+
+
+# 受信口が「一時的」と印を付けない失敗(LLM の呼び出しの 429・5xx・時間切れ・ネットワークの失敗のどれでもない)。
+NON_TRANSIENT_FAILURES = {
+    "unexpected_exception": ZeroDivisionError("x"),
+    "adk_validation_error": _adk_validation_error(),
+    "json_decode_error": json.JSONDecodeError("Expecting value", "not json", 0),
+    "bad_request_400": genai_errors.ClientError(
+        400, {"error": {"code": 400, "message": "bad request", "status": "INVALID_ARGUMENT"}}
+    ),
+    "permission_denied_403": genai_errors.ClientError(
+        403, {"error": {"code": 403, "message": "denied", "status": "PERMISSION_DENIED"}}
+    ),
+}
+
+
+@pytest.mark.parametrize("failure", list(NON_TRANSIENT_FAILURES))
+async def test_a_failure_without_the_transient_mark_raises_value_error_and_is_not_retried(failure, recorded, stub_llm):
+    # §4.3・台帳 L9-5 (一時的と印のない実行の失敗は、ValueError。ConnectionError にすると、レフェリーが送り直して、
+    # temperature 0 では同じ失敗を 4 回繰り返し、agent_timeout になる。受信口には 1 回しか送らない)
     def fail(_request):
-        raise ZeroDivisionError("x")
+        raise NON_TRANSIENT_FAILURES[failure]
 
     stub_llm.behavior = fail
-    with pytest.raises(ConnectionError) as exc_info:
+    with pytest.raises(ValueError, match="non-transient") as exc_info:
+        await call("candidate")
+    assert type(exc_info.value) is ValueError
+    assert "temporary" not in str(exc_info.value)
+    assert len(recorded.requests) == 1
+    assert len(stub_llm.requests) == 1
+
+
+@pytest.mark.parametrize("output", ["hello", "[1, 2]", "", "123", "{not json"])
+async def test_a_model_output_that_is_not_a_json_object_raises_value_error(output, recorded, stub_llm):
+    # §4.3・台帳 L9-5 (LLM の出力が JSON のオブジェクトでない(空・配列・数値・壊れた JSON を含む)のは、一時的ではない失敗。
+    # ValueError で、レフェリーが schema_invalid にする)
+    stub_llm.behavior = lambda _request: output
+    with pytest.raises(ValueError, match="non-transient") as exc_info:
+        await call("candidate")
+    assert type(exc_info.value) is ValueError
+    assert len(stub_llm.requests) == 1
+
+
+async def test_an_internal_error_response_without_the_transient_mark_raises_value_error(use_transport):
+    # §4.3・台帳 L9-5 (受信口が返した InternalError に、transient の印がない(または true でない)なら、ValueError。
+    # 印が true のものは ConnectionError のまま。印の付き方が崩れても、ConnectionError にして再試行を続けない)
+    def error_response(data) -> httpx.Response:
+        error: dict[str, Any] = {"code": -32603, "message": "agent execution failed"}
+        if data is not None:
+            error["data"] = [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "x", "metadata": data}]
+        return _json_rpc_error(error)
+
+    for data in (None, {"transient": "false"}, {"other": "true"}):
+        use_transport(mock_transport(lambda request, data=data: error_response(data)))
+        with pytest.raises(ValueError, match="non-transient"):
+            await call("candidate")
+
+    use_transport(mock_transport(lambda request: error_response({"transient": "true"})))  # 対照
+    with pytest.raises(ConnectionError, match="temporary") as exc_info:
         await call("candidate")
     assert type(exc_info.value) is ConnectionError
-    assert "temporary" not in str(exc_info.value)
 
 
 # --- 受信口が入力を拒否した(ValueError) ---

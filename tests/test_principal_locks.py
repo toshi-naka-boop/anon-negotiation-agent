@@ -255,6 +255,117 @@ async def test_the_sweeper_does_not_recreate_a_stage_from_a_stale_list_after_the
     assert len(_stage_docs_of(web_app, unlocked_pid)) == 1  # ロックがなければ、削除した依頼者の段の状態が残る(対照)
 
 
+async def _open_negotiation_without_a_stage(web_app):
+    """本物の候補者が交渉を持ち、段の状態だけがない(作り損ねた)状態を作る。(ブラウザ, 依頼者 ID, 交渉 ID)を返す。"""
+    browser = web_app.browser()
+    pid = await browser.register()
+    nid = await browser.create_negotiation(pid, web_app.put_employer_template())
+    web_app.default_db.collection("stages").document(nid).delete()
+    return browser, pid, nid
+
+
+@pytest.mark.anyio
+async def test_the_sweeper_creates_the_stage_of_an_active_principal(web_app):
+    # C-41(対照): 利用記録があり、削除中でない依頼者の交渉には、見回りが段の状態を作る(以降の「作らない」が、何でも断る
+    # 実装のためではないことを示す)。
+    _, pid, nid = await _open_negotiation_without_a_stage(web_app)
+
+    report = await web_app.services.sweeper.sweep_once()
+
+    assert (report.stages_created, report.errors) == (1, 0)
+    assert [s.id for s in _stage_docs_of(web_app, pid)] == [nid]
+
+
+@pytest.mark.anyio
+async def test_the_sweeper_does_not_create_a_stage_for_a_principal_who_is_being_deleted(web_app):
+    # C-41: 本物の候補者が削除中(利用記録の deletion_state=deleting。削除の流れが、金庫の削除より前で止まった)なら、
+    # 金庫には交渉が残っていても、見回りは段の状態を作らない(削除の流れが、依頼者 ID で段の状態を消すので、作ると残る)。
+    # 以前は、金庫に交渉があるかだけを見ていたので、作ってしまった。
+    _, pid, nid = await _open_negotiation_without_a_stage(web_app)
+    assert await web_app.services.meta.mark_deleting(pid) == "marked"
+    assert web_app.store.get_view(nid, "candidate").status == "active"  # 金庫には、交渉も依頼者も残っている
+
+    report = await web_app.services.sweeper.sweep_once()
+
+    assert (report.stages_created, report.errors) == (0, 0)
+    assert _stage_docs_of(web_app, pid) == []
+    assert documents_mentioning(web_app.default_db, pid, nid) == {"principals_meta/" + pid: _meta_document(web_app, pid)}
+
+
+def _meta_document(web_app, pid: str) -> dict:
+    return web_app.default_db.collection("principals_meta").document(pid).get().to_dict()
+
+
+@pytest.mark.anyio
+async def test_the_sweeper_does_not_create_a_stage_for_a_principal_whose_usage_record_is_gone(web_app):
+    # C-41: 利用記録がない(削除済み)依頼者の交渉にも、見回りは段の状態を作らない。金庫に交渉が残っていても(相手が本物の
+    # 交渉で、削除した側の見え方だけを消して、交渉の文書は残るとき。§3.8 の手順 3)、「交渉がある」ことは、依頼者が
+    # 使える状態であることを意味しない。
+    _, pid, nid = await _open_negotiation_without_a_stage(web_app)
+    web_app.default_db.collection("principals_meta").document(pid).delete()
+    assert web_app.store._negotiation_ref(nid).get().exists  # 金庫には、交渉の文書が残っている
+
+    report = await web_app.services.sweeper.sweep_once()
+
+    assert (report.stages_created, report.errors) == (0, 0)
+    assert _stage_docs_of(web_app, pid) == []
+    assert documents_mentioning(web_app.default_db, pid, nid) == {}
+
+
+@pytest.mark.anyio
+async def test_the_sweeper_reads_the_usage_record_while_holding_the_principals_lock(web_app):
+    # C-41・I-4: 利用記録は、依頼者のロックを取った後に読む。ロックを持つ削除の流れが、印を立てる(deleting)まで待たされた
+    # 見回りは、ロックが空いた後に、印を見て、段の状態を作らない(ロックの外で先に読んでいれば、「使える」と読んで作る)。
+    _, pid, nid = await _open_negotiation_without_a_stage(web_app)
+    services = web_app.services
+
+    async with services.locks.lock(pid):  # 削除の流れが、ロックを持っている
+        sweep = asyncio.create_task(services.sweeper.sweep_once())
+        await wait_until(lambda: lock_users(web_app, pid) == 2)  # 見回りは、ロックの順番待ちに入った
+        assert await services.meta.mark_deleting(pid) == "marked"  # 削除の流れが、印を立てる
+    report = await asyncio.wait_for(sweep, 10)
+
+    assert (report.stages_created, report.errors) == (0, 0)
+    assert _stage_docs_of(web_app, pid) == []
+
+
+@pytest.mark.anyio
+async def test_a_failure_to_read_the_usage_record_is_counted_and_the_next_sweep_retries(web_app, monkeypatch):
+    # C-41: 利用記録を読めないときは、段の状態を作らず(確かめずに作らない)、失敗として数える。次の見回りでやり直す。
+    _, pid, nid = await _open_negotiation_without_a_stage(web_app)
+    meta = web_app.services.meta
+    original = meta.get
+    failures = [RuntimeError("firestore is down")]
+
+    async def flaky(principal_id):
+        if failures:
+            raise failures.pop()
+        return await original(principal_id)
+
+    monkeypatch.setattr(meta, "get", flaky)
+
+    first = await web_app.services.sweeper.sweep_once()
+    second = await web_app.services.sweeper.sweep_once()
+
+    assert (first.stages_created, first.errors) == (0, 1)
+    assert (second.stages_created, second.errors) == (1, 0)
+    assert [s.id for s in _stage_docs_of(web_app, pid)] == [nid]
+
+
+@pytest.mark.anyio
+async def test_the_sweeper_needs_the_locks_and_the_usage_records_together(web_app):
+    # C-41: 片方だけでは、本物の候補者の段の状態を、確かめずに作る(または、ロックなしで確かめる)ことになる。組み立ての誤りとして拒否する。
+    services = web_app.services
+    common = dict(vault=services.vault, stages=services.stages, referees=services.referees)
+
+    with pytest.raises(ValueError, match="together"):
+        Sweeper(**common, locks=services.locks)
+    with pytest.raises(ValueError, match="together"):
+        Sweeper(**common, meta=services.meta)
+    Sweeper(**common)  # どちらもなし(デモ・攻撃だけを見回る組み立て)
+    Sweeper(**common, locks=services.locks, meta=services.meta)
+
+
 @pytest.mark.anyio
 async def test_the_referees_vault_calls_for_a_real_principal_wait_for_the_principals_lock(web_app):
     # I-4(1d-1 の申し送り): レフェリーの金庫への操作(その依頼者の交渉のもの)は、1 回ごとに依頼者のロックを取る。

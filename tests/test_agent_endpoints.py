@@ -17,12 +17,14 @@ from a2a.client import A2ACardResolver
 from google.genai import errors as genai_errors
 from google.protobuf import json_format, struct_pb2
 from negotiation_core.schema import Move
+from pydantic import ValidationError
 
 from agents.app import create_app
 from agents.config import DEFAULT_AGENTS_CONFIG
 from agents.wire import value_to_python
 from agents_helpers import (  # noqa: F401  (フィクスチャは import して使う)
     BASE_URL,
+    NID,
     PACKAGE,
     ROLES,
     StubLlm,
@@ -168,11 +170,22 @@ TRANSIENT_ERRORS = [
     httpx.ConnectError("connection refused"),
 ]
 
+def _adk_validation_error() -> ValidationError:
+    """モデルの出力をスキーマで検証して失敗したときの、pydantic の検証エラー(ADK が投げ得るもの。入力の値を含む)。"""
+    try:
+        Move.model_validate({"schema": "move/v1", "move": "secret 623 in the message"})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("the invalid move must be rejected")
+
+
 NON_TRANSIENT_ERRORS = [
     genai_errors.ClientError(400, {"error": {"code": 400, "message": "bad request", "status": "INVALID_ARGUMENT"}}),
     genai_errors.ClientError(403, {"error": {"code": 403, "message": "denied", "status": "PERMISSION_DENIED"}}),
     ZeroDivisionError("secret 623 in the message"),
     ValueError("secret 623 in the message"),
+    json.JSONDecodeError("secret 623 in the message", "document", 0),  # LLM の出力が JSON でない(台帳 L9-5)
+    _adk_validation_error(),  # ADK の検証エラー(台帳 L9-5)
 ]
 
 
@@ -189,7 +202,8 @@ async def test_transient_llm_errors_are_returned_as_transient_a2a_errors(error, 
 
 @pytest.mark.parametrize("error", NON_TRANSIENT_ERRORS, ids=lambda e: f"{type(e).__name__}-{getattr(e, 'code', '')}")
 async def test_other_llm_failures_are_internal_errors_without_the_transient_mark(error, http, stub_llm):
-    # §4.3 (一時的でない失敗は、印のない InternalError。例外の中身(値を含み得る)を返さない)
+    # §4.3・台帳 L9-5 (一時的でない失敗(LLM の出力が JSON でない・ADK の検証エラーを含む)は、印のない InternalError。
+    # 例外の中身(値を含み得る)を返さない。web のクライアントは、印のない失敗を再試行しない)
     stub_llm.behavior = _raises(error)
     body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
 
@@ -299,6 +313,10 @@ async def test_rejections_do_not_produce_error_logs(http, stub_llm, caplog):
     await send_message(http, "candidate", [text_part("x")])
     await send_message(http, "candidate", [data_part(dict(valid_data("candidate"), not_in_schema=1))])
     await send_message(http, "candidate", [data_part(valid_data("candidate"))], metadata={"nid": "bad"})
+    # 台帳 X-41: 余分な metadata(メッセージ側の未知の項目・リクエスト側の中身)の拒否も、同じく静か(タスクを作る前に返る)
+    await send_message(http, "candidate", [data_part(valid_data("candidate"))], metadata={"nid": NID, "note": "x"})
+    message = message_json([data_part(valid_data("candidate"))])
+    assert_rejected(await send_raw(http, "candidate", rpc_body(message, params_extra={"metadata": {"nid": NID}})))
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
 
 
