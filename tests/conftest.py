@@ -3,6 +3,11 @@
 gcloud コマンドは使わない(~/.config/gcloud に触れないため)。JDK 21 で jar を直接起動する。
 本物の GCP には絶対に接続しない: クライアントを作る前に FIRESTORE_EMULATOR_HOST を設定し、
 プロジェクト ID は demo- で始まるものにする。認証情報は使わない。
+
+データの分け方: テストごとに別のプロジェクト ID(demo-test-{uuid})の Firestore クライアントを使う。
+エミュレータはプロジェクトごとにデータを分けるので、テストの後始末でデータを消さずに済み、
+遅れて届く書き込み(止まらない別スレッドの呼び出し)は、終わったテストのプロジェクトに落ちて、
+次のテストに混ざらない(台帳 I-5)。vault-db と (default) は、同じテストの中では同じプロジェクトを使う。
 """
 
 import datetime as dt
@@ -12,6 +17,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import AsyncIterator
 
 import httpx
@@ -32,7 +38,6 @@ _EMULATOR_JAR = (
 _READY_MARKER = "Dev App Server is now running"
 _STARTUP_TIMEOUT_SECONDS = 30
 
-PROJECT_ID = "demo-vault-test"
 DATABASE_ID = "vault-db"
 DEFAULT_DATABASE_ID = "(default)"  # web 用(design.md §1.1)
 
@@ -110,41 +115,29 @@ def firestore_emulator_host() -> str:
         process.wait(timeout=10)
 
 
-@pytest.fixture(scope="session")
-def firestore_client(firestore_emulator_host: str) -> firestore.Client:
-    """vault-db への Firestore クライアント(セッションで使い回す。データはテストごとに消す)。"""
-    client = firestore.Client(project=PROJECT_ID, database=DATABASE_ID)
-    yield client
-    client.close()
+@pytest.fixture
+def firestore_project_id(firestore_emulator_host: str) -> str:
+    """このテストだけが使う、一意なプロジェクト ID(demo- で始まる。エミュレータ専用の名前)。
+
+    vault-db と (default) の両方のクライアントが、このテストの中では同じ ID を使う。
+    """
+    return f"demo-test-{uuid.uuid4().hex}"
 
 
-@pytest.fixture(scope="session")
-def default_firestore_client(firestore_emulator_host: str) -> firestore.Client:
-    """(default) への Firestore クライアント(web 用。セッションで使い回す)。"""
-    client = firestore.Client(project=PROJECT_ID, database=DEFAULT_DATABASE_ID)
+@pytest.fixture
+def firestore_client(firestore_project_id: str) -> firestore.Client:
+    """vault-db への Firestore クライアント(テストごとに作る。プロジェクトごと分かれているので、データは消さない)。"""
+    client = firestore.Client(project=firestore_project_id, database=DATABASE_ID)
     yield client
     client.close()
 
 
 @pytest.fixture
-def default_db(default_firestore_client: firestore.Client, firestore_emulator_host: str) -> firestore.Client:
-    """(default) の全文書を消してから返す(web のテスト用。使うテストだけが消す)。"""
-    url = (
-        f"http://{firestore_emulator_host}/emulator/v1/projects/{PROJECT_ID}"
-        f"/databases/{DEFAULT_DATABASE_ID}/documents"
-    )
-    httpx.delete(url, timeout=10)
-    return default_firestore_client
-
-
-@pytest.fixture(autouse=True)
-def _clear_firestore_data(firestore_emulator_host: str) -> None:
-    """テストごとに vault-db の全文書を消し、互いに影響しないようにする。"""
-    url = (
-        f"http://{firestore_emulator_host}/emulator/v1/projects/{PROJECT_ID}"
-        f"/databases/{DATABASE_ID}/documents"
-    )
-    httpx.delete(url, timeout=10)
+def default_db(firestore_project_id: str) -> firestore.Client:
+    """(default) への Firestore クライアント(web 用。テストごとに作る。vault-db と同じプロジェクト ID)。"""
+    client = firestore.Client(project=firestore_project_id, database=DEFAULT_DATABASE_ID)
+    yield client
+    client.close()
 
 
 @pytest.fixture

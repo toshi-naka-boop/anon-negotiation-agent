@@ -62,6 +62,7 @@ async def test_a_principal_past_delete_after_is_deleted_by_the_sweeper_even_with
     open_negotiations = await web_app.vault.list_open_negotiations()
     assert [item.nid for item in open_negotiations if item.candidate_principal_id == pid] == []  # 交渉の見回りの一覧には現れない
     assert documents_mentioning(web_app.default_db, pid, CANARY)  # カナリアは、削除の前は見つかる(確認の前提)
+    assert documents_mentioning(web_app.store._db, CANARY)  # vault-db にも置いてある(置かなければ、「残らない」の確認は必ず通る)
 
     web_app.clock.advance(10 * _DAY)
     other_pid, _ = await _principal_with_a_finished_negotiation(web_app, other_browser, _OTHER_CANARY)
@@ -79,6 +80,7 @@ async def test_a_principal_past_delete_after_is_deleted_by_the_sweeper_even_with
     # まだ期限が来ていない依頼者は、何も消えていない。
     assert _meta(web_app, other_pid)["deletion_state"] == "active"
     assert documents_mentioning(web_app.default_db, _OTHER_CANARY)
+    assert documents_mentioning(web_app.store._db, _OTHER_CANARY)  # vault-db のほかの依頼者のカナリアは、消えていない
     assert web_app.store._principal_ref(other_pid).get().exists
 
 
@@ -89,7 +91,9 @@ async def test_the_automatic_deletion_keeps_the_real_counterparts_view_and_the_n
     browser = web_app.browser()
     pid = await browser.register()
     counterpart_pid = "principal-counterpart-0001"  # 相手側の依頼者の文書そのものは作らない(消さないため)
-    nid = _write_live_negotiation_with_real_counterpart(web_app.store, web_app.clock, pid, counterpart_pid)
+    nid = _write_live_negotiation_with_real_counterpart(
+        web_app.store, web_app.clock, pid, counterpart_pid, request_id=f"{pid}:{CANARY}"  # web と同じ「依頼者 ID:値」の形
+    )
     package = sample_package()
     check = web_app.store.process_move(
         nid, MoveRequest(expected_version=0, side="candidate", move="check", package=package)
@@ -100,6 +104,8 @@ async def test_the_automatic_deletion_keeps_the_real_counterparts_view_and_the_n
     await web_app.services.sweeper.sweep_once()  # 交渉の見回りが、依頼者 ID つきの段の状態を作る(§6.2)
     plant_canaries(web_app, pid, [nid])
     assert documents_mentioning(web_app.default_db, pid, CANARY)
+    assert documents_mentioning(web_app.store._db, pid, CANARY)  # vault-db にも、依頼者 ID とカナリアがある(削除の前)
+    assert web_app.store.get_view(nid, "candidate").last_check is not None  # 削除する側の評価が読める(削除の前)
 
     web_app.clock.advance(31 * _DAY)
     report = await web_app.services.principal_sweeper.sweep_once()
@@ -108,7 +114,8 @@ async def test_the_automatic_deletion_keeps_the_real_counterparts_view_and_the_n
     assert _meta(web_app, pid) is None
     assert documents_mentioning(web_app.default_db, pid, CANARY) == {}
     assert not web_app.store._principal_ref(pid).get().exists
-    assert documents_mentioning(web_app.store._db, CANARY) == {}
+    assert documents_mentioning(web_app.store._db, pid, CANARY) == {}  # vault-db のどこにも、依頼者 ID もカナリアも残らない
+    assert web_app.store.get_view(nid, "candidate").last_check is None  # 削除した側の評価は、もう読めない(台帳 C-41)
     negotiation = web_app.store._negotiation_ref(nid).get().to_dict()
     assert (negotiation["status"], negotiation["end_reason"]) == ("judged", "cancelled")
     assert web_app.store.get_events(nid, "candidate") == []  # 自分側の見え方は消えた

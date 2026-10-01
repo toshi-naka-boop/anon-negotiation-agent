@@ -80,6 +80,23 @@ class JobCategoryInfo(StrictModel):
     job_category: JobCategoryValue
 
 
+class LastInvalid(StrictModel):
+    """TurnInput.last_invalid: 直前の自分の手が無効だったときの、打とうとした手の中身(台帳 C-40)。
+
+    状態を持たないエージェントが、無効になった手(とその組み合わせ)を繰り返さないための情報。
+    自分側のエージェントだけに返す値で、相手への漏れは増えない。
+    - move: 打とうとした手の種類。レフェリーが登録した無効手(schema_invalid・agent_timeout)では分からないので None。
+    - package: 打とうとした組み合わせ。手が組み合わせを伴わない場合と、レフェリーが登録した無効手では None。
+    - evaluation: その組み合わせについての、自分側の 3 値評価。金庫が自分側のポリシーで評価して無効と
+      判断した手(提案のガードの失敗・途中確認の対象外など)だけが持つ。評価しなかった無効手では None。
+    3 つとも必須の項目にして(値だけ None を許す)、線の上の形をいつも同じにする。
+    """
+
+    move: MoveType | None
+    package: Package | None
+    evaluation: Verdict | None
+
+
 class TurnInput(StrictModel):
     """レフェリー → 交渉エージェント。LLM に渡る部分(§2.7)。"""
 
@@ -91,6 +108,7 @@ class TurnInput(StrictModel):
     pending_offer: EvaluatedPackage | None = None
     last_check: EvaluatedPackage | None = None
     last_error: LastErrorReason | None = None
+    last_invalid: LastInvalid | None = None
     budget: Budget
 
 

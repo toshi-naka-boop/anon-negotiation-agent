@@ -115,6 +115,13 @@ def create_app(store: VaultStore) -> FastAPI:
     def get_events(nid: str, side: Side, after_seq: int = Query(default=0, ge=0)) -> list[EventViewItem]:
         return store.get_events(nid, side, after_seq)
 
+    # --- デモ用の読み出し(台帳 X-38): mode が demo・attack で、候補者が架空人物の交渉だけ。
+    #     それ以外は、交渉があるかどうかを知らせないよう 404 ---
+
+    @app.get("/v1/demo/negotiations/{nid}/events", response_model=list[EventViewItem])
+    def get_demo_events(nid: str, side: Side, after_seq: int = Query(default=0, ge=0)) -> list[EventViewItem]:
+        return store.get_demo_events(nid, side, after_seq)
+
     # --- §3.3: moves・principal-answer・control・expire ---
 
     @app.post("/v1/negotiations/{nid}/moves", response_model=MoveResponse)

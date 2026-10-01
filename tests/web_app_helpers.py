@@ -10,13 +10,14 @@ web の app は httpx の ASGITransport で直接呼ぶ(ブラウザの代わり
 削除のテストは、交渉の「存在」だけを使い、レフェリーが金庫を呼び続けると、テストの終わりに金庫の呼び出しが
 途中で残る(別スレッドで動く呼び出しは、タスクを cancel しても止まらず、エミュレータを止めた後も再試行して、
 プロセスの終了が数分止まる)。レフェリーが要るテストだけ、enable_referees() で動かす。
+遅れて届く書き込みが次のテストに混ざらないことは、テストごとに別のプロジェクト ID の Firestore クライアントを
+使うことで担保する(tests/conftest.py。台帳 I-5)。
 
 署名の鍵は、コードにも既定値にも持たない。テストでは、conftest のフィクスチャ(session_key)で与える。
 """
 
 import asyncio
 import json
-import os
 from dataclasses import dataclass, field
 
 import httpx
@@ -181,27 +182,6 @@ class WebAppEnv:
         await self.services.referees.stop_all()
 
 
-def ensure_databases_are_empty(*databases: firestore.Client) -> None:
-    """各データベース(vault-db と (default))が空であることを確かめる。空でなければ、エミュレータの REST で消し直す。
-
-    tests/conftest.py の消去は、エミュレータの応答を確かめない。消えていない文書が次のテストに残ると、見回りが
-    別のテストの交渉を拾う・「〜件だけ」の確認が崩れる(全体を流したときに、まれに起きた)。ここで確かめ、
-    消し直しても空にならなければ、失敗にする(原因の分からないまま、別の確認が落ちないように)。
-    """
-    host = os.environ["FIRESTORE_EMULATOR_HOST"]
-    for database in databases:
-        url = (
-            f"http://{host}/emulator/v1/projects/{database.project}"
-            f"/databases/{database._database}/documents"
-        )
-        for _ in range(5):
-            if next(iter(database.collections()), None) is None:
-                break
-            httpx.delete(url, timeout=10)
-        else:
-            raise AssertionError(f"database {database._database!r} could not be emptied before the test")
-
-
 def build_web_env(
     *,
     store,
@@ -219,7 +199,6 @@ def build_web_env(
     use_stub_agents=False にすると、send_turn を差し込まず、agents_base_url を束ねた本物の
     agents.client.send_turn を使う(結合のテスト)。run_referees の既定は False(モジュールの docstring を参照)。
     """
-    ensure_databases_are_empty(store._db, default_db)
     agents = IdleAgents()
     sleep = FakeSleep(clock)
     kwargs = {}
@@ -256,10 +235,13 @@ def build_web_env(
 
 
 def plant_canaries(env: "WebAppEnv", principal_id: str, nids: list[str], canary: str = CANARY) -> None:
-    """段の状態(段 1 の職務要約の項目)と開示台帳に、消えているべきカナリアを直接置く。
+    """段の状態(段 1 の職務要約の項目)と開示台帳と、vault-db の依頼者の文書に、消えているべきカナリアを直接置く。
 
-    面談と段 1 の画面は後の段なので、そこで入るはずの値を、Firestore に直接書いて確かめる。
+    面談と段 1 の画面は後の段なので、そこで入るはずの値を、Firestore に直接書いて確かめる。vault-db には、本人が
+    付けた文字列が入る項目(ブロック先の企業 ID)にカナリアを置く。置かなければ、vault-db に「残らない」の確認が、
+    何も置いていないために、必ず通ってしまう。
     """
+    env.store._principal_ref(principal_id).set({"blocklist": [canary]}, merge=True)
     for nid in nids:
         env.default_db.collection("stages").document(nid).update({"job_summary": canary})
     ledger = env.default_db.collection("principals").document(principal_id).collection("ledger")

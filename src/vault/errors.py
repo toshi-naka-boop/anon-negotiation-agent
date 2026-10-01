@@ -17,8 +17,17 @@ class MovePreconditionFailed(VaultError):
     """手の操作の前提が崩れている(409。§3.5)。
 
     expected_version の不一致・手番違い・状態(active でない)・一時停止中・
-    トランザクションの再試行を使い切った(競合)のいずれか。このいずれでも、
-    回数・記録を一切消費しない。レフェリーは 409 を受けたら状態を読み直す。
+    トランザクションの再試行を使い切った(競合。子クラス ContentionExhausted)のいずれか。
+    このいずれでも、回数・記録を一切消費しない。レフェリーは 409 を受けたら状態を読み直す。
+    """
+
+
+class ContentionExhausted(MovePreconditionFailed):
+    """手の操作(moves・principal-answer)のトランザクションが、競合で再試行を使い切った(409)。
+
+    HTTP の 409 と detail は MovePreconditionFailed と同じ(呼び出し側から見た扱いは変えない)。
+    expected_version の不一致などの前提の崩れと区別するための子クラスで、テストとログで
+    「並行の競合で落ちた 409」を見分けられる(台帳 I-5)。何も消費していない点は親と同じ。
     """
 
 

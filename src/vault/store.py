@@ -6,6 +6,9 @@ Firestore のトランザクションで、状態遷移・回数の消費・イ�
 
 import datetime as dt
 import hashlib
+import random
+import re
+import time
 from dataclasses import dataclass
 
 from google.api_core.exceptions import Aborted
@@ -47,13 +50,14 @@ from vault.api_models import (
 from vault.clock import Clock
 from vault.config import VaultConfig
 from vault.errors import (
+    ContentionExhausted,
     MovePreconditionFailed,
     NotFoundError,
     PolicyValidationError,
     PrincipalDeletingError,
     TransactionRetryExhausted,
 )
-from vault.ids import generate_id
+from vault.ids import ID_PATTERN, generate_id
 from vault.judgment import judge
 from vault.models import (
     CandidateTemplate,
@@ -83,6 +87,16 @@ PRINCIPALS_COLLECTION = "principals"
 IDEMPOTENCY_COLLECTION = "idempotency"
 EVENTS_SUBCOLLECTION = "events"
 
+# トランザクションの再試行は「内側 5 回 × 外側 4 回」(計 20 回。台帳 I-5)。
+# 内側は google-cloud-firestore の max_attempts。本番の Firestore では、再試行のたびに
+# retry_transaction で順番を保つので、待たずに繰り返してよい。エミュレータでは、同じ文書を
+# 読んだ多数の呼び出しが、コミットで互いの共有ロックを待ち合って時間切れになり、全員が一斉に
+# 中止され、一斉にやり直して、また中止される、を繰り返す。そのため、内側を使い切ったら、
+# 乱数の待ちを入れてから新しいトランザクションでやり直し、一斉のやり直しを崩す。
+_INNER_MAX_ATTEMPTS = 5
+_OUTER_ATTEMPTS = 4
+_OUTER_BACKOFF_SECONDS = (0.010, 0.200)  # 外側の再試行の前に、この範囲(秒)から乱数で選んで待つ
+
 
 @dataclass
 class _MoveOutcome:
@@ -104,6 +118,8 @@ class VaultStore:
         self._db = db
         self._clock = clock
         self._config = config
+        # 外側の再試行の間の待ち(_run_transaction)。テストは、待たずに済むよう差し替えられる。
+        self._sleep = time.sleep
 
     # ------------------------------------------------------------------
     # 文書の参照
@@ -126,30 +142,42 @@ class VaultStore:
         return self._db.collection(IDEMPOTENCY_COLLECTION).document(key)
 
     def _new_transaction(self) -> firestore.Transaction:
-        # 既定の max_attempts=5 は、DV-02 が求める高い並行度(同一文書への 10 並行アクセス)
-        # のもとでは、正しい手続き(1 本だけ通り、残りは何も消費しない)が完了する前に
-        # 「再試行を使い切った」という別種のエラーで終わってしまうことがある
-        # (Firestore エミュレータの粗いロック実装で顕著)。中身(何が起きたら勝つか)は
-        # 変えず、再試行の回数だけ増やす。それでも尽きた場合の扱いは _run_transaction。
-        return self._db.transaction(max_attempts=20)
+        # 既定の max_attempts=5 のまま(内側の再試行)。DV-02 が求める高い並行度のもとで、
+        # 一斉のやり直しが続いても「再試行を使い切った」で終わらないよう、外側の再試行と
+        # 乱数の待ちを _run_transaction で足している。中身(何が起きたら勝つか)は変えない。
+        return self._db.transaction(max_attempts=_INNER_MAX_ATTEMPTS)
 
     def _run_transaction(self, txn_fn, *, contention_error: type[Exception]):
         """@firestore.transactional で txn_fn(txn) を実行する(呼び出し口を 1 つに集約)。
 
-        トランザクションの再試行を使い切ると、google-cloud-firestore は Aborted を
-        包んだ ValueError を投げる。ここでだけ、操作の種類に応じた例外に変換する:
-        手の操作(moves)は MovePreconditionFailed(409。何も消費していない点は
-        expected_version の不一致と同じ)、冪等な操作(control・expire)と作成は
-        TransactionRetryExhausted(503。再試行してよい。DV-02「409 にならない」)。
+        競合(Aborted)で再試行を使い切ったときだけ、操作の種類に応じた例外に変換する:
+        手の操作(moves・principal-answer)は ContentionExhausted(MovePreconditionFailed の子。
+        409。何も消費していない点は expected_version の不一致と同じ)、冪等な操作(control・
+        expire)・作成・削除の後始末は TransactionRetryExhausted(503。再試行してよい。
+        DV-02「409 にならない」)。
+
+        競合を表す出方は 2 つあり、どちらも同じ扱いにする(外側の再試行の対象にし、尽きたら変換する)。
+        - コミットの Aborted: 内側で max_attempts 回まで再試行され、尽きると、Aborted を包んだ
+          ValueError になる。
+        - トランザクションの中の読み取りで出た Aborted: 内側では再試行されず、そのまま上がる(L9-1)。
+        内側を使い切るたびに、乱数の待ちを入れてから新しいトランザクションでやり直す(台帳 I-5)。
+        txn_fn は、何度呼ばれても外への作用がない(書き込みは txn に積むだけ)。
         """
-        transaction = self._new_transaction()
-        wrapped = firestore.transactional(txn_fn)
-        try:
-            return wrapped(transaction)
-        except ValueError as exc:
-            if isinstance(exc.__cause__, Aborted):
-                raise contention_error("transaction retries exhausted under contention") from exc
-            raise
+        last_exc: Exception | None = None
+        for attempt in range(_OUTER_ATTEMPTS):
+            if attempt > 0:
+                self._sleep(random.uniform(*_OUTER_BACKOFF_SECONDS))
+            transaction = self._new_transaction()
+            wrapped = firestore.transactional(txn_fn)
+            try:
+                return wrapped(transaction)
+            except Aborted as exc:
+                last_exc = exc
+            except ValueError as exc:
+                if not isinstance(exc.__cause__, Aborted):
+                    raise
+                last_exc = exc
+        raise contention_error("transaction retries exhausted under contention") from last_exc
 
     # ------------------------------------------------------------------
     # §3.8 手順 1 のガード(差し戻し対応 3): 依頼者が deleting なら、それが関わる操作を拒否する。
@@ -259,8 +287,11 @@ class VaultStore:
             if idem_snap.exists:
                 nid = idem_snap.to_dict()["nid"]
                 neg_snap = neg_col.document(nid).get(transaction=txn)
-                existing = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
-                return CreateNegotiationResponse(status="created", nid=nid, version=existing.version)
+                if neg_snap.exists:
+                    existing = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
+                    return CreateNegotiationResponse(status="created", nid=nid, version=existing.version)
+                # 冪等キーだけが残っていて、指す交渉がない(交渉が TTL や本人の削除で先に消えた)。
+                # 古いキーとして扱い、下で上書きして作り直す(500 にしない。台帳 I-8)。
 
             # --- 候補者側を解決する(読み取りだけ。書き込みより前に行う) ---
             cand_req = request.candidate
@@ -378,7 +409,11 @@ class VaultStore:
                 ttl_at=ttl_at,
             )
 
-            txn.set(idem_ref, {"nid": nid, "created_at": now})
+            idem_data = {"nid": nid, "created_at": now}
+            if ttl_at is not None:
+                # デモ・攻撃は、交渉と同じ期限を付ける(台帳 I-8)。live は付けず、本人の削除で消す。
+                idem_data["ttl_at"] = ttl_at
+            txn.set(idem_ref, idem_data)
             txn.set(neg_col.document(nid), model_to_firestore(doc))
             if not cand_req.is_fictional and new_budget_window is not None:
                 txn.set(
@@ -506,7 +541,16 @@ class VaultStore:
                 txn.set(negotiation_ref, model_to_firestore(doc))
                 return MoveResponse(version=doc.version, status=doc.status, valid=True, end_reason=pre_stop)
 
-            outcome = self._apply_move_by_kind(doc, side, other_side, counters, request, now)
+            previous_to_move, previous_status = doc.to_move, doc.status
+            outcome = self._apply_move_by_kind(doc, side, other_side, counters, request)
+
+            # --- 期限の付け直し(§3.4「to_move や status が変わるたびに付け直す」。台帳 C-37) ---
+            # 手番が変わる手(propose・reject)は手番の期限(5 分)、途中確認の手(ask_principal)は
+            # 途中確認の期限(24 時間)を、今から付け直す(expires_at は超えない)。手番も状態も
+            # 変わらない手(check・無効手)では付け直さない。終了する手は、この後の終了処理が
+            # deadline を null にする。
+            if doc.to_move != previous_to_move or doc.status != previous_status:
+                doc.deadline = self._fresh_deadline(doc, now)
 
             # --- 連続無効手のリセット/加算(手の種類を問わない) ---
             if outcome.valid:
@@ -514,10 +558,14 @@ class VaultStore:
             else:
                 counters.consecutive_invalid += 1
 
-            # --- 手数を進める(有効な check だけ除く。無効な check を含め、それ以外の
-            #     手はすべて数える。§3.5「手数(check を除く。無効手を含む)」の
-            #     「check を除く」は有効な check のことと読む: 差し戻しの指摘どおり) ---
-            if not (request.move == "check" and outcome.valid):
+            # --- 手数を進める。数えないのは、有効な check と有効な ask_principal(どちらも手番を
+            #     渡さない)だけ。無効な check・無効な ask_principal を含め、それ以外の手は
+            #     すべて数える。§3.5「手数(check を除く。無効手を含む)」の「check を除く」は
+            #     有効な check のことと読む(差し戻しの指摘どおり)。有効な ask_principal を
+            #     数えない扱いは台帳 C-38 の決定: 最後の 1 手で途中確認を打つと、回答の後に
+            #     使える手が残らず、「受ける」の回答でも accept できなくなるため。途中確認の
+            #     回数は、側ごとの上限(1)で抑えられる ---
+            if not (request.move in ("check", "ask_principal") and outcome.valid):
                 counters.moves_used += 1
 
             if outcome.terminate is not None:
@@ -562,7 +610,7 @@ class VaultStore:
                 end_reason=end_reason_from_chain,
             )
 
-        return self._run_transaction(_txn, contention_error=MovePreconditionFailed)
+        return self._run_transaction(_txn, contention_error=ContentionExhausted)
 
     def _apply_move_by_kind(
         self,
@@ -571,7 +619,6 @@ class VaultStore:
         other_side: Side,
         counters: SideCounters,
         request: MoveRequest,
-        now: dt.datetime,
     ) -> _MoveOutcome:
         if request.move == "check":
             return self._do_check(doc, side, counters, request)
@@ -582,7 +629,7 @@ class VaultStore:
         if request.move == "reject":
             return self._do_reject(doc, side, other_side, request)
         if request.move == "ask_principal":
-            return self._do_ask_principal(doc, side, counters, request, now)
+            return self._do_ask_principal(doc, side, counters, request)
         if request.move == "end":
             return self._do_end(side)
         return self._do_invalid(side, request)  # request.move == "invalid"(MoveRequest で保証済み)
@@ -596,7 +643,13 @@ class VaultStore:
     ) -> _MoveOutcome:
         # check(P): 評価回数が尽きていれば無効(evaluation_budget_exhausted)。それ以外は常に有効。
         if counters.evaluations_used >= self._config.limits.evaluation_budget_per_side:
-            view = EventView(seq=0, kind="invalid", package=request.package, reason="evaluation_budget_exhausted")
+            view = EventView(
+                seq=0,
+                kind="invalid",
+                package=request.package,
+                reason="evaluation_budget_exhausted",
+                attempted_move="check",
+            )
             return _MoveOutcome(False, "evaluation_budget_exhausted", view, None, None)
 
         counters.evaluations_used += 1
@@ -618,14 +671,25 @@ class VaultStore:
         request: MoveRequest,
     ) -> _MoveOutcome:
         if counters.evaluations_used >= self._config.limits.evaluation_budget_per_side:
-            view = EventView(seq=0, kind="invalid", package=request.package, reason="evaluation_budget_exhausted")
+            view = EventView(
+                seq=0,
+                kind="invalid",
+                package=request.package,
+                reason="evaluation_budget_exhausted",
+                attempted_move="propose",
+            )
             return _MoveOutcome(False, "evaluation_budget_exhausted", view, None, None)
 
         counters.evaluations_used += 1  # ガードの評価(§3.5)
         own_verdict = evaluate(self._own_policy(doc, side), request.package)
         if own_verdict is not Verdict.ACCEPTABLE:
             view = EventView(
-                seq=0, kind="invalid", package=request.package, reason="not_acceptable_to_own_principal"
+                seq=0,
+                kind="invalid",
+                package=request.package,
+                own_evaluation=own_verdict,  # 台帳 C-40: 自分側のエージェントへの情報(相手には見えない)
+                reason="not_acceptable_to_own_principal",
+                attempted_move="propose",
             )
             return _MoveOutcome(False, "not_acceptable_to_own_principal", view, None, None)
 
@@ -641,7 +705,7 @@ class VaultStore:
 
     def _do_accept(self, doc: NegotiationDocument, side: Side, request: MoveRequest) -> _MoveOutcome:
         if doc.pending_offer is None:
-            view = EventView(seq=0, kind="invalid", reason="no_pending_offer")
+            view = EventView(seq=0, kind="invalid", reason="no_pending_offer", attempted_move="accept")
             return _MoveOutcome(False, "no_pending_offer", view, None, None)
 
         package = doc.pending_offer.package
@@ -649,7 +713,12 @@ class VaultStore:
         own_verdict = evaluate(self._own_policy(doc, side), package)
         if own_verdict is not Verdict.ACCEPTABLE:
             view = EventView(
-                seq=0, kind="invalid", package=package, reason="not_acceptable_to_own_principal"
+                seq=0,
+                kind="invalid",
+                package=package,
+                own_evaluation=own_verdict,
+                reason="not_acceptable_to_own_principal",
+                attempted_move="accept",
             )
             return _MoveOutcome(False, "not_acceptable_to_own_principal", view, None, None)
 
@@ -666,7 +735,7 @@ class VaultStore:
         self, doc: NegotiationDocument, side: Side, other_side: Side, request: MoveRequest
     ) -> _MoveOutcome:
         if doc.pending_offer is None:
-            view = EventView(seq=0, kind="invalid", reason="no_pending_offer")
+            view = EventView(seq=0, kind="invalid", reason="no_pending_offer", attempted_move="reject")
             return _MoveOutcome(False, "no_pending_offer", view, None, None)
 
         package = doc.pending_offer.package
@@ -682,10 +751,16 @@ class VaultStore:
         side: Side,
         counters: SideCounters,
         request: MoveRequest,
-        now: dt.datetime,
     ) -> _MoveOutcome:
+        # 途中確認の期限(24 時間)は、status が変わるので process_move が付け直す(§3.4)。
         if counters.evaluations_used >= self._config.limits.evaluation_budget_per_side:
-            view = EventView(seq=0, kind="invalid", package=request.package, reason="evaluation_budget_exhausted")
+            view = EventView(
+                seq=0,
+                kind="invalid",
+                package=request.package,
+                reason="evaluation_budget_exhausted",
+                attempted_move="ask_principal",
+            )
             return _MoveOutcome(False, "evaluation_budget_exhausted", view, None, None)
 
         # 評価は必ず行う(NEEDS_CONFIRMATION かどうかを知るのに要るため。§3.5 の表の読み方は
@@ -693,18 +768,30 @@ class VaultStore:
         counters.evaluations_used += 1
         verdict = evaluate(self._own_policy(doc, side), request.package)
         if verdict is not Verdict.NEEDS_CONFIRMATION:
-            view = EventView(seq=0, kind="invalid", package=request.package, reason="question_not_applicable")
+            view = EventView(
+                seq=0,
+                kind="invalid",
+                package=request.package,
+                own_evaluation=verdict,
+                reason="question_not_applicable",
+                attempted_move="ask_principal",
+            )
             return _MoveOutcome(False, "question_not_applicable", view, None, None)
 
         if counters.principal_checks_used >= self._config.limits.principal_checks_per_side:
-            view = EventView(seq=0, kind="invalid", package=request.package, reason="question_budget_exhausted")
+            view = EventView(
+                seq=0,
+                kind="invalid",
+                package=request.package,
+                own_evaluation=verdict,
+                reason="question_budget_exhausted",
+                attempted_move="ask_principal",
+            )
             return _MoveOutcome(False, "question_budget_exhausted", view, None, None)
 
         counters.principal_checks_used += 1
         doc.status = "awaiting_principal"
         doc.pending_question = PendingQuestion(side=side, package=request.package)
-        check_deadline = dt.timedelta(seconds=self._config.deadlines.principal_check_deadline_seconds)
-        doc.deadline = min(now + check_deadline, doc.expires_at)
         view = EventView(seq=0, kind="ask_principal", package=request.package)
         return _MoveOutcome(True, None, view, None, None)
 
@@ -718,6 +805,7 @@ class VaultStore:
 
     def _do_invalid(self, side: Side, request: MoveRequest) -> _MoveOutcome:
         # §3.5 最終行: レフェリーが見つけた無効手(スキーマ違反・タイムアウト・A2A のエラー)の登録。
+        # 何を打とうとしたかは金庫には分からないので、attempted_move は付けない(台帳 C-40)。
         view = EventView(seq=0, kind="invalid", package=request.package, reason=request.reason)
         return _MoveOutcome(False, request.reason, view, None, None)
 
@@ -829,7 +917,7 @@ class VaultStore:
             txn.set(negotiation_ref, model_to_firestore(doc))
             return PrincipalAnswerResponse(version=doc.version, status=doc.status, end_reason=None)
 
-        return self._run_transaction(_txn, contention_error=MovePreconditionFailed)
+        return self._run_transaction(_txn, contention_error=ContentionExhausted)
 
     # ------------------------------------------------------------------
     # §3.4 control(一時停止・再開・取消)・expire
@@ -985,7 +1073,28 @@ class VaultStore:
             raise NotFoundError(nid)
         doc = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
         self._reject_if_side_participant_deleting(doc, side, nid)
+        return self._read_event_items(nid, side, after_seq)
 
+    def get_demo_events(self, nid: str, side: Side, after_seq: int = 0) -> list[EventViewItem]:
+        """GET /v1/demo/negotiations/{nid}/events(台帳 X-38。§6.3「web と vault の両方で確かめる」)。
+
+        mode が demo か attack で、かつ候補者が架空人物の交渉だけ、通常の events と同じ応答を返す。
+        それ以外(本物の利用者の交渉・存在しない交渉・交渉 ID の形でない値)は、交渉の有無を知らせない
+        よう、存在しないときと同じ NotFoundError(404)にする。判定は金庫が持つ交渉の文書(正本)で行い、
+        web の補助の文書(stages)には頼らない。
+        """
+        if re.fullmatch(ID_PATTERN, nid) is None:
+            raise NotFoundError(nid)
+        neg_snap = self._negotiation_ref(nid).get()
+        if not neg_snap.exists:
+            raise NotFoundError(nid)
+        doc = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
+        if doc.mode not in ("demo", "attack") or not doc.participants.candidate.is_fictional:
+            raise NotFoundError(nid)
+        return self._read_event_items(nid, side, after_seq)
+
+    def _read_event_items(self, nid: str, side: Side, after_seq: int) -> list[EventViewItem]:
+        """イベント列の、side の見え方だけを seq の順に読む(get_events・get_demo_events の共通の下請け)。"""
         field_path = f"views.{side}.seq"
         query = self._events(nid).where(filter=FieldFilter(field_path, ">", after_seq)).order_by(field_path)
         items: list[EventViewItem] = []
@@ -1001,6 +1110,7 @@ class VaultStore:
                     reason=view.reason,
                     answer=view.answer,
                     result=view.result,
+                    attempted_move=view.attempted_move,
                 )
             )
         return items
@@ -1046,20 +1156,18 @@ class VaultStore:
 
         Firestore の複合インデックスを避けるため、単一フィールドの等価フィルタ
         (status in [...])だけで絞り込み、並び替え・カーソルの位置決めは Python 側で行う。
+        カーソルの位置は nid > cursor で決める(ページの間にカーソルの交渉が終わって一覧から消えても、
+        先頭から返し直さない。L9-2)。
         """
         query = self._negotiations().where(filter=FieldFilter("status", "in", ["active", "awaiting_principal"]))
         docs = [model_from_firestore(NegotiationDocument, snap.to_dict()) for snap in query.stream()]
         docs.sort(key=lambda d: d.nid)
 
-        start_index = 0
         if cursor is not None:
-            for i, doc in enumerate(docs):
-                if doc.nid == cursor:
-                    start_index = i + 1
-                    break
+            docs = [doc for doc in docs if doc.nid > cursor]
 
-        page = docs[start_index : start_index + page_size]
-        next_cursor = page[-1].nid if len(docs) > start_index + page_size and page else None
+        page = docs[:page_size]
+        next_cursor = page[-1].nid if len(docs) > page_size else None
 
         items = [
             OpenNegotiationSummary(
@@ -1128,6 +1236,49 @@ class VaultStore:
         if pending:
             batch.commit()
 
+    def _delete_idempotency_key(self, request_id: str) -> None:
+        """交渉の作成の冪等キー idempotency/{hash} を消す(冪等。すでになければ何もしない。台帳 I-8)。
+
+        キーは、交渉の文書が持つ request_id から引ける。request_id が空(本人の削除で、すでに
+        消してある)なら何もしない。
+        """
+        if request_id:
+            self._idempotency_ref(request_id).delete()
+
+    def _erase_side_from_negotiation(self, nid: str, side: Side) -> None:
+        """相手が本物の交渉の文書から、削除する側の情報を消す(§3.8 手順 3。台帳 C-41)。
+
+        イベント列の見え方を null にした後に呼ぶ。1 つのトランザクションで、次を消す。
+        - last_check の side 側(その側が確かめた組み合わせと、消した依頼者のポリシーによる評価)
+        - pending_offer(2 者の間の未決の提案。提案者としても受け手としても、その側が関わる。
+          交渉は終わっているので、残しても使い道がない)と、side 側の pending_question
+        - participants の side 側の属性帯
+        - 依頼者 ID(最後。ここまでが済むまでは、やり直しで、交渉を依頼者 ID から引ける)
+        作った側(候補者)のときは、request_id も消す(web は依頼者 ID を含む形で付けるため)。
+        相手の側の見え方・評価・属性帯には触れない。終了した交渉で、ほかに書く操作はない。
+        """
+        negotiation_ref = self._negotiation_ref(nid)
+
+        def _txn(txn: firestore.Transaction) -> None:
+            snap = negotiation_ref.get(transaction=txn)
+            if not snap.exists:
+                return
+            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            if side == "candidate":
+                doc.last_check.candidate = None
+                doc.request_id = ""
+            else:
+                doc.last_check.employer = None
+            doc.pending_offer = None
+            if doc.pending_question is not None and doc.pending_question.side == side:
+                doc.pending_question = None
+            participant = doc.participants.candidate if side == "candidate" else doc.participants.employer
+            participant.attribute_bands = None
+            participant.principal_id = None  # 最後に消す
+            txn.set(negotiation_ref, model_to_firestore(doc))
+
+        self._run_transaction(_txn, contention_error=TransactionRetryExhausted)
+
     def _process_negotiation_for_deletion(self, pid: str, nid: str) -> None:
         """§3.8 手順 3。相手を見て、自分側の見え方を消すか、交渉を丸ごと消すか決める。"""
         negotiation_ref = self._negotiation_ref(nid)
@@ -1145,18 +1296,26 @@ class VaultStore:
         else:
             return  # 防御的: 通常は起こらない(この交渉は pid に関わっていない)
 
+        # 冪等キーは、交渉の文書の request_id から引いて、交渉の文書より先に消す(台帳 I-8)。交渉を
+        # 丸ごと消すときと、交渉を作った側(候補者)が消えるときに消す。作っていない側が消えるときは、
+        # 作った側の交渉が残るので、キーも残す(再送されても二重に作らない。§3.5)。
+        if other_participant.is_fictional or own_side == "candidate":
+            self._delete_idempotency_key(doc.request_id)
+
         if other_participant.is_fictional:
             self._delete_negotiation_events(nid)
             negotiation_ref.delete()
         else:
             self._null_out_side_views(nid, own_side)
+            self._erase_side_from_negotiation(nid, own_side)
 
     def delete_principal(self, pid: str) -> None:
         """DELETE /v1/principals/{pid}(§3.8)。各段は冪等。すでに消えていれば成功を返す。
 
         4 段(deleting にする・未終了の交渉を取消・交渉ごとの後始末・依頼者文書を消す)を
         順に行う。途中で例外が飛んでも、呼び直せば残りの段から続けられる(各段が冪等なため、
-        すでに終わった段はそのつど no-op になる)。
+        すでに終わった段はそのつど no-op になる)。交渉ごとの後始末(手順 3)の中でも、依頼者 ID は
+        最後に消すので、途中で止まっても、やり直しで交渉を依頼者 ID から引ける。
         """
         principal_ref = self._principal_ref(pid)
         snap = principal_ref.get()

@@ -5,6 +5,10 @@
 消費しないこと、相手が提案を重ねても自分の評価上限を超えないこと、同じ側の無効手が
 3 回続いたときだけ終わることを確かめる。
 
+金庫の無効手の見え方(台帳 C-40): 無効手を打った側の見え方に、打とうとした手の種類(attempted_move)と、
+自分側のポリシーで評価して無効と判断した手なら、その自分側の評価(own_evaluation)が入ること。相手には見えないこと。
+レフェリーが登録した無効手(schema_invalid・agent_timeout)は、手の種類も分からないので入らないこと。
+
 web(レフェリー)の部分(末尾。1d-1): 台本のエージェントのスキーマ違反が invalid として登録され、
 次の TurnInput.last_error に理由が入り、直した手で交渉が続くこと。一時的なエラー
 (ConnectionError・TimeoutError)は再試行されて無効手にならず、再試行を使い切ったら agent_timeout に
@@ -14,11 +18,12 @@ web(レフェリー)の部分(末尾。1d-1): 台本のエージェントのス�
 from dataclasses import replace
 
 import pytest
-from vault.api_models import MoveRequest
+from vault.api_models import MoveRequest, PrincipalAnswerRequest
 from vault.models import EmployerRule
 from vault_helpers import (
     accept_all_policy,
     demo_create_request,
+    needs_confirmation_policy,
     put_candidate_and_employer_templates,
     reject_all_policy,
     sample_package,
@@ -174,6 +179,152 @@ def test_a_valid_move_resets_the_consecutive_invalid_counter(store):
         assert response.valid is False
         assert response.status == "active"
         version = response.version
+
+
+# --- 金庫の無効手の見え方(台帳 C-40) ---
+
+
+def _last_invalid_event(store, nid, side="candidate"):
+    events = store.get_events(nid, side)
+    assert events[-1].kind == "invalid", events[-1]
+    return events[-1]
+
+
+def _summary(event):
+    """無効手の見え方の、C-40 で決めた 4 つの項目(理由・打とうとした手・組み合わせ・自分側の評価)。"""
+    return (event.reason, event.attempted_move, event.package, event.own_evaluation)
+
+
+def _exhaust_evaluations(store, nid, package) -> int:
+    """候補者が有効な check を 16 回打って、評価回数を使い切る。次の expected_version を返す。"""
+    version = 0
+    for _ in range(16):
+        response = store.process_move(
+            nid, MoveRequest(expected_version=version, side="candidate", move="check", package=package)
+        )
+        assert response.valid is True
+        version = response.version
+    return version
+
+
+@pytest.mark.parametrize(
+    ("candidate_policy", "expected_evaluation"),
+    [(reject_all_policy("candidate"), "not_acceptable"), (needs_confirmation_policy("candidate"), "needs_confirmation")],
+)
+def test_a_guard_rejected_proposal_records_the_move_the_package_and_the_own_evaluation(
+    store, candidate_policy, expected_evaluation
+):
+    # C-40: ガードで断られた提案の見え方は、打とうとした手(propose)・組み合わせ・自分側の評価(そのポリシーでの
+    # 3 値)を持つ。次の TurnInput.last_invalid の元になる。相手(求人側)には、何も見えない。
+    nid = _create(store, candidate_policy=candidate_policy)
+    package = sample_package()
+    store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move="propose", package=package))
+
+    event = _last_invalid_event(store, nid)
+    assert _summary(event) == ("not_acceptable_to_own_principal", "propose", package, expected_evaluation)
+    assert store.get_events(nid, "employer") == []
+
+
+def test_a_question_that_does_not_apply_records_the_move_the_package_and_the_own_evaluation(store):
+    # C-40: 「本人確認が必要」でない組み合わせへの途中確認(question_not_applicable。評価 1 消費)も、
+    # 打とうとした手・組み合わせ・自分側の評価を持つ(どの P を聞いたか、次の入力から分かる)。
+    nid = _create(store, candidate_policy=accept_all_policy("candidate"))
+    package = sample_package()
+    store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move="ask_principal", package=package))
+
+    assert _summary(_last_invalid_event(store, nid)) == (
+        "question_not_applicable",
+        "ask_principal",
+        package,
+        "acceptable",
+    )
+
+
+def test_a_question_over_the_limit_records_the_move_the_package_and_the_own_evaluation(store):
+    # C-40: 上限を超える 2 回目の途中確認(question_budget_exhausted。評価 1 消費)も、同じ 4 つの項目を持つ。
+    nid = _create(store, candidate_policy=needs_confirmation_policy("candidate"))
+    first, second = sample_package(salary=650), sample_package(salary=550, remote_days=1)
+    asked = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="ask_principal", package=first)
+    )
+    answered = store.process_principal_answer(
+        nid, PrincipalAnswerRequest(expected_version=asked.version, side="candidate", package=first, answer="accept")
+    )
+    store.process_move(
+        nid, MoveRequest(expected_version=answered.version, side="candidate", move="ask_principal", package=second)
+    )
+
+    assert _summary(_last_invalid_event(store, nid)) == (
+        "question_budget_exhausted",
+        "ask_principal",
+        second,
+        "needs_confirmation",
+    )
+
+
+def test_an_accept_recheck_failure_records_the_pending_package_and_the_own_evaluation(store):
+    # C-40: accept の確かめ直しで「受けられる」でなかった無効手は、打とうとした手(accept)・受けようとした
+    # 提案の組み合わせ・自分側の評価を持つ。
+    nid = _create(store, employer_rules=[EmployerRule(when={}, policy=needs_confirmation_policy("employer"))])
+    package = sample_package()
+    proposed = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="propose", package=package)
+    )
+    store.process_move(nid, MoveRequest(expected_version=proposed.version, side="employer", move="accept"))
+
+    assert _summary(_last_invalid_event(store, nid, "employer")) == (
+        "not_acceptable_to_own_principal",
+        "accept",
+        package,
+        "needs_confirmation",
+    )
+    assert [e.kind for e in store.get_events(nid, "candidate")] == ["propose"]  # 求人側の無効手は、候補者に見えない
+
+
+@pytest.mark.parametrize("move", ["accept", "reject"])
+def test_a_move_without_a_pending_offer_records_the_move_and_has_no_package_or_evaluation(store, move):
+    # C-40: 提案がないのに accept・reject した無効手は、打とうとした手だけを持つ(組み合わせも評価もない)。
+    nid = _create(store)
+    store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move=move))
+
+    assert _summary(_last_invalid_event(store, nid)) == ("no_pending_offer", move, None, None)
+
+
+@pytest.mark.parametrize("move", ["check", "propose", "ask_principal"])
+def test_a_move_after_the_evaluations_are_used_up_records_the_move_and_the_package_without_an_evaluation(store, move):
+    # C-40: 評価回数が尽きた後の check・propose・ask_principal(evaluation_budget_exhausted)は、評価をしていない
+    # ので、打とうとした手と組み合わせだけを持つ(自分側の評価はない)。
+    nid = _create(store)
+    package = sample_package()
+    version = _exhaust_evaluations(store, nid, package)
+    store.process_move(nid, MoveRequest(expected_version=version, side="candidate", move=move, package=package))
+
+    assert _summary(_last_invalid_event(store, nid)) == ("evaluation_budget_exhausted", move, package, None)
+
+
+@pytest.mark.parametrize("reason", ["schema_invalid", "agent_timeout"])
+def test_an_invalid_move_registered_by_the_referee_has_no_move_package_or_evaluation(store, reason):
+    # C-40: レフェリーが登録した無効手(schema_invalid・agent_timeout)は、金庫には打とうとした手も組み合わせも
+    # 分からない。3 つとも入らない(null)。
+    nid = _create(store)
+    store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move="invalid", reason=reason))
+
+    assert _summary(_last_invalid_event(store, nid)) == (reason, None, None, None)
+
+
+def test_the_attempted_move_is_exposed_by_the_events_api_and_only_for_invalid_moves(api_client, store):
+    # C-40: 金庫の events API(web が読む口)の応答に、attempted_move が出る。無効手だけが持ち、ほかの手は null。
+    nid = _create(store, candidate_policy=reject_all_policy("candidate"))
+    package = sample_package()
+    store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move="propose", package=package))
+    store.process_move(nid, MoveRequest(expected_version=1, side="candidate", move="check", package=package))
+
+    events = api_client.get(f"/v1/negotiations/{nid}/events", params={"side": "candidate"}).json()
+
+    assert [(e["kind"], e["attempted_move"], e["own_evaluation"]) for e in events] == [
+        ("invalid", "propose", "not_acceptable"),
+        ("check", None, "not_acceptable"),
+    ]
 
 
 # --- web(レフェリー)の部分(1d-1) ---

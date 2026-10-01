@@ -1,10 +1,11 @@
 """DV-10: イベント列の側ごとの見え方(design.md §3.2)。
 
 金庫の部分: §3.2 の表のとおりに操作ごとの見え方が分かれていること、propose で相手の評価が
-どちらの見え方にも入らないこと、相手に見えない操作の後でも相手の seq が飛ばずに
-続くこと、見え方と view に相手の残り回数が現れず version は view にだけ入ること、
-最終記録が双方に 1 件だけであること、principal-answer の行が答えた側の見え方にだけ入り
-相手の seq を飛ばさないことを確かめる。
+どちらの見え方にも入らないこと、相手に見えない操作(確認・途中確認・無効手・一時停止・再開)の後でも
+相手の seq が飛ばずに 1 から連番で続くこと(一時停止・再開・無効手は、台帳 C-39 の (c) で足した確認)、
+一時停止・再開の見え方が操作した側だけであること、見え方と view に相手の残り回数が現れず version は
+view にだけ入ること、最終記録が双方に 1 件だけであること、principal-answer の行が答えた側の見え方にだけ
+入り相手の seq を飛ばさないことを確かめる。
 
 web の部分(末尾。1d-1): TurnInput に version と相手の残り回数が現れないこと、レフェリーを金庫の操作の
 直後で止めて作り直しても、TurnInput.history に記録の欠けも重複もないこと。画面の部分は 1d-2 以降。
@@ -12,7 +13,7 @@ web の部分(末尾。1d-1): TurnInput に version と相手の残り回数が�
 
 import pytest
 from negotiation_core import Verdict
-from vault.api_models import MoveRequest
+from vault.api_models import ControlRequest, MoveRequest
 from vault_helpers import demo_create_request, put_candidate_and_employer_templates, sample_package
 from web_helpers import CrashAfterMove, SimulatedCrash, create_demo_negotiation, drive, move_dict
 
@@ -170,6 +171,59 @@ def test_counterparty_seq_does_not_skip_across_invisible_operations(store):
     assert [e.seq for e in employer_events] == [1, 2]
 
 
+def test_pause_resume_and_invalid_records_are_visible_only_to_their_own_side_and_never_break_the_others_seq(store):
+    # DV-10 / 台帳 C-39 の (c): 相手に見えない操作(一時停止・再開・無効手)の後でも、相手の seq は飛ばずに
+    # 1 から連番で続く。一時停止・再開の見え方は、操作した側だけ(§3.2 の表)。
+    # 候補者の一時停止・再開・無効手のそれぞれの後に、求人側に見える記録(候補者の提案 → 求人側の断り)を起こし、
+    # 続けて求人側も同じ操作をして、候補者側に見える記録を起こす。どちらの側の seq も、1 から連番になる。
+    nid = _create(store)
+    package = sample_package()
+
+    def seqs(side):
+        return [event.seq for event in store.get_events(nid, side)]
+
+    def kinds(side):
+        return [event.kind for event in store.get_events(nid, side)]
+
+    # --- 候補者の、求人側に見えない操作 ---
+    paused = store.control(nid, ControlRequest(side="candidate", action="pause"))
+    assert (kinds("candidate"), kinds("employer")) == (["pause"], [])  # 自分だけに見える
+    resumed = store.control(nid, ControlRequest(side="candidate", action="resume"))
+    assert (kinds("candidate"), kinds("employer")) == (["pause", "resume"], [])
+    invalid = store.process_move(
+        nid, MoveRequest(expected_version=resumed.version, side="candidate", move="invalid", reason="schema_invalid")
+    )
+    assert invalid.valid is False
+    assert (kinds("candidate"), kinds("employer")) == (["pause", "resume", "invalid"], [])
+    assert paused.version < resumed.version < invalid.version
+
+    # --- 求人側に見える記録(1 件目)。求人側の seq は 1 から始まる(候補者の 3 件で飛ばない) ---
+    proposed = store.process_move(
+        nid, MoveRequest(expected_version=invalid.version, side="candidate", move="propose", package=package)
+    )
+    assert proposed.valid is True
+    assert seqs("employer") == [1]
+    assert seqs("candidate") == [1, 2, 3, 4]
+
+    # --- 求人側の、候補者に見えない操作 ---
+    store.control(nid, ControlRequest(side="employer", action="pause"))
+    assert (kinds("employer"), seqs("candidate")) == (["offer_received", "pause"], [1, 2, 3, 4])  # 候補者の記録は増えない
+    resumed = store.control(nid, ControlRequest(side="employer", action="resume"))
+    assert (kinds("employer"), seqs("candidate")) == (["offer_received", "pause", "resume"], [1, 2, 3, 4])
+    invalid = store.process_move(
+        nid, MoveRequest(expected_version=resumed.version, side="employer", move="invalid", reason="agent_timeout")
+    )
+    assert invalid.valid is False
+    assert (seqs("employer"), seqs("candidate")) == ([1, 2, 3, 4], [1, 2, 3, 4])
+
+    # --- 候補者に見える記録(求人側の断り)。候補者の seq は 5 で続く(求人側の 3 件で飛ばない) ---
+    store.process_move(nid, MoveRequest(expected_version=invalid.version, side="employer", move="reject"))
+    assert seqs("candidate") == [1, 2, 3, 4, 5]
+    assert seqs("employer") == [1, 2, 3, 4, 5]
+    assert kinds("candidate") == ["pause", "resume", "invalid", "propose", "offer_rejected"]
+    assert kinds("employer") == ["offer_received", "pause", "resume", "invalid", "reject"]
+
+
 def test_view_and_events_never_expose_the_counterparty_remaining_budget(store):
     # DV-10: 見え方と view に、相手の残り回数が現れない(version は view にだけ入る)。
     nid = _create(store)
@@ -208,6 +262,7 @@ def test_view_and_events_never_expose_the_counterparty_remaining_budget(store):
             "reason",
             "answer",
             "result",
+            "attempted_move",  # 無効手だけが持つ、打とうとした手の種類(台帳 C-40)
         }
 
 

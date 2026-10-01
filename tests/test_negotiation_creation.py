@@ -3,17 +3,26 @@
 同じ request_id での冪等性、本物の候補者の同時 1 件制限、予算の予約と枯渇、
 交渉の途中で 1 日の予算が尽きないこと、属性帯(台帳 I-2)を保存済みでなければ
 作れないことを確かめる。
+
+冪等キー(idempotency/{hash}。台帳 I-8): 交渉が先に消えて、キーだけが残っていても(TTL・本人の削除の途中)、
+古いキーとして上書きして作り直す(500 にしない)。デモ・攻撃のキーには、交渉と同じ TTL(ttl_at)が付き、
+本物の依頼者のキーには付かない(本人の削除で消える。tests/test_principal_deletion.py)。
 """
 
+import datetime as dt
+
+import pytest
 from negotiation_core import CandidateAttributeBands, Policy, Verdict, evaluate
 
 from vault.api_models import ControlRequest, MoveRequest
+from vault.errors import NotFoundError
 from vault.models import EmployerRule
 from vault.serialization import model_from_firestore
 from vault.templates import put_template
 from vault_helpers import (
     accept_all_policy,
     default_attribute_bands,
+    demo_create_request,
     live_create_request,
     make_employer_template,
     new_id,
@@ -94,17 +103,33 @@ def test_creation_is_refused_once_daily_budget_is_exhausted(store):
     assert principal_doc["evaluation_budget"]["used"] == 160  # 交渉を作り直しても回復しない
 
 
+def _evaluation_budget(store, pid) -> dict:
+    """依頼者の 1 日の評価予算の窓(window_started_at と used)。"""
+    return store._principal_ref(pid).get().to_dict()["evaluation_budget"]
+
+
 def test_daily_budget_never_runs_out_mid_negotiation(store):
     # DV-12: 交渉の途中で本人の 1 日の予算が尽きることはない(予約済みのため)。
-    # 1 つの交渉の中で、評価上限(16)いっぱいまで check を送っても、日次予算の枯渇による
-    # 拒否(evaluation_budget_exhausted 以外の理由)が起きないことを確かめる。
-    _, employer_template = put_candidate_and_employer_templates(store._db)
+    # 1 日の窓の残りを、ちょうど 1 つの交渉の予約分(16)にしてから作成する(9 件作って取り消した後。
+    # 使用済みは 144)。作成の予約で、窓の残りは 0 になる。その状態で、交渉の評価上限(16)いっぱいまで
+    # check を送っても全部通り、1 日の予算(used)は check の前後で変わらない。
+    # 評価のたびに 1 日の予算も引く実装なら、残り 0 の窓では拒否されるか、used が増える(台帳 C-39 の (b))。
     pid = new_id("principal")
     put_candidate_policy(store, pid)
+    for _ in range(9):
+        employer_template = make_employer_template()
+        put_template(store._db, employer_template)
+        earlier = store.create_negotiation(live_create_request(pid, employer_template.template_id))
+        assert earlier.status == "created"
+        store.control(earlier.nid, ControlRequest(side="candidate", action="cancel"))  # 進行中 1 件までの制限を避ける
+    assert _evaluation_budget(store, pid)["used"] == 144  # 1 日の窓の残りは、ちょうど 16
 
+    _, employer_template = put_candidate_and_employer_templates(store._db)
     result = store.create_negotiation(live_create_request(pid, employer_template.template_id))
     assert result.status == "created"
     nid = result.nid
+    window_after_reservation = _evaluation_budget(store, pid)
+    assert window_after_reservation["used"] == 160  # 予約で、1 日の窓の残りは 0
 
     version = 0
     for _ in range(16):
@@ -114,6 +139,7 @@ def test_daily_budget_never_runs_out_mid_negotiation(store):
         )
         assert response.valid is True
         version = response.version
+        assert _evaluation_budget(store, pid) == window_after_reservation  # check のたびに、1 日の予算は変わらない
 
     # 16 回使い切った後の 17 回目は、交渉ごとの評価上限(evaluation_budget_exhausted)で
     # 無効になる。日次予算が別途尽きて拒否されるわけではないことが、ここまでの 16 回が
@@ -123,6 +149,7 @@ def test_daily_budget_never_runs_out_mid_negotiation(store):
     )
     assert response.valid is False
     assert response.error == "evaluation_budget_exhausted"
+    assert _evaluation_budget(store, pid) == window_after_reservation
 
 
 def test_candidate_without_stored_attribute_bands_cannot_create_a_negotiation(store):
@@ -183,3 +210,70 @@ def test_employer_rule_matching_uses_the_stored_attribute_bands(store):
     other_employer_policy = model_from_firestore(Policy, other_doc["snapshots"]["employer"])
     assert evaluate(other_employer_policy, sample_package()) is Verdict.NOT_ACCEPTABLE
 
+
+def test_a_leftover_idempotency_key_without_its_negotiation_is_replaced_and_the_negotiation_is_created_again(store):
+    # DV-12 / 台帳 I-8: 冪等キーが残っていて、指す交渉がない(交渉が TTL で先に消えた)とき、古いキーとして扱い、
+    # 上書きして作り直す。以前は、存在しない文書を読み戻そうとして、500 になった。
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    request = demo_create_request(candidate_template.template_id, employer_template.template_id, request_id="req-stale")
+    first = store.create_negotiation(request)
+    store._negotiation_ref(first.nid).delete()  # 交渉だけが先に消えた(冪等キーは残っている)
+    assert store._idempotency_ref("req-stale").get().exists
+
+    second = store.create_negotiation(request)
+
+    assert (second.status, second.version) == ("created", 0)
+    assert second.nid != first.nid
+    assert store._idempotency_ref("req-stale").get().to_dict()["nid"] == second.nid  # キーは、新しい交渉を指す
+    assert store._negotiation_ref(second.nid).get().exists
+    # 交渉がある間は、これまでどおり、同じ request_id に同じ交渉を返す(二重に作らない。§3.5)。
+    assert store.create_negotiation(request).nid == second.nid
+
+
+def test_a_stale_idempotency_key_of_a_live_negotiation_is_recreated_for_an_existing_principal_and_refused_for_a_deleted_one(
+    store,
+):
+    # DV-12 / 台帳 I-8: 本物の依頼者でも、キーだけが残っていれば作り直す(予約もやり直す)。依頼者の文書がなければ、
+    # 作り直しの中の確認で断られる(500 にならない)。
+    _, employer_template = put_candidate_and_employer_templates(store._db)
+    pid = new_id("principal")
+    put_candidate_policy(store, pid)
+    request = live_create_request(pid, employer_template.template_id, request_id="req-live-stale")
+    first = store.create_negotiation(request)
+    store._negotiation_ref(first.nid).delete()
+
+    second = store.create_negotiation(request)
+
+    assert second.status == "created" and second.nid != first.nid
+    assert _evaluation_budget(store, pid)["used"] == 32  # 作り直しで、予約もやり直された
+
+    store._negotiation_ref(second.nid).delete()
+    store._principal_ref(pid).delete()  # 依頼者の文書もない
+    with pytest.raises(NotFoundError):
+        store.create_negotiation(request)
+
+
+@pytest.mark.parametrize("mode", ["demo", "attack"])
+def test_demo_and_attack_idempotency_keys_carry_the_negotiations_ttl(store, clock, mode):
+    # 台帳 I-8: デモ・攻撃の冪等キーには、交渉と同じ ttl_at(暫定 96 時間後)を付ける(Firestore の TTL ポリシーで消える)。
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    created = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id, mode=mode, request_id="req-ttl")
+    )
+
+    key = store._idempotency_ref("req-ttl").get().to_dict()
+    negotiation = store._negotiation_ref(created.nid).get().to_dict()
+
+    assert key["ttl_at"] == negotiation["ttl_at"] == clock.now() + dt.timedelta(hours=96)
+
+
+def test_a_live_negotiations_idempotency_key_carries_no_ttl(store):
+    # 台帳 I-8: 本物の依頼者のキーには TTL を付けない(交渉と同じ扱い。本人の削除で消える)。
+    _, employer_template = put_candidate_and_employer_templates(store._db)
+    pid = new_id("principal")
+    put_candidate_policy(store, pid)
+    store.create_negotiation(live_create_request(pid, employer_template.template_id, request_id="req-live-ttl"))
+
+    key = store._idempotency_ref("req-live-ttl").get().to_dict()
+
+    assert "ttl_at" not in key

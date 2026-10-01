@@ -171,8 +171,10 @@ def test_turn_input_carries_the_views_own_side_values_and_never_the_version():
         "pending_offer",
         "last_check",
         "last_error",
+        "last_invalid",  # 直前の無効手の中身(台帳 C-40)。web が組み立てる部分は、まだ入れていない(None)
         "budget",
     }
+    assert dumped["last_invalid"] is None
     assert "12345" not in str(dumped)  # version の値がどこにも入っていない
     assert set(dumped["budget"]) == {"remaining_evaluations", "remaining_moves", "remaining_principal_checks"}
 

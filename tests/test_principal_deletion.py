@@ -9,12 +9,17 @@
 なら交渉の文書もイベント列も 1 件も残らないこと、終わっていない交渉が取消になること、
 各段の間で止めても呼び直せば最後まで進むこと、すでに消えていれば成功を返すことを確かめる。
 
+相手が本物の交渉では、イベント列の見え方を消すだけでなく、交渉の文書に残る削除した側の評価(last_check)・
+未決の提案と質問・属性帯・依頼者 ID(と、依頼者 ID を含む request_id)も消えること(台帳 C-41)、交渉の作成の
+冪等キー(idempotency/{hash})が、相手が架空人物でも本物でも消えること(台帳 I-8)を確かめる。
+
 差し戻し対応 3(§3.8 手順 1「以後、その依頼者が関わる操作はすべて拒否する」): 手順 1
 (deleting を立てる)だけが済んだ状態で、依頼者を単位にする操作(PUT/GET policy・PUT
 blocklist・本人の交渉一覧・交渉の作成)と、交渉を単位にする操作のうち moves・control・
 principal-answer・view・events が拒否され、expire だけは拒否されず、相手側の読み出しは
-通ることを確かめる。あわせて、交渉の作成と削除を並行して繰り返しても、削除後に
-その依頼者を参加者に持つ交渉が vault-db に残らないことを確かめる。
+通ることを確かめる。あわせて、削除の途中(手順 1 と 2 の間、手順 2 と 3 の間)に割り込んだ交渉の作成が
+principal_deleting で断られ、削除後にその依頼者を参加者に持つ交渉が vault-db に残らないことを、
+割り込みを決定的に起こして確かめる(並行して走らせる方法は、割り込みが起きないまま通り得るため、使わない)。
 
 1b-1 は求人側を架空人物(テンプレート)に限っているので、相手が本物の依頼者の交渉は API
 では作れない。そのため、その組み合わせだけは Firestore に直接状態を置いて確かめる
@@ -22,10 +27,8 @@ principal-answer・view・events が拒否され、expire だけは拒否され�
 """
 
 import datetime as dt
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from google.cloud.firestore_v1.base_query import FieldFilter
 
 from vault.api_models import (
     ControlRequest,
@@ -34,7 +37,7 @@ from vault.api_models import (
     PutBlocklistRequest,
     PutPolicyRequest,
 )
-from vault.errors import MovePreconditionFailed, PrincipalDeletingError, TransactionRetryExhausted
+from vault.errors import MovePreconditionFailed, PrincipalDeletingError
 from vault.ids import generate_id
 from vault.models import EmployerRule, NegotiationDocument, Participant, Participants, Snapshots
 from vault.serialization import model_to_firestore
@@ -54,16 +57,15 @@ from web import stages as stages_module
 from web_app_helpers import CANARY, DeletionProbe, documents_mentioning, interview_body, plant_canaries
 from web_helpers import create_demo_negotiation
 
-# エミュレータの粗いロック実装(store.py の _new_transaction を参照)を踏まえ、
-# 交渉の作成と削除の並行テストは並行数を抑える。
-_CONCURRENT_CREATE_ATTEMPTS = 6
-
-
-def _write_live_negotiation_with_real_counterpart(store, clock, candidate_pid, employer_pid):
+def _write_live_negotiation_with_real_counterpart(
+    store, clock, candidate_pid, employer_pid, *, request_id=None, candidate_policy=None, employer_policy=None
+):
     """相手(求人側)も本物の依頼者である交渉を、Firestore に直接作る(§3.8 のテスト用)。
 
     1b-1 の作成 API は求人側を常にテンプレートにするので、この組み合わせは API では
     作れない。DELETE の後始末(相手が本物のとき)を確かめるためだけに、状態を直接置く。
+    request_id を渡すと、その値と、それを指す冪等キー(idempotency/{hash})も置く(web は request_id を
+    「依頼者 ID:画面の値」の形で付ける)。交渉のコピー(snapshots)のポリシーは、既定では両側とも何でも受ける。
     """
     nid = generate_id()
     now = clock.now()
@@ -74,7 +76,10 @@ def _write_live_negotiation_with_real_counterpart(store, clock, candidate_pid, e
         created_at=now,
         expires_at=now + dt.timedelta(hours=72),
         deadline=now + dt.timedelta(minutes=5),
-        snapshots=Snapshots(candidate=accept_all_policy("candidate"), employer=accept_all_policy("employer")),
+        snapshots=Snapshots(
+            candidate=candidate_policy if candidate_policy is not None else accept_all_policy("candidate"),
+            employer=employer_policy if employer_policy is not None else accept_all_policy("employer"),
+        ),
         participants=Participants(
             candidate=Participant(
                 is_fictional=False, principal_id=candidate_pid, attribute_bands=default_attribute_bands()
@@ -83,10 +88,12 @@ def _write_live_negotiation_with_real_counterpart(store, clock, candidate_pid, e
                 is_fictional=False, principal_id=employer_pid, job_id="job-x", company_id="company-x"
             ),
         ),
-        request_id=new_id("req"),
+        request_id=request_id if request_id is not None else new_id("req"),
         mode="live",
     )
     store._negotiation_ref(nid).set(model_to_firestore(doc))
+    if request_id is not None:
+        store._idempotency_ref(request_id).set({"nid": nid, "created_at": now})
     return nid
 
 
@@ -161,6 +168,160 @@ def test_delete_keeps_the_real_counterpartys_view_and_nulls_out_own_view(store, 
     employer_events = store.get_events(nid, "employer")
     assert [e.kind for e in employer_events] == ["offer_received", "final_result"]
     assert employer_events[-1].result.likelihood == "none"
+
+
+def test_delete_erases_the_deleted_sides_evaluation_band_and_id_from_a_real_counterparts_negotiation(store, clock):
+    # DV-06 / 台帳 C-41: 相手が本物の交渉では、イベント列の見え方を null にするだけでなく、交渉の文書に残る
+    # 削除した側の評価(last_check)・未決の提案・属性帯・依頼者 ID も消える。get_view(nid, 削除した側) に評価が出ず、
+    # vault-db のどこにも、その依頼者 ID(と、web が request_id に含める形の値)が残らない。
+    # 相手(求人側)の確認結果と見え方は、残る。
+    candidate_pid = new_id("principal")
+    put_candidate_policy(store, candidate_pid, policy=accept_all_policy("candidate"))
+    employer_pid = new_id("principal")
+    request_id = f"{candidate_pid}:{CANARY}"  # web は「依頼者 ID:画面の値」の形で付ける(§6.3)
+    nid = _write_live_negotiation_with_real_counterpart(
+        store, clock, candidate_pid, employer_pid, request_id=request_id
+    )
+    package = sample_package()
+    checked = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="check", package=package)
+    )
+    proposed = store.process_move(
+        nid, MoveRequest(expected_version=checked.version, side="candidate", move="propose", package=package)
+    )
+    store.process_move(
+        nid, MoveRequest(expected_version=proposed.version, side="employer", move="check", package=package)
+    )
+    # 削除の前は、削除する側の評価が読め、依頼者 ID が交渉の文書に入っている(確認の前提)。
+    before = store.get_view(nid, "candidate")
+    assert before.last_check.own_evaluation.value == "acceptable"
+    assert documents_mentioning(store._db, candidate_pid, CANARY)
+    assert store._idempotency_ref(request_id).get().exists
+
+    store.delete_principal(candidate_pid)
+
+    after = store.get_view(nid, "candidate")
+    assert (after.last_check, after.pending_offer, after.awaiting_principal_package) == (None, None, None)
+    assert documents_mentioning(store._db, candidate_pid, CANARY) == {}  # vault-db のどこにも残らない
+    document = store._negotiation_ref(nid).get().to_dict()
+    assert document["participants"]["candidate"]["principal_id"] is None
+    assert document["participants"]["candidate"]["attribute_bands"] is None
+    assert document["last_check"]["candidate"] is None and document["pending_offer"] is None
+    assert document["request_id"] == ""
+    assert not store._idempotency_ref(request_id).get().exists  # 冪等キーも消えている
+    # 相手(求人側)の情報は、そのまま残る。
+    assert document["participants"]["employer"]["principal_id"] == employer_pid
+    employer_view = store.get_view(nid, "employer")
+    assert employer_view.last_check.package == package
+    assert employer_view.last_check.own_evaluation.value == "acceptable"
+    assert employer_view.counterparty is None  # 相手(候補者)の属性帯は消えたので、求人側の view に相手の帯は出ない
+    assert [e.kind for e in store.get_events(nid, "employer")] == ["offer_received", "check", "final_result"]
+    assert store.get_events(nid, "candidate") == []
+
+
+@pytest.mark.parametrize("asker", ["candidate", "employer"])
+def test_delete_erases_only_the_deleted_sides_pending_question(store, clock, asker):
+    # DV-06 / 台帳 C-41: 削除した側(候補者)の途中確認(pending_question)は消える。相手(求人側)の途中確認は、
+    # 相手のものなので残る。どちらの場合も、交渉は取消になっている。
+    candidate_pid, employer_pid = new_id("principal"), new_id("principal")
+    put_candidate_policy(store, candidate_pid, policy=needs_confirmation_policy("candidate"))
+    nid = _write_live_negotiation_with_real_counterpart(
+        store,
+        clock,
+        candidate_pid,
+        employer_pid,
+        candidate_policy=needs_confirmation_policy("candidate") if asker == "candidate" else None,
+        employer_policy=needs_confirmation_policy("employer") if asker == "employer" else None,
+    )
+    package = sample_package()
+    version = 0
+    if asker == "employer":  # 手番を求人側に渡す
+        version = store.process_move(
+            nid, MoveRequest(expected_version=0, side="candidate", move="propose", package=package)
+        ).version
+    asked = store.process_move(
+        nid, MoveRequest(expected_version=version, side=asker, move="ask_principal", package=package)
+    )
+    assert asked.status == "awaiting_principal"
+
+    store.delete_principal(candidate_pid)
+
+    document = store._negotiation_ref(nid).get().to_dict()
+    assert (document["status"], document["end_reason"]) == ("judged", "cancelled")
+    if asker == "candidate":
+        assert document["pending_question"] is None
+        assert store.get_view(nid, "candidate").awaiting_principal_package is None
+    else:
+        assert document["pending_question"]["side"] == "employer"  # 相手の質問は、相手のものとして残る
+        assert store.get_view(nid, "employer").awaiting_principal_package == package
+    assert document["pending_offer"] is None
+
+
+def test_delete_stopped_before_the_last_step_of_a_real_counterparts_negotiation_is_finished_by_calling_again(
+    store, clock, monkeypatch
+):
+    # DV-06 / 台帳 C-41: 依頼者 ID は最後に消す。交渉の文書を書き換える段(トランザクション)の前で止まっても、
+    # 交渉には依頼者 ID が残っているので、呼び直せば、その交渉を引いて最後まで進む(削除した側の情報が残らない)。
+    candidate_pid, employer_pid = new_id("principal"), new_id("principal")
+    put_candidate_policy(store, candidate_pid)
+    nid = _write_live_negotiation_with_real_counterpart(
+        store, clock, candidate_pid, employer_pid, request_id=f"{candidate_pid}:request-0001"
+    )
+    package = sample_package()
+    store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move="check", package=package))
+
+    real_erase = store._erase_side_from_negotiation
+    calls = []
+
+    def failing_once(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("stopped before the last step")
+        return real_erase(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_erase_side_from_negotiation", failing_once)
+    with pytest.raises(RuntimeError):
+        store.delete_principal(candidate_pid)
+
+    # 止まった状態: 依頼者は deleting のまま残り、見え方は null になったが、依頼者 ID と評価は交渉に残っている。
+    assert store._principal_ref(candidate_pid).get().to_dict()["deleting"] is True
+    stopped = store._negotiation_ref(nid).get().to_dict()
+    assert stopped["participants"]["candidate"]["principal_id"] == candidate_pid
+    assert stopped["last_check"]["candidate"] is not None
+    assert store._events(nid).get() and all(
+        event.to_dict()["views"]["candidate"] is None for event in store._events(nid).stream()
+    )
+
+    store.delete_principal(candidate_pid)  # 呼び直す
+
+    assert len(calls) == 2
+    assert store._principal_ref(candidate_pid).get().exists is False
+    assert documents_mentioning(store._db, candidate_pid) == {}
+    assert store._negotiation_ref(nid).get().to_dict()["last_check"]["candidate"] is None
+
+
+def test_delete_removes_the_creation_idempotency_key_of_a_fictional_counterparts_negotiation(store):
+    # DV-06 / 台帳 I-8: 相手が架空人物の交渉を消すとき、交渉の文書の request_id から冪等キー(idempotency/{hash})も消える。
+    # 別の依頼者・デモの交渉の冪等キーは、消えない。
+    pid, other_pid = new_id("principal"), new_id("principal")
+    put_candidate_policy(store, pid)
+    put_candidate_policy(store, other_pid)
+    employer_template = make_employer_template()
+    put_template(store._db, employer_template)
+    request_id, other_request_id = f"{pid}:request-0001", f"{other_pid}:request-0001"
+    mine = store.create_negotiation(live_create_request(pid, employer_template.template_id, request_id=request_id))
+    theirs = store.create_negotiation(
+        live_create_request(other_pid, employer_template.template_id, request_id=other_request_id)
+    )
+    assert store._idempotency_ref(request_id).get().exists
+
+    store.delete_principal(pid)
+
+    assert not store._idempotency_ref(request_id).get().exists
+    assert not store._negotiation_ref(mine.nid).get().exists
+    assert store._idempotency_ref(other_request_id).get().exists  # ほかの依頼者のキーは、そのまま
+    assert store._negotiation_ref(theirs.nid).get().exists
+    assert documents_mentioning(store._db, pid) == {}
 
 
 def test_deleting_principal_rejects_principal_answer(store):
@@ -306,45 +467,39 @@ def test_deleting_flag_alone_blocks_principal_and_negotiation_scoped_operations(
         store.get_events(nid, "candidate")
 
 
-def test_concurrent_creation_and_deletion_never_leaves_an_orphaned_negotiation(store):
-    # DV-06 / 差し戻し対応 3: 交渉の作成と依頼者の削除を並行して何度も走らせても、削除が
-    # 終わった後には、その依頼者を参加者に持つ交渉が vault-db に 1 件も残らない
-    # (§3.8 手順 1 の拒否が交渉の作成にも効くことの確認)。
-    #
-    # 正確さの根拠は決定的なテスト(test_deleting_flag_alone_blocks_...。deleting=True の
-    # 読み取りだけで作成が断られることを直接確かめる)と、作成が依頼者の文書を読む
-    # トランザクションの中で判定していること(Firestore のトランザクションは、読んだ文書が
-    # コミット前に変わっていれば abort・再試行するので、手順 1 の書き込みより後にコミットする
-    # 作成は、deleting=True を読むまで必ず再試行される)にある。ここでは、その保証が実際の
-    # 並行負荷のもとでも壊れないことを確認する(是正の再現そのものは、上の理由により
-    # タイミングでほぼ強制できないため、壊れていないことの確認という位置づけ)。
+@pytest.mark.parametrize("interrupted_listing", [0, 1], ids=["between_steps_1_and_2", "between_steps_2_and_3"])
+def test_a_creation_that_lands_in_the_middle_of_a_deletion_is_refused_and_leaves_nothing_behind(
+    store, monkeypatch, interrupted_listing
+):
+    # DV-06 / 差し戻し対応 3 / 台帳 C-39 の (d): 削除の途中(手順 1 で deleting を立てた後)に割り込んだ同じ依頼者の
+    # 交渉の作成は、principal_deleting で断られる。削除の後には、その依頼者を参加者に持つ交渉も、冪等キーも残らない。
+    # 割り込みは、決定的に起こす: 削除は、関わる交渉の一覧を 2 回引く(手順 2 の前・手順 3 の前)。その
+    # interrupted_listing 回目の呼び出しの中で、同じ依頼者の作成を 1 本流す。
     pid = new_id("principal")
     put_candidate_policy(store, pid)
+    employer_template = make_employer_template()
+    put_template(store._db, employer_template)
+    listings: list[str] = []
+    creations = []
+    original_listing = store._negotiation_ids_for_principal
 
-    def try_create():
-        employer_template = make_employer_template()
-        put_template(store._db, employer_template)
-        try:
-            store.create_negotiation(live_create_request(pid, employer_template.template_id))
-        except TransactionRetryExhausted:
-            pass  # エミュレータの競合。作成の成否そのものはこのテストの主題ではない。
+    def listing_with_a_creation_in_the_middle(principal_id):
+        if len(listings) == interrupted_listing:
+            assert store._principal_ref(principal_id).get().to_dict()["deleting"] is True  # 手順 1 は済んでいる
+            creations.append(store.create_negotiation(live_create_request(principal_id, employer_template.template_id)))
+        listings.append(principal_id)
+        return original_listing(principal_id)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        create_futures = [pool.submit(try_create) for _ in range(_CONCURRENT_CREATE_ATTEMPTS)]
-        delete_future = pool.submit(store.delete_principal, pid)
-        for future in create_futures:
-            future.result()
-        delete_future.result()
+    monkeypatch.setattr(store, "_negotiation_ids_for_principal", listing_with_a_creation_in_the_middle)
 
-    # 削除の実行中に紛れ込んだ交渉があっても、各段は冪等なので、もう一度呼べば
-    # 最後まで後始末される。
     store.delete_principal(pid)
 
+    (created,) = creations  # 割り込みは、ちょうど 1 回起きた
+    assert (created.status, created.reason, created.nid) == ("refused", "principal_deleting", None)
+    assert len(listings) == 2  # 削除は、最後の段まで進んだ
     assert store._principal_ref(pid).get().exists is False
-    remaining = list(
-        store._negotiations().where(filter=FieldFilter("participants.candidate.principal_id", "==", pid)).stream()
-    )
-    assert remaining == []
+    assert list(store._negotiations().stream()) == []  # 交渉の文書が、1 件も残っていない
+    assert list(store._db.collection("idempotency").stream()) == []  # 冪等キーも作られていない
 
 
 # ----------------------------------------------------------------------
@@ -374,6 +529,7 @@ async def test_web_deletion_leaves_no_ledger_stage_or_canary_in_either_database(
     pid, nids = await _principal_with_two_negotiations(web_app, browser)
     other_pid, other_nids = await _principal_with_two_negotiations(web_app, other_browser, _CANARY_OTHER)
     assert documents_mentioning(web_app.default_db, pid, CANARY)  # 置いたカナリアが、削除の前は見つかる(確認の前提)
+    assert documents_mentioning(web_app.store._db, CANARY)  # vault-db にも置いてある(置かなければ、確認は必ず通る)
     assert web_app.store._negotiation_ref(nids[1]).get().exists  # 2 件目は進行中
 
     response = await browser.post(f"/v1/principals/{pid}/delete")
@@ -390,6 +546,7 @@ async def test_web_deletion_leaves_no_ledger_stage_or_canary_in_either_database(
     assert all(web_app.default_db.collection("stages").document(nid).get().exists for nid in other_nids)
     assert len(list(web_app.default_db.collection("principals").document(other_pid).collection("ledger").stream())) == 2
     assert documents_mentioning(web_app.default_db, _CANARY_OTHER)
+    assert documents_mentioning(web_app.store._db, _CANARY_OTHER)  # vault-db のほかの依頼者のカナリアは、消えていない
     assert web_app.store._principal_ref(other_pid).get().exists
     assert web_app.store._negotiation_ref(other_nids[1]).get().exists
 

@@ -13,12 +13,18 @@ AC-04 が挙げる 8 種のうち、スキーマ(pydantic)だけで判定でき�
 レフェリーが拒否して schema_invalid として金庫に登録する。検証は negotiation_core.schema.Move の 1 つだけを
 受信口と共有する(§4.3)。
 
+TurnInput.last_invalid(直前の無効手の中身。台帳 C-40)も、同じ方針で確かめる: TurnInput・AttackerTurnInput の
+どちらでも、未定義の項目・列挙外の値・グリッド外の値・項目の欠けを拒否し(1a の部分)、3 つの受信口すべてで拒否される
+(受信口の部分)。有効な last_invalid は通り、LLM に渡る入力に載る。
+
 design.md §2.7 は「ID は…LLM に渡す入力には含めない」と明記しており、Package・TurnInput・
 AttackerTurnInput・Move のどれも ID を持つフィールドを持たない(ID は A2A の metadata 側)。
 そのため「ID の形式違反」は、これら 4 型のフィールドとしてではなく、§2.7 の「ID の扱い」で
 定義された共有の Id 型そのものに対して確かめる(vault 等の後の段で ID を持つスキーマが
 できたとき、この Id 型を再利用する想定)。
 """
+
+import json
 
 import httpx
 import pytest
@@ -196,6 +202,87 @@ def test_attacker_turn_input_rejects_off_grid_numeric_in_history_package():
         AttackerTurnInput(**data)
 
 
+# --- last_invalid(TurnInput の内側。台帳 C-40。TurnInput・AttackerTurnInput のどちらでも同じ) ---
+
+_TURN_INPUT_MODELS = [
+    pytest.param(TurnInput, _valid_turn_input_dict, id="TurnInput"),
+    pytest.param(AttackerTurnInput, _valid_attacker_turn_input_dict, id="AttackerTurnInput"),
+]
+
+_VALID_LAST_INVALID = {"move": "propose", "package": dict(VALID_PACKAGE), "evaluation": "needs_confirmation"}
+
+
+def _last_invalid(**changes) -> dict:
+    return {**_VALID_LAST_INVALID, "package": dict(VALID_PACKAGE), **changes}
+
+
+def _validate_as_on_the_wire(model, data: dict):
+    """線の上のデータと同じく、JSON として検証する(agents.validation と同じ方法)。
+
+    スキーマは strict なので、Python の辞書のまま検証すると、列挙型(Verdict)を文字列から作れず、
+    有効な入力でも必ず拒否される(そうなると、拒否の確認が、何の違反でも通ってしまう)。
+    """
+    return model.model_validate_json(json.dumps(data))
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+@pytest.mark.parametrize(
+    "last_invalid",
+    [
+        _last_invalid(),
+        _last_invalid(move="accept", package=None, evaluation=None),  # 組み合わせも評価もない無効手
+        {"move": None, "package": None, "evaluation": None},  # レフェリーが登録した無効手(手の種類も分からない)
+        None,  # 直前の手が無効でなかった
+    ],
+    ids=["all_set", "move_only", "all_null", "none"],
+)
+def test_last_invalid_accepts_the_valid_shapes(model, builder, last_invalid):
+    # AC-04 の対照(C-40): 有効な last_invalid は通り、値がそのまま読み出せる。以降の拒否が、last_invalid の
+    # 違反のためであること(ほかの項目のためではないこと)を示す。
+    data = builder()
+    data["last_invalid"] = last_invalid
+
+    validated = _validate_as_on_the_wire(model, data)
+
+    assert validated.model_dump(mode="json")["last_invalid"] == last_invalid
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+@pytest.mark.parametrize(
+    "last_invalid",
+    [
+        _last_invalid(note="x"),  # 未定義の項目
+        _last_invalid(move="withdraw"),  # 列挙外の値(手の種類)
+        _last_invalid(move="invalid"),  # 金庫の moves の種類だが、エージェントの手の種類ではない
+        _last_invalid(evaluation="maybe"),  # 列挙外の値(3 値)
+        _last_invalid(package=dict(VALID_PACKAGE, salary=305)),  # グリッド外の値
+        _last_invalid(package=dict(VALID_PACKAGE, night_duty=3)),  # グリッド外の値
+        _last_invalid(package=dict(VALID_PACKAGE, unexpected_field="x")),  # 組み合わせの中の未定義の項目
+        {"move": "propose", "package": dict(VALID_PACKAGE)},  # 項目の欠け(3 つとも必須。値だけ null を許す)
+        "propose",  # 辞書でない
+    ],
+    ids=[
+        "undefined_field",
+        "out_of_enum_move",
+        "invalid_is_not_a_move_type",
+        "out_of_enum_evaluation",
+        "off_grid_salary",
+        "off_grid_night_duty",
+        "undefined_field_in_package",
+        "missing_field",
+        "not_an_object",
+    ],
+)
+def test_last_invalid_rejects_violations(model, builder, last_invalid):
+    # AC-04 (未定義の項目・列挙外の値・グリッド外の値 / last_invalid。TurnInput・AttackerTurnInput の両方)。
+    # 拒否されるのは last_invalid だけが違反だから: ほかの項目が同じで有効な last_invalid なら、上の対照のとおり通る。
+    data = builder()
+    data["last_invalid"] = last_invalid
+    with pytest.raises(ValidationError) as excinfo:
+        _validate_as_on_the_wire(model, data)
+    assert {error["loc"][0] for error in excinfo.value.errors()} == {"last_invalid"}
+
+
 # --- Budget(TurnInput の内側。範囲外の数値の追加確認) ---
 
 
@@ -273,12 +360,28 @@ def _violate_id_format(data, metadata):
     metadata["nid"] = "not-an-id-string"  # 16 桁の 16 進数でない
 
 
+def _violate_undefined_field_in_last_invalid(data, metadata):
+    data["last_invalid"] = _last_invalid(note="x")
+
+
+def _violate_out_of_enum_in_last_invalid(data, metadata):
+    data["last_invalid"] = _last_invalid(move="withdraw")
+
+
+def _violate_off_grid_in_last_invalid(data, metadata):
+    data["last_invalid"] = _last_invalid(package=dict(VALID_PACKAGE, salary=305))
+
+
 SCHEMA_VIOLATIONS = {
     "undefined_field": _violate_undefined_field,
     "out_of_enum": _violate_out_of_enum,
     "out_of_range": _violate_out_of_range,
     "off_grid": _violate_off_grid,
     "id_format": _violate_id_format,
+    # 台帳 C-40: 新しい項目 last_invalid の中でも、同じ違反が拒否される。
+    "undefined_field_in_last_invalid": _violate_undefined_field_in_last_invalid,
+    "out_of_enum_in_last_invalid": _violate_out_of_enum_in_last_invalid,
+    "off_grid_in_last_invalid": _violate_off_grid_in_last_invalid,
 }
 
 
@@ -321,6 +424,21 @@ async def test_valid_message_is_accepted_by_every_endpoint(role, http, stub_llm)
     body = await send_message(http, role, [data_part(valid_data(role))])
     assert "error" not in body, body
     assert len(stub_llm.requests) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ROLES)
+async def test_a_valid_last_invalid_is_accepted_by_every_endpoint_and_reaches_the_llm_input(role, http, stub_llm):
+    # AC-04 の対照 / 台帳 C-40: 有効な last_invalid は、どの受信口でも通り、LLM に渡る入力(TurnInput の JSON)にそのまま載る。
+    data = valid_data(role)
+    data["last_invalid"] = _last_invalid()
+
+    body = await send_message(http, role, [data_part(data)])
+
+    assert "error" not in body, body
+    (request,) = stub_llm.requests
+    (llm_input,) = [text for _, texts in request.contents for text in texts]
+    assert json.loads(llm_input)["last_invalid"] == _last_invalid()
 
 
 @pytest.mark.anyio

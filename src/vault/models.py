@@ -14,6 +14,7 @@ from negotiation_core import (
     CandidateAttributeBands,
     EvaluatedPackage,
     JobCategoryInfo,
+    MoveType,
     Package,
     Policy,
     Side,
@@ -194,6 +195,12 @@ class EventView(VaultModel):
     answer は principal_answer 専用(§3.2: 「回答と、評価し直した結果」の「回答」の部分。
     「評価し直した結果」は own_evaluation を使い回す)。reason は無効手の理由専用のまま
     (意味の異なる値を混在させない)。
+
+    attempted_move は無効手(kind="invalid")専用で、打とうとした手の種類(台帳 C-40)。
+    無効手を打った側の見え方にだけ入り、次の TurnInput.last_invalid の元になる。金庫が自分側の
+    ポリシーで評価して無効と判断した手(提案のガードの失敗・accept の確かめ直しの失敗・
+    途中確認の対象外・途中確認の上限)は、own_evaluation にその自分側の評価も持つ。
+    レフェリーが登録した無効手(schema_invalid・agent_timeout)は、手の種類も分からないので None。
     """
 
     seq: int
@@ -203,6 +210,7 @@ class EventView(VaultModel):
     reason: str | None = None
     answer: PrincipalAnswerKind | None = None
     result: NegotiationResult | None = None
+    attempted_move: MoveType | None = None
 
 
 class EventViews(VaultModel):

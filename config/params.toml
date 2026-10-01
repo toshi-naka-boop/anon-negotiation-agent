@@ -101,7 +101,7 @@ public_base_url = "http://localhost:8080"
 [vault.limits]
 # 評価回数の上限(自分の手で起きた評価だけ。側ごと。§3.5)
 evaluation_budget_per_side = 16
-# 手数の上限(check を除く。無効手を含む。側ごと。§3.5)
+# 手数の上限(有効な check・有効な ask_principal を除く。無効手を含む。側ごと。§3.5・台帳 C-38)
 moves_budget_per_side = 6
 # 途中確認の上限(側ごと。合計 2。§3.5・U-04)
 principal_checks_per_side = 1

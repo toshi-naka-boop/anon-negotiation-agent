@@ -14,6 +14,7 @@ from negotiation_core import (
     CandidateAttributeBands,
     EvaluatedPackage,
     JobCategoryInfo,
+    MoveType,
     Package,
     Policy,
     Side,
@@ -146,12 +147,14 @@ class NegotiationViewResponse(VaultModel):
     counterparty は TurnInput.counterparty(§2.7)の元(1d-1 で追加。台帳 I-2: 候補者の属性帯は
     金庫にしかないため、web が組み立てるには金庫が返す必要がある)。
     求人側(side=employer)には候補者の属性帯、候補者側(side=candidate)には公開求人の区分情報を返す。
+    相手が本物で、その依頼者が削除されて属性帯が消えた交渉では、求人側の counterparty は None
+    (§3.8 手順 3・台帳 C-41。その交渉は取消で終わっているので、TurnInput は作られない)。
     """
 
     status: NegotiationStatus
     to_move: Side
     paused: bool
-    counterparty: CandidateAttributeBands | JobCategoryInfo
+    counterparty: CandidateAttributeBands | JobCategoryInfo | None
     pending_offer: EvaluatedPackage | None
     last_check: EvaluatedPackage | None
     awaiting_principal_package: Package | None
@@ -166,6 +169,10 @@ class NegotiationViewResponse(VaultModel):
 
 
 class EventViewItem(VaultModel):
+    """GET .../events の 1 件(その側の見え方)。attempted_move は無効手だけが持つ、打とうとした手の
+    種類(台帳 C-40。web が TurnInput.last_invalid を作る元。レフェリーが登録した無効手では None)。
+    """
+
     seq: int
     kind: EventKind
     package: Package | None = None
@@ -173,6 +180,7 @@ class EventViewItem(VaultModel):
     reason: str | None = None
     answer: PrincipalAnswerKind | None = None
     result: NegotiationResult | None = None
+    attempted_move: MoveType | None = None
 
 
 # --- POST .../moves ---
