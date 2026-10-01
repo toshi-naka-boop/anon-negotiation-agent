@@ -178,7 +178,40 @@
 - **新しい気づき（fix-1w で直す）**: 1a の AC-04 のテスト（`test_turn_input_rejects_*`・`test_attacker_turn_input_rejects_*`）が空振りしている。
   - Python の辞書での strict 検証では、有効な TurnInput でも `history[].result` の文字列が拒否される。そのため、どの違反でも通る。
   - 受信口と同じ JSON での検証に直す。
-- **fix-1w（web と agents。これから）**
+- **fix-1w（web と agents。2026-10-01 完了）**
+  - 直したもの: 下の一覧のすべて。
+  - 呼び出し側が確かめたこと
+    - pytest 940 件の合格
+    - src にログで ID を書く呼び出しがないこと
+    - サービス間の認証が、未設定なら入る側になっていること
+  - 担当が選んだ読み方
+    - X-37: トークンは、Cloud Run のメタデータサーバから httpx で取る（新しい依存なし。google-auth は使わない）。`SERVICE_AUTH_ENABLED` が未設定なら認証を入れる。audience は呼び先の「スキーム＋ホスト＋ポート」。
+    - X-40: アクセスログは、出さずに ID を `<id>` に伏せる。httpx のロガーは WARNING にする。
+    - X-41: メッセージの metadata の `nid` は省略可。`params.metadata` は空だけ。
+    - L9-3: 残り手数 0 のときは、`end` を登録して停止の判定を効かせる。
+    - L9-5: 未知の A2A のエラーも `ValueError`（`schema_invalid`）にする。
+  - デプロイの段で要る設定（I-7 に加える）
+    - web の環境変数
+      - `SESSION_SIGNING_KEY`: base64url で 32 バイト以上。`python -c "import secrets; print(secrets.token_urlsafe(32))"` で作り、Secret Manager から渡す。
+      - `VAULT_BASE_URL`
+      - `SERVICE_AUTH_ENABLED`: 本番は未設定か true、ローカルは false。
+    - `config/params.toml` の `[agents] public_base_url` を、agents の run.app の URL にする。カスタムドメインは audience に使えないので、使うならカスタム audience を設定する。
+    - 起動は `uvicorn web.app:create_app_from_env --factory --workers 1`。
+    - IAM
+      - web のサービスアカウントに、金庫と agents の `roles/run.invoker` を与える。
+      - 金庫と agents は `--no-allow-unauthenticated` にする。agents から金庫は呼べない（FR-15）。
+    - ingress を internal にするなら、web に Direct VPC egress か VPC コネクタが要る。IAM だけで守るか、あわせて internal にするかは、デプロイの段で決める。
+    - 金庫の起動口（まだない）にも、アクセスログの ID を伏せる処理を入れる。
+    - uvicorn は、まだ直接の依存に入っていない（google-adk 経由で入る）。デプロイの段で、§10 の表のとおり直接の依存に足す。
+    - ③ の壁 1 の生メッセージで `send_turn` を呼ぶときも、認証を渡す。
+- **I-9（実装時の気づき / 前提 / low。デプロイの段でユーザーの判断を待つ）Cloud Run 自身のリクエストログに、ID の入った URL が残る**
+  - Cloud Run の基盤のリクエストログ（`run.googleapis.com/requests`）は、パスに依頼者 ID・交渉 ID が入った URL をそのまま持つ。アプリからは変えられない。金庫のサービスも同じ。
+  - 本人が削除した後も、ログの保持期間（既定 30 日）の間、ID と時刻が残る。生の値は含まない。
+  - 案
+    1. Log Router の除外フィルタで、3 つのサービスのリクエストログを外す（エラーの調べはアプリのログで行う）。
+    2. 既知の限界として説明文に書き、受け入れる。
+    3. ログの保持期間を短くする。
+- **fix-1w の範囲（記録）**
   - X-37・X-39・X-40・X-41
   - C-40 の web の部分（`build_last_invalid`）
   - X-38 の web の部分（金庫の新しい口に切り替え、`stages` の項目が欠けていたら拒否）
