@@ -1,5 +1,5 @@
 {
-  "currentNode": "反証",
+  "currentNode": "実装",
   "status": "in_progress",
   "designVersion": "v10",
   "approvedDesignVersion": "v10",
@@ -8,34 +8,25 @@
   "approvalEvidence": "v10:27b1a4d9d6fb を承認します。前提は P-1 案1（＋利用規約でブロック先は現職企業のみ）、P-2 案1、P-3 案1、P-4 案1、P-5 案1、P-6 案2 で確定します。",
   "requiredApprovalFingerprint": "v10:27b1a4d9d6fb",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
-  "criticRound": 8,
+  "criticRound": 11,
   "openIssueIds": [
     "I-1",
     "I-2",
     "I-3",
     "I-4",
-    "I-5",
     "I-6",
     "I-7",
-    "I-8",
-    "C-37",
-    "C-38",
-    "C-39",
-    "C-40",
-    "C-41",
-    "X-37",
-    "X-38",
-    "X-39",
-    "X-40",
-    "X-41",
-    "I-9"
+    "I-9",
+    "I-10",
+    "I-11"
   ],
   "requiredReads": [
-    "design.md"
+    "design.md",
+    "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v10 はユーザー本人がこのセッションで承認済み（前提 P-1〜P-6 も確定）。委譲先は sonnet サブエージェント。baseline は main@efc6079、実装は feat/phase1-core ブランチ。① を 4 段に分けた: 1a negotiation_core（完了。コミット 9c559c5。呼び出し側が pytest 214 件の合格と条件タグを確認。1 回差し戻し）→ 1b vault（2 回に分けて委譲。1b-1 は完了（2026-09-29、呼び出し側が pytest 278 件の合格を確認。1 回差し戻し: 無効な check の手数、競合で再試行が尽きたときの 409/503、属性帯の金庫への保存（I-2）、条件の印。コミットはユーザーの承認待ち）。1b-2 は principal-answer と削除。完了（2026-09-29、呼び出し側が pytest 307 件の合格を確認。1 回差し戻し: 削除中の依頼者の操作の拒否を全操作に広げた。残った競合は I-4 として 1d で閉じる。コミットはユーザーの承認待ち））→ 1c agents の受信口と検証 → 1d web（レフェリー骨格・見回り・依頼者セッション・利用記録・削除）。Firestore エミュレータは、gcloud を通さず（~/.config/gcloud に触れないため）JDK 21 で jar を直接起動する: java=/opt/homebrew/opt/openjdk@21/bin/java、jar=/opt/homebrew/share/google-cloud-sdk/platform/cloud-firestore-emulator/cloud-firestore-emulator.jar、`java -Duser.language=en -cp <jar> com.google.cloud.datastore.emulator.firestore.CloudFirestore start --host=127.0.0.1 --port=<port>`。各段の後に呼び出し側が pytest を実行し、条件タグ（# AC-xx 等）で網羅を確かめる。① を通したら反証（3 レンズ）。ユーザーの判断: itsdangerous は設計どおり使う（2026-09-28）。httpx を開発用に足してよい（FastAPI の TestClient 用。2026-09-29）。I-1 は面談を作る段で、ほかの実装時の気づきとまとめて設計書を直し、承認し直す（2026-09-29）。 I-2（属性帯は金庫に保存）と I-3（1 日の予算は固定の窓）もユーザーの判断で決定済み（2026-09-29）。設計書の文面の直しは I-1 とまとめて面談の段で承認し直す。 【2026-09-29 更新】1b-2 はコミット済み（0832d45・98b60d2）。ユーザーの指示で 1c（agents の受信口と検証）と 1d-1（web のレフェリー骨格と交渉の見回り）を、別々の worktree で並行に委譲中。両者の境界は send_turn の形（agents.client.send_turn に base_url を束ねてレフェリーに差し込む。失敗は TimeoutError・ConnectionError・ValueError）で固定した。終わったら、呼び出し側がそれぞれ検証し、ユーザーの承認を得て各ブランチでコミットし、feat/phase1-core にマージする（pyproject.toml・uv.lock・config/params.toml・tests/test_validation.py などは競合の見込み。uv.lock はマージ後に uv lock で作り直す）。そのあと 1d-2。httpx は web の実行時の依存にも使う（a2a-sdk と google-adk が実行時に httpx に依存しているため、新しいライブラリは増えない）。 【2026-09-29 更新2】1c（034c843）と 1d-1（6760dab）は、呼び出し側がそれぞれ検証したうえで、ユーザーの承認を得て feat/phase1-core に取り込んだ（1c は早送り、1d-1 はマージコミット 6962138。食い違いは tests/test_validation.py の 2 か所だけで、両方を残した。uv lock の作り直しで差分なし）。取り込み後のテスト全体は 554 件すべて通過。sse-starlette（a2a-sdk[http-server] が引き込む）はユーザー承認済み。I-6（デモ・攻撃の stages/{nid} に 96 時間の TTL）はユーザーの判断で決定済み。I-5（10 本の並行テストが負荷で揺らぐ）と I-7（本番で必須の設定。R-1・R-2・R-3 の結果）を台帳に記録。次は 1d-2: 依頼者セッション（クッキー 29 日、itsdangerous）、principals_meta と依頼者の見回り、削除の流れ（依頼者ごとのロック。I-4。見回りの stages 作成とレフェリーも対象）、デモ・攻撃の stages の TTL（I-6）、DV-01・DV-06・DV-16 に要る画面の API、agents.client.send_turn をレフェリーにつなぐ結合テスト。そのあと ① の反証（3 レンズ）。注意: サブエージェントは同じ scratchpad を共有するので、一時ファイルには担当ごとの接頭辞を付けさせる。秘密情報の場所は ls も禁止と明記する（1c が ~/.config/gcloud を ls した）。worktree 2 つ（.claude/worktrees/）は取り込み済みで、片付けはユーザーの承認待ち。.gitignore に .claude/worktrees/ を足す件も承認待ち。 【2026-09-30 更新】1d-2（依頼者セッション・利用記録と依頼者の見回り・権限と独自ヘッダ・デモ用 API・削除の流れ・依頼者ごとのロック・デモの stages の TTL・web の組み立てと agents との結合）は完了。呼び出し側が pytest 642 件の合格を確認（署名の鍵は環境変数だけ、既定値なし）。コミットはユーザーの承認待ち。I-5 の頻度の追記、I-7 のデプロイ項目の追記、I-8（金庫の冪等キーの文書が削除後も残る）を台帳に記録。これで ① の実装はそろった。次は ① の反証（design-loop の反証工程。正しさ・安全性・過剰実装の 3 レンズ、うち 1 つは codex でもよい）。反証で扱う予定: I-5（テスト環境の揺らぎ）、I-8。反証の後、② へ（10/4 まで）。 【2026-09-30 更新2】1d-2 はコミット済み（08c6c2d・9c78d77）。ユーザーの指示で、① の反証を 2 つの観点に減らして実行中: 正しさ = design-critic（opus）→ reviews/round-9-correctness.md、安全性 = codex exec（xhigh、上限 15 分）→ reviews/round-9-security-codex.md（ログは .log）。過剰実装の観点はユーザーの判断で今回は見送り。結果が出たら、種別ごとに振り分ける（実装 → 修正して再反証、設計 → 改訂へ差し戻し、前提 → ユーザーへ）。上限 3 巡。 【2026-09-30 更新3】反証 1 巡目の結果（正しさ: C-37〜C-41・L9-1〜5、安全性: X-37〜X-41）を台帳に記録。ユーザーの判断: C-38 は案 1（有効な ask_principal は手数に数えない）、C-40 は TurnInput に last_invalid を足す。直しは 2 回に分けて順に委譲: fix-1v（金庫と core。C-37・C-38・C-40 の金庫と core・C-39・C-41・X-38 の金庫・L9-1・L9-2・I-5・I-8）を実行中 → fix-1w（web と agents。X-37・X-39・X-40・X-41・C-40 の web・X-38 の web・C-41 の見回り・L9-3・L9-5）→ 同じ 2 観点で反証 2 巡目（上限 3 巡）。設計書の文面の直し（I-1〜I-4・I-6・I-8・C-38・C-40・X-37 のデプロイ構成）は、面談の段でまとめて承認し直す。 【2026-10-01 更新】fix-1v は完了（呼び出し側が pytest 739 件の合格と、期限の付け直し・手数の数え方のコードを確認）。次は fix-1w（web と agents。台帳「直しの進み具合」の一覧）。そのあと反証 2 巡目（同じ 2 観点）。 【2026-10-01 更新2】fix-1w も完了（呼び出し側が pytest 940 件の合格、ログに ID がないこと、認証の既定が入りであることを確認）。コミットはユーザーの承認待ち。次は反証 2 巡目（同じ 2 観点。対象は fix-1v 6fa029c と fix-1w）。I-9（Cloud Run の基盤のリクエストログに ID 入りの URL が残る）はデプロイの段でユーザーが判断する。",
-  "lastUpdated": "2026-10-01",
+  "nextAction": "v10 はユーザーが承認済み（前提 P-1〜P-6 も確定）。① の実装（1a〜1d）と反証（3 巡。正しさは 2 巡目で収束、安全性は 3 巡目で X-44 を残し、ユーザーの判断で呼び出し側が直した）は完了。テストは 1072 件。ブランチ feat/phase1-core、baseline は main@efc6079。次は ②（10/4 まで）: ケース 1 のフィクスチャ（§8.4。7 巡目のシミュレーション reviews/round-7-sim/ と同じ人物と 36 通りの始め方）、架空人物の自動回答（生の条件から）、台本のエージェントでの到達（DV-14。合否は指示文どおりの型と片側だけが外れる型で 34/36 以上。C-38 の変更で見積もりが変わり得る）、交渉エージェントの指示文（§4.2。軸の向き、最初から年収と他の軸を一緒に動かす、確認してから提案、last_error と last_invalid の読み方）、モデルの設定（gemini-3.5-flash、global。I-10）、scripts/run_demo.py --case 1 --live（DV-15）、I-11 のテストの直し。DV-15 は、ユーザーの GCP プロジェクト anon-nego-toshixa（ADC、Vertex AI 有効、予算アラート 3,000 円）で、呼び出し側が実行する。通らなければ、10/5〜6 を指示文・上限・フィクスチャの見直しに充てる（TEE の判断より優先）。設計書の文面の直し（I-1〜I-4・I-6、C-38・C-40、X-37 のデプロイ構成など）は、面談の段でまとめて承認し直す。",
+  "lastUpdated": "2026-10-02",
   "delegation": {
     "批評": "claude/design-critic(opus) + codex exec (gpt-5.6-sol, xhigh)",
     "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）",
