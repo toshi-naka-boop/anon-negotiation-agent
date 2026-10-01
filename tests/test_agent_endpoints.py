@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from google.protobuf import json_format, struct_pb2
 from negotiation_core.schema import Move
 from pydantic import ValidationError
 
+import agents.executor as executor_module
 from agents.app import create_app
 from agents.config import DEFAULT_AGENTS_CONFIG
 from agents.wire import value_to_python
@@ -238,15 +240,13 @@ async def test_llm_run_that_takes_too_long_is_a_transient_error():
     assert sessions.sessions == []  # 途中で止めても、セッションは残らない
 
 
-async def test_default_model_name_is_a_placeholder_that_fails_loudly():
-    # §4.2・R-3 (設定ファイルのモデル名は仮の値。実 LLM は呼ばれず、モデルを解決できずに失敗する。
-    # 間違ったモデルで黙って動かないようにするため。実在のモデル名は R-3 で確かめて差し替える)
-    assert DEFAULT_AGENTS_CONFIG.model.startswith("R-3-")
-    app = create_app()  # スタブを差し込まない
-    async with asgi_client(app) as http:
-        body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
-    assert body["error"]["code"] == -32603
-    assert "transient" not in _error_info(body)
+async def test_default_model_is_the_one_r3_confirmed_and_the_app_does_not_connect_until_the_first_run():
+    # §4.2・R-3・台帳 I-10 (設定ファイルのモデル名は、R-3 で確かめた gemini-3.5-flash。プロジェクトと場所は、設定に書かず
+    # 環境変数で渡す)。スタブを差し込まない create_app は、モデル名を渡すだけで、最初の実行まで Vertex AI に接続しない
+    # (実行すると本物の Gemini を呼ぶので、ここでは動かさない。本物の実行は scripts/run_demo.py --live)
+    assert DEFAULT_AGENTS_CONFIG.model == "gemini-3.5-flash"
+    app = create_app()
+    assert {runner.agent.model for runner in app.state.runners.values()} == {"gemini-3.5-flash"}
 
 
 # --- 何も保存しない ---
@@ -323,6 +323,9 @@ async def test_rejections_do_not_produce_error_logs(http, stub_llm, caplog):
 # --- 値がエラーにもログにも出てこない ---
 
 CANARY = "CANARY-7F3A"
+# 年収の値の形(`"salary": 650`・`salary=650`・`'salary': 650`・`\"salary\": 650` など): key の salary に続けて 650 が来るものだけ。
+# 「650」だけを探すと、a2a-sdk がログに書く UUID にたまたま入る 650 に当たって、約 3% で落ちる(台帳 I-11)。
+SALARY_VALUE_IN_TEXT = re.compile(r"salary\W{0,8}650(?!\d)")
 
 
 async def test_input_values_do_not_appear_in_errors_or_logs(http, stub_llm, caplog):
@@ -352,4 +355,47 @@ async def test_input_values_do_not_appear_in_errors_or_logs(http, stub_llm, capl
     for body in responses:
         assert CANARY not in json.dumps(body), body
     assert CANARY not in caplog.text
-    assert "650" not in caplog.text  # 組み合わせの値(年収)も、ログに出ない
+    assert not SALARY_VALUE_IN_TEXT.search(caplog.text), "the salary value leaked into the logs"  # 組み合わせの値(年収)も
+
+
+@pytest.mark.parametrize(
+    "leaked",
+    [
+        '{"salary": 650, "remote_days": 0}',
+        '{"salary":650}',
+        "salary=650",
+        "{'salary': 650}",
+        'data=\\"salary\\": 650',
+        "salary: 650",
+    ],
+)
+def test_salary_leak_check_catches_every_shape_of_a_leaked_value(leaked):
+    # 台帳 I-11 (絞った検査が、値の漏れを見逃さない)
+    assert SALARY_VALUE_IN_TEXT.search(f"INFO agents.executor: received {leaked} ok")
+
+
+@pytest.mark.parametrize(
+    "harmless",
+    [
+        "INFO a2a: task 3f2650ab-1c4e-4b1a-9d0e-650650650650 completed",
+        "salary=6500",
+        "salary=1650",
+        "role=candidate turn completed",
+    ],
+)
+def test_salary_leak_check_ignores_text_that_only_contains_650(harmless):
+    # 台帳 I-11 (偶然の UUID や、別の数字には当たらない。以前の「650 を含まない」の検査は、約 3% でここに当たって落ちた)
+    assert not SALARY_VALUE_IN_TEXT.search(harmless)
+
+
+async def test_the_log_check_fails_when_the_salary_value_leaks_into_the_logs(http, stub_llm, caplog, monkeypatch):
+    # 台帳 I-11 (直した検査が、値が漏れたときに落ちる。自由文のカナリアは漏らさず、年収の値だけをログに書く)
+    original = executor_module.llm_input_text
+
+    def leaking(turn_input):
+        executor_module.logger.info("received %s", {"salary": 650})
+        return original(turn_input)
+
+    monkeypatch.setattr(executor_module, "llm_input_text", leaking)
+    with pytest.raises(AssertionError, match="the salary value leaked into the logs"):
+        await test_input_values_do_not_appear_in_errors_or_logs(http, stub_llm, caplog)

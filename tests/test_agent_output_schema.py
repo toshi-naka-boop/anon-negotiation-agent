@@ -3,28 +3,33 @@
 構造化出力の段階でグリッド外の値を出させないため、軸ごとにグリッド値の列挙(enum)になっている。
 スキーマの元は negotiation_core.schema.Move で、agents は別の定義を持たない。
 
-google-genai の `Schema.enum` は文字列しか受け付けないので、数値軸は
-`type=INTEGER, format=enum, enum=[グリッド値を文字列にしたもの]` で表す(調査事項 R-3 の一部。
-Vertex AI の実機で通るかは R-3 で確かめる)。
+google-genai の `Schema.enum` は文字列しか受け付けず、Vertex AI は enum を持つスキーマの型が STRING でなければ
+400 で断る(2026-10-02 の DV-15 の実機で確かめた。調査事項 R-3)。そのため数値軸も
+`type=STRING, format=enum, enum=[グリッド値を文字列にしたもの]` で表し、LLM の出力は受信口で整数に戻す。
 """
 
+import json
 from typing import get_args
 
 import pytest
 from google.genai import _transformers, types
+from google.protobuf import json_format, struct_pb2
 from negotiation_core import AXES, AXIS_KEYS
 from negotiation_core.schema import Move, MoveType
 from pydantic import ValidationError
 
 from agents.config import DEFAULT_AGENTS_CONFIG
 from agents.llm_agents import build_llm_agent
-from agents.output_schema import build_move_output_schema
+from agents.output_schema import build_move_output_schema, restore_numeric_axes
+from agents.wire import value_to_python
 from agents_helpers import (  # noqa: F401  (フィクスチャは import して使う)
+    PACKAGE,
     ROLES,
     agents_app,
     anyio_backend,
     data_part,
     http,
+    move_data_of,
     send_message,
     stub_llm,
     valid_data,
@@ -40,13 +45,65 @@ def test_every_axis_is_an_enum_of_its_grid_values(axis):
     # §2.7 (出力スキーマの各軸は、グリッド値の列挙)
     axis_schema = _package_schema(build_move_output_schema()).properties[axis]
     grid = AXES[axis].grid
+    # Vertex AI は enum の型が STRING でなければ断るので、数値軸も STRING の enum(R-3。DV-15 の実機で確かめた)
+    assert axis_schema.type == types.Type.STRING
     if AXES[axis].kind == "numeric":
-        assert axis_schema.type == types.Type.INTEGER
         assert axis_schema.format == "enum"
         assert axis_schema.enum == [str(value) for value in grid]
     else:
-        assert axis_schema.type == types.Type.STRING
         assert axis_schema.enum == list(grid)
+
+
+def test_no_schema_node_with_an_enum_has_a_type_other_than_string():
+    # R-3: Vertex AI は、enum を持つ節の型が STRING でなければ 400 INVALID_ARGUMENT で断る(DV-15 の実機で確かめた)
+    def walk(node: types.Schema) -> list[types.Schema]:
+        nodes = [node]
+        for child in (node.properties or {}).values():
+            nodes += walk(child)
+        for child in node.any_of or []:
+            nodes += walk(child)
+        if node.items is not None:
+            nodes += walk(node.items)
+        return nodes
+
+    with_enum = [node for node in walk(build_move_output_schema()) if node.enum]
+    assert with_enum  # 見る対象がある(空振りしない)
+    assert all(node.type == types.Type.STRING for node in with_enum)
+
+
+def test_restore_numeric_axes_turns_the_numeric_strings_back_into_integers_and_leaves_the_rest():
+    # R-3: 数値軸を STRING の enum で受け取った LLM の出力を、整数に戻す。整数として読めない値と、数値軸以外は触らない
+    move = {
+        "schema": "move/v1",
+        "move": "propose",
+        "package": {
+            "salary": "650", "remote_days": "2", "night_duty": "0", "review_months": "6",
+            "training": "none", "side_job": "allowed", "start": "within_1_month",
+        },
+    }
+    restored = restore_numeric_axes(move)
+    assert restored["package"] == {
+        "salary": 650, "remote_days": 2, "night_duty": 0, "review_months": 6,
+        "training": "none", "side_job": "allowed", "start": "within_1_month",
+    }
+    assert Move.model_validate_json(json.dumps(restored)).package.salary == 650
+    assert restore_numeric_axes({"schema": "move/v1", "move": "accept"}) == {"schema": "move/v1", "move": "accept"}
+    odd = {"schema": "move/v1", "move": "check", "package": {"salary": "six hundred", "remote_days": 2.5}}
+    assert restore_numeric_axes(odd)["package"] == {"salary": "six hundred", "remote_days": 2.5}  # 検証はレフェリーの仕事
+
+
+@pytest.mark.anyio
+async def test_the_endpoint_returns_integers_when_the_model_answers_numeric_axes_as_strings(http, stub_llm):
+    # R-3: 本物の Gemini は、STRING の enum にした数値軸を文字列で返す。受信口はそれを整数に戻して返し、Move として通る
+    package = {**PACKAGE, **{axis: str(PACKAGE[axis]) for axis in ("salary", "remote_days", "night_duty", "review_months")}}
+    stub_llm.behavior = lambda _request: json.dumps({"schema": "move/v1", "move": "check", "package": package})
+
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+
+    data = move_data_of(body)
+    assert all(isinstance(data["package"][axis], (int, float)) for axis in ("salary", "remote_days", "night_duty", "review_months"))
+    restored = value_to_python(json_format.ParseDict(data, struct_pb2.Value()))
+    assert Move.model_validate(restored).package.salary == PACKAGE["salary"]
 
 
 def test_move_and_schema_fields_are_enums_too():

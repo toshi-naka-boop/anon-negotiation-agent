@@ -37,6 +37,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from agents.llm_agents import APP_NAME, USER_ID
+from agents.output_schema import restore_numeric_axes
 from agents.validation import validate_request
 from agents.wire import DATA_MEDIA_TYPE, TRANSIENT_ERROR_KEY, Role
 from negotiation_core.schema import TurnInput
@@ -120,7 +121,7 @@ class NegotiationExecutor(AgentExecutor):
         move = json.loads(text)
         if not isinstance(move, dict):
             raise ValueError("the model output is not a JSON object")
-        return move
+        return restore_numeric_axes(move)  # 出力スキーマで STRING の enum にした数値軸を、整数に戻す(R-3)
 
     async def _final_text(self, session_id: str, llm_input: str) -> str:
         """Runner の最終応答のテキストを返す。なければ ValueError。"""

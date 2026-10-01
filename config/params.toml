@@ -82,9 +82,11 @@ grid = ["medical_welfare", "it_web", "sales", "administration", "other"]
 
 [agents]
 # 交渉エージェント(候補者側・求人側・攻撃モードの求人側)が使う LLM(Gemini の Flash 系。§4.2)。
-# 【仮の値。実在するモデル名ではない】実在するモデル名・リージョンは調査事項 R-3(§15)で確かめて差し替える。
-# この値のまま実 LLM を呼ぶと、ADK がモデルを解決できずに失敗する(本番で気づけるようにするため、わざと動かない値にしてある)。
-model = "R-3-TBD-model-name"
+# gemini-3.5-flash(台帳 I-10。調査事項 R-3 で、2026-10-01 に Vertex AI の global エンドポイントを 1 回呼んで確かめた)。
+# Vertex AI のプロジェクトと場所は、このファイルにもコードにも書かず、ADK と google-genai の標準の環境変数で渡す。
+#   GOOGLE_GENAI_USE_VERTEXAI=TRUE、GOOGLE_CLOUD_PROJECT=<プロジェクト ID>、GOOGLE_CLOUD_LOCATION=global
+# 場所は global を使う。3.x の Flash は、東京(asia-northeast1)が提供の一覧になく、global では処理される国が決まらない(台帳 I-10)。
+model = "gemini-3.5-flash"
 # 交渉の探索を揺らさないため 0(§4.2)
 temperature = 0
 # 受信本文の上限(バイト。暫定 32 KB。§4.3・U-03)

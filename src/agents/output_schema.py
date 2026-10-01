@@ -4,21 +4,25 @@
 グリッド外の値を出させない。スキーマの元は negotiation_core.schema.Move で、ここで別の
 定義は持たない。
 
-pydantic が作る JSON Schema をそのまま google-genai に渡すと失敗する(調査事項 R-3 の一部を
-先に確かめた結果)。google-genai の `Schema.enum` は文字列しか受け付けず、数値軸(年収・
-リモート日数など)の enum(整数)が検証エラーになるため。そこで数値の enum は、Gemini API の
-表現に合わせて `type=INTEGER, format=enum, enum=[文字列にした値]` に直す。`const` は要素 1 つの
-enum にする。`title`・`description` は LLM に余計な文を渡さないよう落とす。
-
-Vertex AI の実機でこの表現が通るか(整数の enum を文字列の enum で表す形)は、R-3 で確かめる。
+pydantic が作る JSON Schema をそのまま google-genai に渡すと失敗する(調査事項 R-3)。
+google-genai の `Schema.enum` は文字列しか受け付けない。さらに Vertex AI は、enum を持つスキーマの型が
+STRING でなければ 400 INVALID_ARGUMENT で断る(「For schema with enum values, schema type should be STRING」。
+2026-10-02 の DV-15 の実機で確かめた。`type=INTEGER, format=enum` の形も断られた)。そこで数値軸(年収・
+リモート日数など)の enum も、`type=STRING, format=enum, enum=[文字列にした値]` で渡し、LLM の出力の
+数値軸は、返す前に restore_numeric_axes で整数に戻す。`const` は要素 1 つの enum にする。
+`title`・`description` は LLM に余計な文を渡さないよう落とす。
 """
 
 import copy
+import re
 from typing import Any
 
 from google.genai import types
 
 from negotiation_core.schema import Move
+from negotiation_core.vocabulary import NUMERIC_AXIS_KEYS
+
+_INTEGER_TEXT = re.compile(r"-?\d+")
 
 # LLM に渡すスキーマに不要な、説明用の項目。
 _DROPPED_KEYS = ("title", "description")
@@ -34,11 +38,27 @@ def _adapt_for_genai(node: dict[str, Any]) -> None:
     if "const" in node:
         node["enum"] = [node.pop("const")]
     if node.get("type") in ("integer", "number") and "enum" in node:
+        node["type"] = "string"
         node["enum"] = [str(value) for value in node["enum"]]
         node["format"] = "enum"
     for children in (node.get("properties", {}).values(), node.get("$defs", {}).values(), node.get("anyOf", [])):
         for child in children:
             _adapt_for_genai(child)
+
+
+def restore_numeric_axes(move: dict[str, Any]) -> dict[str, Any]:
+    """LLM の出力の package の数値軸を、文字列の列挙値(例: "650")から整数に戻す(その場で書き換えて返す)。
+
+    出力スキーマで数値軸を STRING の enum にしているための戻し。整数として読める文字列だけを戻し、それ以外の値は
+    そのまま残す(Move としての検証はレフェリーの仕事で、グリッド外や形の違反はそこで schema_invalid になる。§4.1)。
+    """
+    package = move.get("package")
+    if isinstance(package, dict):
+        for axis in NUMERIC_AXIS_KEYS:
+            value = package.get(axis)
+            if isinstance(value, str) and _INTEGER_TEXT.fullmatch(value):
+                package[axis] = int(value)
+    return move
 
 
 def build_move_output_schema() -> types.Schema:
