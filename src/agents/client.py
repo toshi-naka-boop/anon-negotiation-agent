@@ -129,6 +129,9 @@ def _validated_usage(raw: object) -> Usage:
         raise ValueError(f"the agent response usage has more than {config.max_output_tokens} output and thought tokens")
     if usage.cached_tokens > usage.prompt_tokens:
         raise ValueError("the agent response usage has more cached tokens than prompt tokens")
+    if usage.requests != 1:
+        # 台帳 X-61: 1 計上 = Vertex AI への要求 1 回(§4.1)。複数の要求が出た応答は受け付けない
+        raise ValueError("the agent response usage must report exactly one model request")
     return usage
 
 

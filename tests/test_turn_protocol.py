@@ -136,7 +136,8 @@ async def test_at_most_two_agent_calls_per_move_and_28_per_negotiation_over_the_
             sleep=env.sleep,
             config=env.config,
             answerer=FixtureAnswerer(case1),
-        )
+        count_llm_calls=False,  # 台帳 X-60: 計上はこのテストの対象外
+    )
         referee = Referee(NegotiationContext(nid=created.nid, mode="demo", candidate_principal_id=None), deps)
         turns: Counter = Counter()
         for _ in range(100):

@@ -524,7 +524,7 @@ class VaultStore:
         def _txn(txn: firestore.Transaction) -> MoveResponse:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
-                raise NotFoundError(nid)
+                raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
             doc = model_from_firestore(NegotiationDocument, snap.to_dict())
             now = self._clock.now()
 
@@ -849,7 +849,7 @@ class VaultStore:
         def _txn(txn: firestore.Transaction) -> PrincipalAnswerResponse:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
-                raise NotFoundError(nid)
+                raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
             doc = model_from_firestore(NegotiationDocument, snap.to_dict())
             now = self._clock.now()
 
@@ -973,7 +973,7 @@ class VaultStore:
         def _txn(txn: firestore.Transaction) -> ControlResponse:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
-                raise NotFoundError(nid)
+                raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
             doc = model_from_firestore(NegotiationDocument, snap.to_dict())
             now = self._clock.now()
 
@@ -1028,7 +1028,7 @@ class VaultStore:
         def _txn(txn: firestore.Transaction) -> ExpireResponse:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
-                raise NotFoundError(nid)
+                raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
             doc = model_from_firestore(NegotiationDocument, snap.to_dict())
             now = self._clock.now()
 
@@ -1048,7 +1048,7 @@ class VaultStore:
     def get_view(self, nid: str, side: Side) -> NegotiationViewResponse:
         snap = self._negotiation_ref(nid).get()
         if not snap.exists:
-            raise NotFoundError(nid)
+            raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
         doc = model_from_firestore(NegotiationDocument, snap.to_dict())
         self._reject_if_side_participant_deleting(doc, side, nid)
         counters = doc.counters.candidate if side == "candidate" else doc.counters.employer
@@ -1100,7 +1100,7 @@ class VaultStore:
     def get_events(self, nid: str, side: Side, after_seq: int = 0) -> list[EventViewItem]:
         neg_snap = self._negotiation_ref(nid).get()
         if not neg_snap.exists:
-            raise NotFoundError(nid)
+            raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
         doc = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
         self._reject_if_side_participant_deleting(doc, side, nid)
         return self._read_event_items(nid, side, after_seq)
@@ -1114,13 +1114,13 @@ class VaultStore:
         web の補助の文書(stages)には頼らない。
         """
         if re.fullmatch(ID_PATTERN, nid) is None:
-            raise NotFoundError(nid)
+            raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
         neg_snap = self._negotiation_ref(nid).get()
         if not neg_snap.exists:
-            raise NotFoundError(nid)
+            raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
         doc = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
         if doc.mode not in ("demo", "attack") or not doc.participants.candidate.is_fictional:
-            raise NotFoundError(nid)
+            raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
         return self._read_event_items(nid, side, after_seq)
 
     def _read_event_items(self, nid: str, side: Side, after_seq: int) -> list[EventViewItem]:

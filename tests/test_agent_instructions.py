@@ -52,14 +52,14 @@ def test_the_instruction_explains_output_truncated_and_the_allowance_of_evaluati
 @pytest.mark.parametrize("role", ROLES_WITH_FULL_INSTRUCTION)
 def test_the_instruction_keeps_the_mechanical_concession_procedure(role):
     # §4.2・台帳 I-13 (譲歩の手順は、機械的な手順のまま: S と T から N を作り、plan の checks に、N と、N の寄せた軸を 1 つ S に
-    # 戻した案を、この順で並べる。差が縮んだら、T を自分の側に 1 段寄せた案を先頭に置く。同じ案を 2 回提案しない)
+    # 戻した案を、この順で並べる。差が縮んだら、T の salary だけを自分の側に 1 段寄せた案を先頭に置く。同じ案を 2 回提案しない)
     text = load_instruction(role)
     for fragment in (
         "あなたの直前の提案を S、相手の直前の提案を T とする",
         "salary: S と T の差の、およそ半分だけ T に寄せる（50 刻みに丸める）",
         "すべて 1 段ずつ T の側へ寄せる",
         "N と、2. で寄せた軸のうち 1 つ（salary 以外から、1 つずつ順に）を S の値に戻した案を、この順で並べる",
-        "T を、あなたの側に 1 段だけ寄せた案",
+        "T の salary だけを、あなたの側に 1 段（50）寄せた案",  # L15-5: 寄せる軸を salary に決めた
         "同じ組み合わせを 2 回 propose しない",
     ):
         assert fragment in text, fragment

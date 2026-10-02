@@ -280,6 +280,7 @@ class WebEnv:
             answerer=self.answerer,
             attacker_instruction=self.attacker_instruction,
             llm_budget=self.llm_budget,
+            count_llm_calls=self.llm_budget is not None,  # 計上を見ないテストは、明示の口で外す(台帳 X-60)
         )
         self.manager = RefereeManager(self.deps)
         self.sweeper = Sweeper(

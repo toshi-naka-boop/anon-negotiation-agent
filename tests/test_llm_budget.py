@@ -54,8 +54,9 @@ from vault_helpers import (
     sample_package,
 )
 from web.config import DEFAULT_WEB_CONFIG, load_web_config
-from web.llm_budget import LLM_COUNTERS_COLLECTION, LlmBudget, jst_date
-from web.referee import StepOutcome
+from web.llm_budget import LLM_COUNTERS_COLLECTION, STAGE_COUNT_FIELD, LlmBudget, LlmBudgetUnavailable, jst_date
+from web.referee import NegotiationContext, Referee, StepOutcome
+from web.stages import STAGES_COLLECTION
 from web_app_helpers import build_web_env, wait_until
 from web_helpers import ScriptedAnswerer, SimulatedCrash, create_demo_negotiation, move_dict, plan_dict
 
@@ -184,6 +185,54 @@ async def test_the_counters_advance_before_each_send_of_the_plan_and_the_decisio
     assert seen == [("plan", 1, 1), ("decide", 2, 2)]
     document = env.default_db.collection(LLM_COUNTERS_COLLECTION).document(jst_date(env.clock.now())).get().to_dict()
     assert document["count"] == 2 and document["ttl_at"] == env.clock.now() + dt.timedelta(days=7)  # 7 日の TTL
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("where", ["daily", "negotiation"])
+@pytest.mark.parametrize("bad_count", ["12", -1, True, None], ids=["string", "negative", "bool", "missing"])
+async def test_a_corrupt_counter_document_stops_the_sends_instead_of_counting_from_zero(store, web_env, where, bad_count):
+    # 台帳 X-62: カウンタの文書はあるのに数の項目が壊れている(欠落・整数でない・負・bool)とき、0 とみなして送らない。
+    # 読み出しも、入場の制限も、同じく LlmBudgetUnavailable(閉じる側に倒す)。レフェリーは送らずに待つ。
+    env = web_env
+    budget = _budget(env)
+    env.configure(llm_budget=budget)
+    nid = await _negotiation(store, env)
+    if where == "daily":
+        doc = {"ttl_at": env.clock.now() + dt.timedelta(days=7)}
+        if bad_count is not None:
+            doc["count"] = bad_count
+        env.default_db.collection(LLM_COUNTERS_COLLECTION).document(jst_date(env.clock.now())).set(doc)
+    else:
+        ref = env.default_db.collection(STAGES_COLLECTION).document(nid)
+        if bad_count is None:
+            ref.update({STAGE_COUNT_FIELD: __import__("google.cloud.firestore", fromlist=["DELETE_FIELD"]).DELETE_FIELD})
+        else:
+            ref.update({STAGE_COUNT_FIELD: bad_count})
+
+    with pytest.raises(LlmBudgetUnavailable):
+        await budget.reserve(nid)
+    if where == "daily":
+        with pytest.raises(LlmBudgetUnavailable):
+            await budget.daily_count()
+    else:
+        with pytest.raises(LlmBudgetUnavailable):
+            await budget.negotiation_counts([nid])
+    with pytest.raises(LlmBudgetUnavailable):
+        await budget.admits_new_negotiation([nid])
+    env.agents.script("candidate", plan_dict(checks=[A]))
+    assert await env.referee(nid).step() is StepOutcome.WAITING  # 送らずに待つ
+    assert env.agents.calls == []
+
+
+@pytest.mark.anyio
+async def test_a_referee_without_a_budget_cannot_be_built_unless_a_test_opts_out(web_env):
+    # 台帳 X-60: 計上を省いたまま動かせると費用の歯止めが丸ごと効かない。None はテストが count_llm_calls=False で明示したときだけ
+    context = NegotiationContext(nid="0123456789abcdef", mode="demo", candidate_principal_id=None)
+    without = dataclasses.replace(web_env.deps, llm_budget=None, count_llm_calls=True)  # 本番の既定(count_llm_calls=True)で budget なし
+    with pytest.raises(ValueError, match="llm_budget"):
+        Referee(context, without)
+    Referee(context, dataclasses.replace(without, count_llm_calls=False))  # テストの明示の口
+    Referee(context, dataclasses.replace(web_env.deps, llm_budget=_budget(web_env)))  # 本番の形
 
 
 @pytest.mark.anyio

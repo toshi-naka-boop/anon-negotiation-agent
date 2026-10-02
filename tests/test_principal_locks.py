@@ -381,6 +381,7 @@ async def test_the_referees_vault_calls_for_a_real_principal_wait_for_the_princi
         clock=web_app.clock,
         sleep=web_app.sleep,
         locks=web_app.services.locks,
+        count_llm_calls=False,  # 台帳 X-60: 計上はこのテストの対象外
     )
     live_referee = Referee(NegotiationContext(nid, "live", pid), deps)
     demo_referee = Referee(NegotiationContext(demo_nid, "demo", None), deps)

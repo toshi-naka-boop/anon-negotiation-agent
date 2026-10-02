@@ -510,6 +510,7 @@ ENVELOPE_VIOLATIONS: dict[str, tuple[dict, str]] = {
     "negative_cached_tokens": (_usage_task(cached_tokens=-1), "fields: cached_tokens"),
     "negative_output_tokens": (_usage_task(output_tokens=-1), "fields: output_tokens"),
     "zero_requests": (_usage_task(requests=0), "fields: requests"),
+    "two_requests": (_usage_task(requests=2), "exactly one model request"),  # 台帳 X-61
     "fractional_tokens": (_usage_task(prompt_tokens=1000.5), "fields: prompt_tokens"),
     "tokens_as_a_string": (_usage_task(prompt_tokens="1000"), "fields: prompt_tokens"),
     "tokens_as_a_bool": (_usage_task(requests=True), "fields: requests"),

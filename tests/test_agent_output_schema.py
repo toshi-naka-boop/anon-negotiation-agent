@@ -143,6 +143,15 @@ def test_thinking_levels_come_from_the_config_per_phase():
     assert thinking_level_for("decide", swapped) == types.ThinkingLevel.HIGH
 
 
+@pytest.mark.parametrize("bad", [0, 100, 4097, 100_000])
+def test_max_output_tokens_outside_the_safe_range_is_rejected_at_startup(bad):
+    # 台帳 X-63 (設計書 §8.2 の 1 日の最悪の金額は max_output_tokens=2,048 の見積もり。桁違いの値では起動できない)
+    with pytest.raises(ValueError, match="max_output_tokens"):
+        dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_output_tokens=bad)
+    assert dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_output_tokens=4096).max_output_tokens == 4096
+    assert dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_output_tokens=256).max_output_tokens == 256
+
+
 @pytest.mark.parametrize("bad", ["", "ULTRA", "low", "THINKING_LEVEL_UNSPECIFIED"])
 def test_an_unknown_thinking_level_is_rejected(bad):
     # §4.2 (設定の名前が MINIMAL / LOW / MEDIUM / HIGH のどれでもなければ、起動のときに ValueError)

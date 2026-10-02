@@ -55,6 +55,18 @@ _OUTER_ATTEMPTS = 3
 _OUTER_BACKOFF_SECONDS = (0.010, 0.200)
 
 
+class _CorruptCounter(ValueError):
+    """カウンタの文書はあるが、数の項目が欠けている・整数でない・負(台帳 X-62: 0 とみなして送らず、閉じる側に倒す)。"""
+
+
+def _count_in(data: dict | None, field: str) -> int:
+    """文書の数の項目を読む。文書がある以上、項目は 0 以上の整数でなければならない(bool も不可)。"""
+    value = (data or {}).get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise _CorruptCounter(field)
+    return value
+
+
 class LlmBudgetUnavailable(Exception):
     """物理の呼び出し数のカウンタに書けない・読めない。呼び出し側は、送らずに待って読み直す(台帳 X-50)。
 
@@ -111,13 +123,13 @@ class LlmBudget:
         def txn_fn(txn: firestore.Transaction) -> Reservation:
             # Firestore のトランザクションは、読み出しをすべて終えてから書く。
             daily_snap = daily_ref.get(transaction=txn)
-            daily_count = (daily_snap.to_dict() or {}).get("count", 0) if daily_snap.exists else 0
+            daily_count = _count_in(daily_snap.to_dict(), "count") if daily_snap.exists else 0
             stage_count = 0
             if stage_ref is not None:
                 stage_snap = stage_ref.get(transaction=txn)
                 if not stage_snap.exists:
                     raise _StageMissing
-                stage_count = (stage_snap.to_dict() or {}).get(STAGE_COUNT_FIELD, 0)
+                stage_count = _count_in(stage_snap.to_dict(), STAGE_COUNT_FIELD)
 
             if daily_count >= self._config.daily_limit:
                 return Reservation(False, "daily")
@@ -163,7 +175,7 @@ class LlmBudget:
 
     def _daily_count_sync(self) -> int:
         snap = self._daily_ref(self._clock.now()).get()
-        return (snap.to_dict() or {}).get("count", 0) if snap.exists else 0
+        return _count_in(snap.to_dict(), "count") if snap.exists else 0
 
     async def daily_count(self) -> int:
         """今日(日本時間)の物理の呼び出し数。"""
@@ -174,9 +186,7 @@ class LlmBudget:
 
     def _negotiation_counts_sync(self, nids: list[str]) -> dict[str, int]:
         snapshots = self._db.get_all([self._stage_ref(nid) for nid in nids]) if nids else []
-        return {
-            snap.reference.id: (snap.to_dict() or {}).get(STAGE_COUNT_FIELD, 0) for snap in snapshots if snap.exists
-        }
+        return {snap.reference.id: _count_in(snap.to_dict(), STAGE_COUNT_FIELD) for snap in snapshots if snap.exists}
 
     async def negotiation_counts(self, nids: Iterable[str]) -> dict[str, int]:
         """交渉ごとの物理の呼び出し数。段の状態がない交渉は含めない(呼び出し側は 0 と読む)。"""

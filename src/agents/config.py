@@ -13,6 +13,11 @@ from pathlib import Path
 _CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "params.toml"
 
 
+# max_output_tokens に許す範囲(台帳 X-63)。上限は、設計書 §8.2 の 1 日の最悪の金額の見積もり(2,048)の 2 倍まで
+MIN_OUTPUT_TOKENS = 256
+MAX_OUTPUT_TOKENS_CEILING = 4096
+
+
 @dataclass(frozen=True)
 class AgentsConfig:
     """agents の設定。"""
@@ -29,6 +34,15 @@ class AgentsConfig:
     max_request_body_bytes: int
     llm_timeout_seconds: float
     public_base_url: str
+
+    def __post_init__(self) -> None:
+        # 台帳 X-63: 設計書 §8.2 の 1 日の最悪の金額は max_output_tokens=2,048 で見積もっている。桁違いの値で起動できないように、
+        # 上限(MAX_OUTPUT_TOKENS_CEILING)を超える値と、JSON を出せないほど小さい値は、起動のときに断る。
+        if not (MIN_OUTPUT_TOKENS <= self.max_output_tokens <= MAX_OUTPUT_TOKENS_CEILING):
+            raise ValueError(
+                f"[agents] max_output_tokens must be between {MIN_OUTPUT_TOKENS} and {MAX_OUTPUT_TOKENS_CEILING}"
+                f" (got {self.max_output_tokens}); update design.md §8.2's estimate if the ceiling must change"
+            )
 
 
 def load_agents_config(path: Path = _CONFIG_PATH) -> AgentsConfig:

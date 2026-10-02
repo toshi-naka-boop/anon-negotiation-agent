@@ -148,9 +148,10 @@ class RefereeDeps:
     # 依頼者ごとのロック(台帳 I-4)。渡すと、本物の候補者の交渉の金庫への操作を 1 回ごとにロックの下で行う。
     # 本人の削除・利用記録の更新・段の状態の作成と、同じ依頼者の操作を 1 つずつ順に処理するため。
     locks: PrincipalLocks | None = None
-    # LLM に送る前の、物理の呼び出し数の計上(交渉ごと・1 日。§8.2)。本番の組み立て(web.services)は必ず渡す。None なら数えない
-    # (カウンタの文書を持たない、レフェリー単体のテストやスクリプト用)。
+    # LLM に送る前の、物理の呼び出し数の計上(交渉ごと・1 日。§8.2)。本番の組み立て(web.services)は必ず渡す。
+    # None にできるのは、count_llm_calls=False を明示したレフェリー単体のテストだけ(台帳 X-60: 省略して起動できないように)。
     llm_budget: LlmBudget | None = None
+    count_llm_calls: bool = True
     # 1 回の計画から実行する確かめの数の上限(§2.7。[web.llm_budget] max_checks_per_plan)
     max_checks_per_plan: int = DEFAULT_WEB_CONFIG.llm_budget.max_checks_per_plan
 
@@ -192,6 +193,9 @@ class Referee:
     """1 つの交渉を進める。step() が 1 手番ぶん(計画・確かめ・決定)、run() が終わるまでの繰り返し。"""
 
     def __init__(self, context: NegotiationContext, deps: RefereeDeps) -> None:
+        if deps.llm_budget is None and deps.count_llm_calls:
+            # 台帳 X-60: 計上を省いたまま動かせると、費用の歯止め(§8.2)が丸ごと効かない。テストだけが明示的に外せる
+            raise ValueError("RefereeDeps.llm_budget is required (set count_llm_calls=False only in tests)")
         self._context = context
         self._deps = deps
         # run() が、WAITING・RETRY の後に待つ秒数。step() が、その結果ごとに決める(台帳 L10-1)。

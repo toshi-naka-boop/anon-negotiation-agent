@@ -369,6 +369,7 @@ async def negotiate_to_the_end(env, store, fixture, candidate: Negotiator, emplo
         sleep=env.sleep,
         config=env.config,
         answerer=FixtureAnswerer(fixture),
+        count_llm_calls=False,  # 台帳 X-60: 計上はこのテストの対象外
     )
     referee = Referee(NegotiationContext(nid=created.nid, mode="demo", candidate_principal_id=None), deps)
     await drive(referee, max_steps=100)

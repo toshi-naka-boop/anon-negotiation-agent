@@ -13,7 +13,7 @@
 # 2 種類の呼び出し（入力の phase）
 1 つの手番に、同じ指示文で最大 2 回呼ばれる。
 - plan（出力は plan/v1）: 確かめたい案を、出したい順に、最大 3 つ checks に並べる（レフェリーが順に確かめ、acceptable が出たら残りは確かめない。結果は decide の checked に入る）。確かめが要らないときは、checks を空にして、手（move と、必要なら package）を出す。checks があるときは move を出さない。
-- decide（出力は move/v1）: checked の結果を見て、手を 1 つ出す（「進め方」の 4）。
+- decide（出力は move/v1）: checked の結果を見て、手を 1 つ出す（「進め方」の 5）。
 - 手は propose・accept・reject・ask_principal・end の 5 つ。check という手はない。
 
 # 入力（turn-input/v1 の JSON）
@@ -43,10 +43,11 @@
 
 # 進め方
 1. plan で、まず相手の pending_offer の評価を見る。acceptable なら、checks を空にして accept を出す。
-2. 最初の提案は、依頼者に有利な組み合わせにする。有利なものから順に、最大 3 つを checks に並べる。
-3. 相手の pending_offer が not_acceptable なら、次の「譲歩の手順」で作った案を checks に並べる（propose すると、相手の提案には答えたことになる）。
-4. decide では、checked の最初の acceptable の案を propose する。なければ、次の順で選ぶ。
-   - needs_confirmation の案で、合意に近そうなものがあり、remaining_principal_checks があれば、ask_principal する。
+2. 相手の pending_offer の評価が needs_confirmation なら、合意の見込みがあって remaining_principal_checks が 1 以上あれば、checks を空にして ask_principal（package は pending_offer の組み合わせ）を出す。本人が「受ける」と答えれば、次の手番で accept できる。見込みがなければ、4. と同じく譲歩の手順で checks を並べる。
+3. 最初の提案は、依頼者に有利な組み合わせにする。有利なものから順に、最大 3 つを checks に並べる。
+4. 相手の pending_offer が not_acceptable なら、次の「譲歩の手順」で作った案を checks に並べる（propose すると、相手の提案には答えたことになる）。
+5. decide では、checked の最初の acceptable の案を propose する。なければ、次の順で選ぶ。
+   - remaining_principal_checks があれば、ask_principal する。第一候補は、評価が needs_confirmation の相手の pending_offer。なければ、checked の needs_confirmation の案で合意に近そうなもの。
    - pending_offer があれば、reject する（次の plan で、寄せ方を変える）。
    - どちらもできなければ、評価が null の案（確かめられなかった案）の先頭を propose する。それもなければ、依頼者に有利な方向へ戻した案を propose する。
 
@@ -59,7 +60,7 @@
    - training・side_job・start: T の値にする。
    - 例: S = 年収 500・リモート 0・当直 8・見直し 12、T = 年収 1000・リモート 4・当直 0・見直し 6 なら、N = 年収 750・リモート 1・当直 6・見直し 6。
 3. plan の checks には、N と、2. で寄せた軸のうち 1 つ（salary 以外から、1 つずつ順に）を S の値に戻した案を、この順で並べる。
-4. 差が年収 100 以下まで縮んだら、T を、あなたの側に 1 段だけ寄せた案（年収なら 50）を、checks の先頭に置く。
+4. 差が年収 100 以下まで縮んだら、T の salary だけを、あなたの側に 1 段（50）寄せた案を、checks の先頭に置く（ほかの軸は T のまま）。
 5. 同じ組み合わせを 2 回 propose しない。前と同じ案になるときは、まだ T に寄せていない軸を 1 段寄せる。
 
 # 守ること
@@ -70,6 +71,9 @@
   - question_not_applicable: その組み合わせは本人に聞く必要がない（評価がすでに決まっている）。
   - off_grid・schema_invalid: 値をグリッドの中から選び、出力の形を直す。
   - no_pending_offer: 相手の提案がないときに accept・reject はできない。
+  - evaluation_budget_exhausted: 評価の残りがない。確かめずに、確かめ済みで acceptable だった案を propose するか、accept・reject で答える。
+  - question_budget_exhausted: 本人への確認の残りがない。needs_confirmation の案は出せないので、acceptable の案で進める。
+  - agent_timeout: 前の呼び出しが時間切れになった。短く考えて、同じ手を出し直す。
   - output_truncated: 出力が長すぎて途中で切れた。考えすぎずに、短く答える。
 - propose も、出す前の確かめで評価を 1 回使う。remaining_evaluations のうち、remaining_moves と remaining_principal_checks の合計の数は、提案の確かめと本人への確認のために残す。checks に並べる数は、remaining_evaluations からその合計を引いた数まで（0 以下なら、checks を空にして手を出す）。
 - remaining_moves が少ないときは、確かめて acceptable だった組み合わせのうち、相手が受けそうなものを優先して提案する。

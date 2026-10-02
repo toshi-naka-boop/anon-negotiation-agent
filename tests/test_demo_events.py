@@ -111,7 +111,8 @@ def test_demo_events_never_reveal_a_live_negotiation_or_whether_a_negotiation_ex
         for side in _SIDES:
             response = api_client.get(f"/v1/demo/negotiations/{nid}/events", params={"side": side})
             assert response.status_code == 404, (nid, side)
-            assert response.json() == {"detail": nid}, (nid, side)  # 存在しないときと同じ形(本物かどうかで変わらない)
+            # 存在しないときと同じ形(本物かどうかで変わらない)。文に ID を入れない(台帳 X-40・X-64)
+            assert response.json() == {"detail": "negotiation not found"}, (nid, side)
 
     # 対照: 通常の口では、同じ交渉の候補者側のイベントが読める(demo 用の口が、本物の交渉を断っているだけ)。
     normal = api_client.get(f"/v1/negotiations/{live.nid}/events", params={"side": "candidate"})
