@@ -238,3 +238,46 @@ def test_principal_answer_over_http(api_client, store):
     assert events_response.status_code == 200
     kinds = [e["kind"] for e in events_response.json()]
     assert "principal_answer" in kinds
+
+
+def test_stop_cost_limit_over_http(api_client, store):
+    # §3.3・§3.4(台帳 X-52): control の action に stop_cost_limit が通り、双方に「なし」だけの最終記録が 1 件残る。
+    from vault_helpers import demo_create_request, put_candidate_and_employer_templates
+
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    created = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id)
+    )
+
+    response = api_client.post(
+        f"/v1/negotiations/{created.nid}/control", json={"side": "candidate", "action": "stop_cost_limit"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "judged"
+    for side in ("candidate", "employer"):
+        events = api_client.get(f"/v1/negotiations/{created.nid}/events", params={"side": side}).json()
+        assert [(e["kind"], e["result"]) for e in events] == [("final_result", {"likelihood": "none", "package": None})]
+
+
+def test_negotiation_by_request_over_http(api_client, store):
+    # §3.3(台帳 X-57): 作成の冪等キーから nid を引ける。未知のキーは 404。
+    from urllib.parse import quote
+
+    from vault_helpers import demo_create_request, put_candidate_and_employer_templates
+
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    # web が付ける request_id は「依頼者 ID:画面の値」の形。画面の値に "/" が入っても、別のパスとして 404 にならずに引ける。
+    request_id = f"{new_id('principal')}:request/0001"
+    created = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id, request_id=request_id)
+    )
+
+    for in_path in (request_id, quote(request_id, safe="")):  # そのままの形と、パーセントエンコードした形
+        response = api_client.get(f"/v1/negotiations/by-request/{in_path}")
+        assert (response.status_code, response.json()) == (200, {"nid": created.nid})
+
+    assert api_client.get("/v1/negotiations/by-request/never-created").status_code == 404
+    # request_id が "view"・"events" でも、{nid}/view・{nid}/events と取り違えない(取り違えると、side がなくて 422 になる)。
+    for word in ("view", "events"):
+        assert api_client.get(f"/v1/negotiations/by-request/{word}").status_code == 404

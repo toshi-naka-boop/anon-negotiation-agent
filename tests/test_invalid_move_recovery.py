@@ -3,7 +3,8 @@
 金庫の部分: 無効手(invalid の登録と、金庫で分かる無効手)が記録されること、ガードで拒否された
 提案も評価回数を消費すること、受け手としての評価・accept の確かめ直し・判定は評価回数を
 消費しないこと、相手が提案を重ねても自分の評価上限を超えないこと、同じ側の無効手が
-3 回続いたときだけ終わることを確かめる。
+3 回続いたときだけ終わること(間に有効な check を挟んでも連続は切れない。check 以外の有効な手は 0 に戻す。
+無効な check は連続を進める。台帳 X-48・C-46)を確かめる。
 
 金庫の無効手の見え方(台帳 C-40): 無効手を打った側の見え方に、打とうとした手の種類(attempted_move)と、
 自分側のポリシーで評価して無効と判断した手なら、その自分側の評価(own_evaluation)が入ること。相手には見えないこと。
@@ -77,7 +78,7 @@ def test_guard_rejected_proposal_still_consumes_an_evaluation(store):
     # DV-03: ガードで拒否された提案(not_acceptable_to_own_principal)も評価回数を消費する。
     nid = _create(store, candidate_policy=reject_all_policy("candidate"))
     view_before = store.get_view(nid, "candidate")
-    assert view_before.budget.remaining_evaluations == 16
+    assert view_before.budget.remaining_evaluations == 17
 
     response = store.process_move(
         nid, MoveRequest(expected_version=0, side="candidate", move="propose", package=sample_package())
@@ -86,7 +87,7 @@ def test_guard_rejected_proposal_still_consumes_an_evaluation(store):
     assert response.error == "not_acceptable_to_own_principal"
 
     view_after = store.get_view(nid, "candidate")
-    assert view_after.budget.remaining_evaluations == 15  # 1 回消費されている
+    assert view_after.budget.remaining_evaluations == 16  # 1 回消費されている
 
 
 def test_receiver_evaluation_accept_recheck_and_judgment_do_not_consume_evaluations(store):
@@ -101,7 +102,7 @@ def test_receiver_evaluation_accept_recheck_and_judgment_do_not_consume_evaluati
 
     # 提案を受けた時点(受け手としての評価が起きたはず)で、求人側の評価回数は 0 のまま。
     employer_view = store.get_view(nid, "employer")
-    assert employer_view.budget.remaining_evaluations == 16
+    assert employer_view.budget.remaining_evaluations == 17
 
     accept_response = store.process_move(
         nid, MoveRequest(expected_version=propose_response.version, side="employer", move="accept")
@@ -133,7 +134,7 @@ def test_counterparty_proposals_never_exceed_receivers_own_evaluation_budget(sto
         version = response.version
 
     employer_view = store.get_view(nid, "employer")
-    assert employer_view.budget.remaining_evaluations == 16  # 一度も自分の手で評価していない
+    assert employer_view.budget.remaining_evaluations == 17  # 一度も自分の手で評価していない
 
 
 def test_negotiation_ends_only_after_three_consecutive_invalid_moves_from_the_same_side(store):
@@ -156,8 +157,14 @@ def test_negotiation_ends_only_after_three_consecutive_invalid_moves_from_the_sa
     assert response.end_reason == "stopped_invalid"
 
 
-def test_a_valid_move_resets_the_consecutive_invalid_counter(store):
-    # DV-03 の裏付け: 途中で有効な手を挟むと、連続無効手の数がリセットされ、3 回に届かない。
+def _consecutive_invalid(store, nid, side="candidate") -> int:
+    """その側の連続無効手の数(金庫の中の値。外には出ない)。"""
+    return store._negotiation_ref(nid).get().to_dict()["counters"][side]["consecutive_invalid"]
+
+
+def test_a_valid_move_other_than_check_resets_the_consecutive_invalid_counter(store):
+    # DV-03 の裏付け(§3.5「有効な手(check を除く)を受け付けたら、その側の連続無効手を 0 に戻す」): 途中で、check 以外の
+    # 有効な手(propose)を挟むと、連続無効手の数が 0 に戻り、その後の無効手が 2 回では終わらない。
     nid = _create(store, employer_rules=[EmployerRule(when={}, policy=accept_all_policy("employer"))])
     version = 0
 
@@ -166,20 +173,79 @@ def test_a_valid_move_resets_the_consecutive_invalid_counter(store):
         response = store.process_move(nid, MoveRequest(expected_version=version, side="candidate", move="accept"))
         assert response.valid is False
         version = response.version
+    assert _consecutive_invalid(store, nid) == 2
 
-    # 有効な手を 1 回(check)。連続無効手はここでリセットされるはず。
+    # 有効な propose で 0 に戻る。求人側が断って、手番は候補者に戻る。
     response = store.process_move(
-        nid, MoveRequest(expected_version=version, side="candidate", move="check", package=sample_package())
+        nid, MoveRequest(expected_version=version, side="candidate", move="propose", package=sample_package())
     )
     assert response.valid is True
+    assert _consecutive_invalid(store, nid) == 0
+    response = store.process_move(nid, MoveRequest(expected_version=response.version, side="employer", move="reject"))
     version = response.version
 
-    # さらに無効手を 2 回続けても(合計では直前から数えて 2 回なので)、まだ終わらない。
+    # さらに無効手を 2 回続けても、まだ終わらない(戻っていなければ、続く 1 回目で通算 3 回目になり、終わっていた)。
     for _ in range(2):
         response = store.process_move(nid, MoveRequest(expected_version=version, side="candidate", move="accept"))
         assert response.valid is False
         assert response.status == "active"
         version = response.version
+    assert _consecutive_invalid(store, nid) == 2
+
+
+def test_a_valid_check_between_invalid_moves_does_not_break_the_consecutive_run(store):
+    # DV-03(§3.5。台帳 X-48・C-46): 同じ側の無効手が 3 回続いたときだけ終わる。間に有効な check を挟んでも、連続は切れない。
+    # v12 から check はレフェリーが計画の中で登録するので、決定の無効手(ここでは、ガードで断られる提案)の間に確かめが
+    # 入っても、決定の無効手が 3 回続けば止まる。check が 0 に戻すと、確かめを挟み続ける限り、いつまでも止まらない。
+    nid = _create(store, candidate_policy=reject_all_policy("candidate"))
+    package = sample_package()
+    version = 0
+
+    def send(move):
+        nonlocal version
+        response = store.process_move(
+            nid, MoveRequest(expected_version=version, side="candidate", move=move, package=package)
+        )
+        version = response.version
+        return response
+
+    # 確かめ(有効な check)→ 決定の提案(ガードで断られる無効手)を 2 回。連続無効手は 1・2 と進み、check では戻らない。
+    for run in (1, 2):
+        assert send("check").valid is True
+        assert _consecutive_invalid(store, nid) == run - 1  # check は連続無効手を変えない(2 周目は 1 のまま。0 に戻らない)
+        proposed = send("propose")
+        assert (proposed.valid, proposed.error, proposed.status) == (False, "not_acceptable_to_own_principal", "active")
+        assert _consecutive_invalid(store, nid) == run
+
+    # 3 回目の確かめを挟んでも、3 回目の無効手で終わる。無効手の記録と終了の記録の 2 件(別々の version)。
+    assert send("check").valid is True
+    assert _consecutive_invalid(store, nid) == 2
+    version_before_third = version
+    third = send("propose")
+    assert (third.valid, third.status, third.end_reason) == (False, "judged", "stopped_invalid")
+    assert third.version == version_before_third + 2
+
+
+def test_an_invalid_check_advances_the_consecutive_invalid_counter(store):
+    # DV-03(§3.5。台帳 X-48): 無効な check(evaluation_budget_exhausted)は、ほかの無効手と同じく連続無効手を 1 進める。
+    # 評価回数を有効な check で使い切るまでは、連続無効手は 0 のまま(有効な check は変えない)。その後の無効な check 3 回で終わる。
+    nid = _create(store)
+    package = sample_package()
+    version = _exhaust_evaluations(store, nid, package)
+    assert _consecutive_invalid(store, nid) == 0
+
+    for run in (1, 2):
+        response = store.process_move(
+            nid, MoveRequest(expected_version=version, side="candidate", move="check", package=package)
+        )
+        assert (response.valid, response.error, response.status) == (False, "evaluation_budget_exhausted", "active")
+        assert _consecutive_invalid(store, nid) == run
+        version = response.version
+
+    third = store.process_move(
+        nid, MoveRequest(expected_version=version, side="candidate", move="check", package=package)
+    )
+    assert (third.valid, third.status, third.end_reason) == (False, "judged", "stopped_invalid")
 
 
 # --- 金庫の無効手の見え方(台帳 C-40) ---
@@ -197,9 +263,9 @@ def _summary(event):
 
 
 def _exhaust_evaluations(store, nid, package) -> int:
-    """候補者が有効な check を 16 回打って、評価回数を使い切る。次の expected_version を返す。"""
+    """候補者が有効な check を 17 回打って、評価回数を使い切る。次の expected_version を返す。"""
     version = 0
-    for _ in range(16):
+    for _ in range(17):
         response = store.process_move(
             nid, MoveRequest(expected_version=version, side="candidate", move="check", package=package)
         )

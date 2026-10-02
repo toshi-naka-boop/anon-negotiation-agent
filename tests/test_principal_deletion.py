@@ -37,7 +37,7 @@ from vault.api_models import (
     PutBlocklistRequest,
     PutPolicyRequest,
 )
-from vault.errors import MovePreconditionFailed, PrincipalDeletingError
+from vault.errors import MovePreconditionFailed, NotFoundError, PrincipalDeletingError
 from vault.ids import generate_id
 from vault.models import EmployerRule, NegotiationDocument, Participant, Participants, Snapshots
 from vault.serialization import model_to_firestore
@@ -302,7 +302,7 @@ def test_delete_stopped_before_the_last_step_of_a_real_counterparts_negotiation_
 
 def test_delete_removes_the_creation_idempotency_key_of_a_fictional_counterparts_negotiation(store):
     # DV-06 / 台帳 I-8: 相手が架空人物の交渉を消すとき、交渉の文書の request_id から冪等キー(idempotency/{hash})も消える。
-    # 別の依頼者・デモの交渉の冪等キーは、消えない。
+    # 別の依頼者・デモの交渉の冪等キーは、消えない。消えたキーは、by-request(台帳 X-57)でも 404 になる。
     pid, other_pid = new_id("principal"), new_id("principal")
     put_candidate_policy(store, pid)
     put_candidate_policy(store, other_pid)
@@ -314,13 +314,17 @@ def test_delete_removes_the_creation_idempotency_key_of_a_fictional_counterparts
         live_create_request(other_pid, employer_template.template_id, request_id=other_request_id)
     )
     assert store._idempotency_ref(request_id).get().exists
+    assert store.get_negotiation_by_request(request_id).nid == mine.nid  # 削除の前は、キーから交渉を引ける
 
     store.delete_principal(pid)
 
     assert not store._idempotency_ref(request_id).get().exists
     assert not store._negotiation_ref(mine.nid).get().exists
+    with pytest.raises(NotFoundError):  # 本人の削除で消えたキーは、by-request でも 404
+        store.get_negotiation_by_request(request_id)
     assert store._idempotency_ref(other_request_id).get().exists  # ほかの依頼者のキーは、そのまま
     assert store._negotiation_ref(theirs.nid).get().exists
+    assert store.get_negotiation_by_request(other_request_id).nid == theirs.nid
     assert documents_mentioning(store._db, pid) == {}
 
 

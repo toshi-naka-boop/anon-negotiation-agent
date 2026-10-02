@@ -31,8 +31,10 @@ class VaultModel(BaseModel):
 # --- §3.1 状態機械 ---
 
 NegotiationStatus = Literal["active", "awaiting_principal", "judged"]
+# stopped_cost は費用の上限での停止(§3.4 control の stop_cost_limit。台帳 X-52)。回数だけで決まる運用上の中断で、
+# 取消(cancelled)・期限切れ(timeout)と同じ種類。FR-12・AC-06 の停止(stopped_budget・stopped_invalid)とは別。
 EndReason = Literal[
-    "agreed", "ended_by_agent", "stopped_budget", "stopped_invalid", "cancelled", "timeout"
+    "agreed", "ended_by_agent", "stopped_budget", "stopped_invalid", "stopped_cost", "cancelled", "timeout"
 ]
 NegotiationMode = Literal["live", "demo", "attack"]
 Likelihood = Literal["high", "medium", "none"]

@@ -37,6 +37,7 @@ from vault.api_models import (
     ExpireResponse,
     MoveRequest,
     MoveResponse,
+    NegotiationByRequestResponse,
     NegotiationViewResponse,
     OpenNegotiationsPage,
     OpenNegotiationSummary,
@@ -426,6 +427,29 @@ class VaultStore:
 
         return self._run_transaction(_txn, contention_error=TransactionRetryExhausted)
 
+    def get_negotiation_by_request(self, request_id: str) -> NegotiationByRequestResponse:
+        """GET /v1/negotiations/by-request/{request_id}(§3.3。台帳 X-57)。
+
+        作成の冪等キー(idempotency/{hash}。正本は金庫。§3.5・§3.8)から、すでに作った交渉の nid を返す。web は作成の前に
+        これを引き、既知のキーなら作成も入場の判定もせずに同じ交渉を返す(金庫の作成が成功した直後に web が落ちても、
+        再送が同じ交渉を見つけられる)。
+
+        次のどちらも NotFoundError(404)にする。
+        - キーがない: 作ったことがない・金庫が断った作成(何も書かない)・本人の削除(§3.8 手順 3)や TTL でキーが消えた。
+        - キーはあるが、指す交渉がない(交渉が TTL や本人の削除で先に消えた古いキー)。作成は、これを古いキーとして上書きして
+          作り直す(台帳 I-8)ので、ここでも「作った交渉はない」と答える。nid を返すと、web は作成に進めず、存在しない
+          交渉を返し続けてしまう。
+        読み出しだけで、何も書かない・version を進めない・記録しない(§3.3 の「読み出し・管理」)。メッセージには request_id を
+        入れない(request_id は依頼者 ID を含む。台帳 X-40)。
+        """
+        key_snap = self._idempotency_ref(request_id).get()
+        if not key_snap.exists:
+            raise NotFoundError("no negotiation was created for this request")
+        nid = key_snap.to_dict()["nid"]
+        if not self._negotiation_ref(nid).get().exists:
+            raise NotFoundError("no negotiation was created for this request")
+        return NegotiationByRequestResponse(nid=nid)
+
     # ------------------------------------------------------------------
     # §3.4 期限切れの判定・終了処理の下請け
     # ------------------------------------------------------------------
@@ -552,11 +576,14 @@ class VaultStore:
             if doc.to_move != previous_to_move or doc.status != previous_status:
                 doc.deadline = self._fresh_deadline(doc, now)
 
-            # --- 連続無効手のリセット/加算(手の種類を問わない) ---
-            if outcome.valid:
-                counters.consecutive_invalid = 0
-            else:
+            # --- 連続無効手のリセット/加算(§3.5「有効な手(check を除く)を受け付けたら 0 に戻す」。台帳 X-48・C-46) ---
+            # 有効な check は連続無効手を変えない: v12 から check はレフェリーが計画の中で登録するので、間に挟まっても、
+            # 決定の無効手が 3 回続けば止まる(check で戻すと、計画の確かめが決定の無効手の連続を切ってしまう)。
+            # 無効な check(evaluation_budget_exhausted)は、ほかの無効手と同じく 1 進める。
+            if not outcome.valid:
                 counters.consecutive_invalid += 1
+            elif request.move != "check":
+                counters.consecutive_invalid = 0
 
             # --- 手数を進める。数えないのは、有効な check と有効な ask_principal(どちらも手番を
             #     渡さない)だけ。無効な check・無効な ask_principal を含め、それ以外の手は
@@ -935,7 +962,7 @@ class VaultStore:
     def control(
         self, nid: str, request: ControlRequest, *, _bypass_deleting_guard: bool = False
     ) -> ControlResponse:
-        """§3.4 の pause・resume・cancel。
+        """§3.4 の pause・resume・cancel・stop_cost_limit。いずれも expected_version を取らない冪等な操作。
 
         _bypass_deleting_guard は delete_principal の手順 2 専用(公開 API からは渡さない)。
         delete_principal は、まさに deleting にした依頼者自身の交渉を取消にする必要があるので、
@@ -985,8 +1012,11 @@ class VaultStore:
                 txn.set(negotiation_ref, model_to_firestore(doc))
                 return ControlResponse(version=doc.version, status=doc.status, paused=doc.paused)
 
-            # cancel: judged でなければ、どの状態からでも効く。
-            self._write_shared_termination(txn, nid, doc, "cancelled")
+            # cancel・stop_cost_limit: judged でなければ、active・paused・awaiting_principal のどこからでも効く(judged は上で返している)。
+            # stop_cost_limit は、web の費用の上限(§8.2)に達した交渉を「なし」で終わらせる(台帳 X-52)。終了処理は取消と同じで、
+            # 終了の記録は双方に 1 件(AC-08)。
+            reason: EndReason = "stopped_cost" if request.action == "stop_cost_limit" else "cancelled"
+            self._write_shared_termination(txn, nid, doc, reason)
             txn.set(negotiation_ref, model_to_firestore(doc))
             return ControlResponse(version=doc.version, status=doc.status, paused=doc.paused)
 

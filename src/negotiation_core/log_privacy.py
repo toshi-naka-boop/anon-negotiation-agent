@@ -16,6 +16,9 @@ import re
 
 # 16 桁の 16 進数(依頼者 ID・交渉 ID。§2.7 の ID_PATTERN と同じ形)。前後が 16 進数の文字でないものだけ。
 _ID_IN_TEXT = re.compile(r"(?<![0-9a-f])[0-9a-f]{16}(?![0-9a-f])")
+# 作成の冪等キーが URL のパスに入る口(金庫の `GET /v1/negotiations/by-request/{request_id}`。§3.3・台帳 X-57)。
+# 冪等キーは依頼者 ID を含み得るので、`by-request/` の後ろをまとめて伏せる(空白か引用符まで。パーセントエンコードも含む)。
+_REQUEST_KEY_IN_PATH = re.compile(r"(/by-request/)[^\s\"']+")
 
 
 class _MaskIdsFilter(logging.Filter):
@@ -27,8 +30,13 @@ class _MaskIdsFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple):
-            record.args = tuple(_ID_IN_TEXT.sub("<id>", arg) if isinstance(arg, str) else arg for arg in record.args)
+            record.args = tuple(_mask(arg) if isinstance(arg, str) else arg for arg in record.args)
         return True
+
+
+def _mask(text: str) -> str:
+    """文字列の中の ID と、冪等キーの口のパスを伏せる。"""
+    return _ID_IN_TEXT.sub("<id>", _REQUEST_KEY_IN_PATH.sub(r"\1<key>", text))
 
 
 def mask_ids_in_logs() -> None:

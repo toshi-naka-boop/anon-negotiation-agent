@@ -7,6 +7,9 @@
 冪等キー(idempotency/{hash}。台帳 I-8): 交渉が先に消えて、キーだけが残っていても(TTL・本人の削除の途中)、
 古いキーとして上書きして作り直す(500 にしない)。デモ・攻撃のキーには、交渉と同じ TTL(ttl_at)が付き、
 本物の依頼者のキーには付かない(本人の削除で消える。tests/test_principal_deletion.py)。
+
+冪等キーからの引き直し(GET /v1/negotiations/by-request/{request_id}。台帳 X-57): 作ったキーで nid が返る。未知のキー・金庫が
+断った作成のキー・古いキー(交渉が先に消えた)は 404(NotFoundError)。読み出しだけで、何も書かない。
 """
 
 import datetime as dt
@@ -51,7 +54,7 @@ def test_same_request_id_returns_same_negotiation_and_reserves_budget_once(store
     assert first.nid == second.nid
 
     principal_doc = store._principal_ref(pid).get().to_dict()
-    assert principal_doc["evaluation_budget"]["used"] == 16  # 16 が 1 回だけ引かれている
+    assert principal_doc["evaluation_budget"]["used"] == 17  # 17 が 1 回だけ引かれている
 
 
 def test_real_candidate_can_have_only_one_active_negotiation(store):
@@ -78,8 +81,8 @@ def test_real_candidate_can_have_only_one_active_negotiation(store):
 
 
 def test_creation_is_refused_once_daily_budget_is_exhausted(store):
-    # DV-12: 予約できないとき(1 日の評価予算 160 に対し、交渉ごとに 16 を予約。
-    # 160 // 16 = 10 件で使い切る)は、作成が断られる。
+    # DV-12: 予約できないとき(1 日の評価予算 170 に対し、交渉ごとに 17 を予約。
+    # 170 // 17 = 10 件で使い切る)は、作成が断られる。
     pid = new_id("principal")
     put_candidate_policy(store, pid)
 
@@ -100,7 +103,7 @@ def test_creation_is_refused_once_daily_budget_is_exhausted(store):
     assert refused.reason == "budget_exhausted"
 
     principal_doc = store._principal_ref(pid).get().to_dict()
-    assert principal_doc["evaluation_budget"]["used"] == 160  # 交渉を作り直しても回復しない
+    assert principal_doc["evaluation_budget"]["used"] == 170  # 交渉を作り直しても回復しない
 
 
 def _evaluation_budget(store, pid) -> dict:
@@ -110,8 +113,8 @@ def _evaluation_budget(store, pid) -> dict:
 
 def test_daily_budget_never_runs_out_mid_negotiation(store):
     # DV-12: 交渉の途中で本人の 1 日の予算が尽きることはない(予約済みのため)。
-    # 1 日の窓の残りを、ちょうど 1 つの交渉の予約分(16)にしてから作成する(9 件作って取り消した後。
-    # 使用済みは 144)。作成の予約で、窓の残りは 0 になる。その状態で、交渉の評価上限(16)いっぱいまで
+    # 1 日の窓の残りを、ちょうど 1 つの交渉の予約分(17)にしてから作成する(9 件作って取り消した後。
+    # 使用済みは 153)。作成の予約で、窓の残りは 0 になる。その状態で、交渉の評価上限(17)いっぱいまで
     # check を送っても全部通り、1 日の予算(used)は check の前後で変わらない。
     # 評価のたびに 1 日の予算も引く実装なら、残り 0 の窓では拒否されるか、used が増える(台帳 C-39 の (b))。
     pid = new_id("principal")
@@ -122,17 +125,17 @@ def test_daily_budget_never_runs_out_mid_negotiation(store):
         earlier = store.create_negotiation(live_create_request(pid, employer_template.template_id))
         assert earlier.status == "created"
         store.control(earlier.nid, ControlRequest(side="candidate", action="cancel"))  # 進行中 1 件までの制限を避ける
-    assert _evaluation_budget(store, pid)["used"] == 144  # 1 日の窓の残りは、ちょうど 16
+    assert _evaluation_budget(store, pid)["used"] == 153  # 1 日の窓の残りは、ちょうど 17
 
     _, employer_template = put_candidate_and_employer_templates(store._db)
     result = store.create_negotiation(live_create_request(pid, employer_template.template_id))
     assert result.status == "created"
     nid = result.nid
     window_after_reservation = _evaluation_budget(store, pid)
-    assert window_after_reservation["used"] == 160  # 予約で、1 日の窓の残りは 0
+    assert window_after_reservation["used"] == 170  # 予約で、1 日の窓の残りは 0
 
     version = 0
-    for _ in range(16):
+    for _ in range(17):
         response = store.process_move(
             nid,
             MoveRequest(expected_version=version, side="candidate", move="check", package=sample_package()),
@@ -141,8 +144,8 @@ def test_daily_budget_never_runs_out_mid_negotiation(store):
         version = response.version
         assert _evaluation_budget(store, pid) == window_after_reservation  # check のたびに、1 日の予算は変わらない
 
-    # 16 回使い切った後の 17 回目は、交渉ごとの評価上限(evaluation_budget_exhausted)で
-    # 無効になる。日次予算が別途尽きて拒否されるわけではないことが、ここまでの 16 回が
+    # 17 回使い切った後の 18 回目は、交渉ごとの評価上限(evaluation_budget_exhausted)で
+    # 無効になる。日次予算が別途尽きて拒否されるわけではないことが、ここまでの 17 回が
     # すべて成功したことで確かめられている。
     response = store.process_move(
         nid, MoveRequest(expected_version=version, side="candidate", move="check", package=sample_package())
@@ -245,7 +248,7 @@ def test_a_stale_idempotency_key_of_a_live_negotiation_is_recreated_for_an_exist
     second = store.create_negotiation(request)
 
     assert second.status == "created" and second.nid != first.nid
-    assert _evaluation_budget(store, pid)["used"] == 32  # 作り直しで、予約もやり直された
+    assert _evaluation_budget(store, pid)["used"] == 34  # 作り直しで、予約もやり直された(17 × 2)
 
     store._negotiation_ref(second.nid).delete()
     store._principal_ref(pid).delete()  # 依頼者の文書もない
@@ -277,3 +280,87 @@ def test_a_live_negotiations_idempotency_key_carries_no_ttl(store):
     key = store._idempotency_ref("req-live-ttl").get().to_dict()
 
     assert "ttl_at" not in key
+
+
+# --- 冪等キーからの引き直し(GET /v1/negotiations/by-request/{request_id}。台帳 X-57) ---
+
+
+def test_a_request_id_resolves_to_the_negotiation_created_with_it_and_reading_writes_nothing(store):
+    # DV-12 / 台帳 X-57: 作成のキー(request_id)から、その交渉の nid を引ける(本物の候補者・デモの両方)。同じキーでの作成の
+    # 再送が返す交渉と同じ(二重に作られない)。読み出しだけで、交渉の文書も冪等キーも変えない(version も進めない)。
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    pid = new_id("principal")
+    put_candidate_policy(store, pid)
+    live_request = live_create_request(pid, employer_template.template_id, request_id=f"{pid}:request-0001")
+    demo_request = demo_create_request(
+        candidate_template.template_id, employer_template.template_id, request_id="demo:request-0001"
+    )
+    live, demo = store.create_negotiation(live_request), store.create_negotiation(demo_request)
+    assert live.nid != demo.nid
+
+    def stored_documents():
+        return [
+            (store._negotiation_ref(created.nid).get().to_dict(), store._idempotency_ref(request.request_id).get().to_dict())
+            for created, request in ((live, live_request), (demo, demo_request))
+        ]
+
+    before = stored_documents()
+
+    assert store.get_negotiation_by_request(live_request.request_id).nid == live.nid
+    assert store.get_negotiation_by_request(demo_request.request_id).nid == demo.nid
+    assert store.create_negotiation(live_request).nid == live.nid  # 同じキーでの作成の再送も、同じ交渉
+    assert store.create_negotiation(demo_request).nid == demo.nid
+    assert stored_documents() == before
+
+
+def test_an_unknown_request_id_is_not_found(store):
+    # DV-12 / 台帳 X-57: 一度も作っていないキーは 404(NotFoundError)。web は、これを受けて入場の判定と作成に進む。
+    # キーは完全に一致したものだけが引ける(似たキー・前の部分が同じキーでは引けない)。
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id, request_id="demo:request-0001")
+    )
+
+    for unknown in ("never-created", "demo:request-0002", "demo:request-000", "demo:request-00011"):
+        with pytest.raises(NotFoundError):
+            store.get_negotiation_by_request(unknown)
+
+
+def test_a_creation_the_vault_refused_leaves_no_key_to_find(store):
+    # DV-12 / 台帳 X-57・C-45: 金庫が断った作成(ここでは already_active)は、何も書かない。そのキーでは、あとから引けない
+    # (web は、断られた作成の再送を同じ交渉としては扱わず、もう一度入場の判定と作成を通す)。
+    _, first_employer_template = put_candidate_and_employer_templates(store._db)
+    second_employer_template = make_employer_template()
+    put_template(store._db, second_employer_template)
+    pid = new_id("principal")
+    put_candidate_policy(store, pid)
+    first = store.create_negotiation(
+        live_create_request(pid, first_employer_template.template_id, request_id="req-accepted")
+    )
+    refused = store.create_negotiation(
+        live_create_request(pid, second_employer_template.template_id, request_id="req-refused")
+    )
+    assert (refused.status, refused.reason) == ("refused", "already_active")
+
+    assert store.get_negotiation_by_request("req-accepted").nid == first.nid
+    with pytest.raises(NotFoundError):
+        store.get_negotiation_by_request("req-refused")
+
+
+def test_a_stale_key_without_its_negotiation_is_not_found_until_creation_replaces_it(store):
+    # DV-12 / 台帳 X-57・I-8: キーだけが残っていて、指す交渉がない(交渉が TTL や本人の削除で先に消えた)とき、404。nid を返すと、
+    # web は作成に進めず、存在しない交渉を返し続けてしまう。作成は古いキーを上書きして作り直し、その後は新しい nid が引ける。
+    candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
+    request = demo_create_request(
+        candidate_template.template_id, employer_template.template_id, request_id="req-stale-by-request"
+    )
+    first = store.create_negotiation(request)
+    store._negotiation_ref(first.nid).delete()  # 交渉だけが先に消えた(冪等キーは残っている)
+    assert store._idempotency_ref("req-stale-by-request").get().exists
+
+    with pytest.raises(NotFoundError):
+        store.get_negotiation_by_request("req-stale-by-request")
+
+    second = store.create_negotiation(request)
+    assert second.nid != first.nid
+    assert store.get_negotiation_by_request("req-stale-by-request").nid == second.nid

@@ -124,7 +124,7 @@ def test_reevaluation_after_answering_does_not_consume_evaluation_budget(store):
     # pending_offer と last_check の 2 件を評価し直しても、回数は 2 のまま増減しない。
     counters_after = store._negotiation_ref(nid).get().to_dict()["counters"]["employer"]
     assert counters_after["evaluations_used"] == 2
-    assert store.get_view(nid, "employer").budget.remaining_evaluations == 16 - 2
+    assert store.get_view(nid, "employer").budget.remaining_evaluations == 17 - 2
 
 
 # --- web(レフェリー)の部分(1d-1) ---

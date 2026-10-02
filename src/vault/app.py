@@ -28,6 +28,7 @@ from vault.api_models import (
     ExpireResponse,
     MoveRequest,
     MoveResponse,
+    NegotiationByRequestResponse,
     NegotiationViewResponse,
     OpenNegotiationsPage,
     PolicyView,
@@ -111,6 +112,15 @@ def create_app(store: VaultStore) -> FastAPI:
     @app.post("/v1/negotiations", response_model=CreateNegotiationResponse)
     def create_negotiation(body: CreateNegotiationRequest) -> CreateNegotiationResponse:
         return store.create_negotiation(body)
+
+    # --- §3.3: 作成の冪等キーから交渉の nid を引く(台帳 X-57。なければ 404)。
+    #     {nid}/view・{nid}/events より前に登録する(request_id が "view"・"events" でも、nid と取り違えない)。
+    #     :path にするのは、web が付ける request_id(依頼者 ID:画面の値)に "/" が入っても、別のパスとして
+    #     404 にならないようにするため(既知のキーが見つからないと、作成の冪等性が崩れる) ---
+
+    @app.get("/v1/negotiations/by-request/{request_id:path}", response_model=NegotiationByRequestResponse)
+    def get_negotiation_by_request(request_id: str) -> NegotiationByRequestResponse:
+        return store.get_negotiation_by_request(request_id)
 
     @app.get("/v1/negotiations", response_model=OpenNegotiationsPage)
     def list_open_negotiations(

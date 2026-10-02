@@ -138,6 +138,18 @@ class CreateNegotiationResponse(VaultModel):
     reason: CreationRefusalReason | None = None
 
 
+# --- GET /v1/negotiations/by-request/{request_id} ---
+
+
+class NegotiationByRequestResponse(VaultModel):
+    """GET /v1/negotiations/by-request/{request_id} の応答(§3.3。台帳 X-57)。
+
+    作成の冪等キーから引いた、すでに作った交渉の nid だけを返す(なければ 404)。
+    """
+
+    nid: str
+
+
 # --- GET .../view ---
 
 
@@ -241,8 +253,14 @@ class PrincipalAnswerResponse(VaultModel):
 
 
 class ControlRequest(VaultModel):
+    """POST /v1/negotiations/{nid}/control(§3.3・§3.4)。
+
+    stop_cost_limit は web の費用の歯止め(§8.2)だけが使う(画面からは呼べない。呼べないようにするのは
+    web の責務で、金庫は区別しない)。cancel と同じく side は使わない。
+    """
+
     side: Side
-    action: Literal["pause", "resume", "cancel"]
+    action: Literal["pause", "resume", "cancel", "stop_cost_limit"]
 
 
 class ControlResponse(VaultModel):
@@ -307,6 +325,7 @@ __all__ = [
     "Likelihood",
     "MoveRequest",
     "MoveResponse",
+    "NegotiationByRequestResponse",
     "NegotiationViewResponse",
     "OpenNegotiationSummary",
     "OpenNegotiationsPage",

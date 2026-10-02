@@ -248,8 +248,8 @@ def test_view_and_events_never_expose_the_counterparty_remaining_budget(store):
         "version",
         "result",
     }
-    assert candidate_view.budget.remaining_evaluations == 15  # 自分(candidate)の残りだけ
-    assert employer_view.budget.remaining_evaluations == 16  # 相手はまだ 1 回も使っていない
+    assert candidate_view.budget.remaining_evaluations == 16  # 自分(candidate)の残りだけ
+    assert employer_view.budget.remaining_evaluations == 17  # 相手はまだ 1 回も使っていない
 
     # イベントの見え方(EventViewItem)には version も budget も、そもそも項目自体がない。
     events = store.get_events(nid, "candidate")

@@ -46,8 +46,8 @@ def test_valid_check_does_not_count_toward_moves_but_invalid_check_does(store):
     package = sample_package()
     version = 0
 
-    # 評価回数(16)を使い切るまで、有効な check を繰り返す。手数は 1 つも減らない。
-    for _ in range(16):
+    # 評価回数(17)を使い切るまで、有効な check を繰り返す。手数は 1 つも減らない。
+    for _ in range(17):
         response = store.process_move(
             nid, MoveRequest(expected_version=version, side="candidate", move="check", package=package)
         )
@@ -58,7 +58,7 @@ def test_valid_check_does_not_count_toward_moves_but_invalid_check_does(store):
     assert view.budget.remaining_evaluations == 0
     assert view.budget.remaining_moves == 6  # 有効な check はここまで 1 つも数えていない
 
-    # 17 回目の check は無効(evaluation_budget_exhausted)。これは手数を 1 進める。
+    # 18 回目の check は無効(evaluation_budget_exhausted)。これは手数を 1 進める。
     response = store.process_move(
         nid, MoveRequest(expected_version=version, side="candidate", move="check", package=package)
     )

@@ -1,10 +1,10 @@
 """DV-02(次の部分。「会う」・段 2 の承認は除く): design.md §3.3・§3.4・§3.5・§4.4。
 
 同じ expected_version の手(check を含む)を並行して 10 本送ると 1 本だけが通り、残りは
-何も消費せず 409 になること。上限を超える消費が起きないこと。control と expire は
-何度呼んでも同じ結果で 409 にならないこと。accept の直後に取消を並行して送っても
-結果が 2 通りにならないこと。手・一時停止・再開・期限切れを交互に起こしても記録が
-上書きされないこと。途中確認の回答が並行・再送で 1 回しか効かず、再試行が尽きたら
+何も消費せず 409 になること。上限を超える消費が起きないこと。control(費用の上限での停止
+stop_cost_limit を含む。台帳 X-52)と expire は何度呼んでも同じ結果で 409 にならないこと。
+accept の直後に取消(や費用の上限での停止)を並行して送っても結果が 2 通りにならないこと。
+手・一時停止・再開・期限切れを交互に起こしても記録が上書きされないこと。途中確認の回答が並行・再送で 1 回しか効かず、再試行が尽きたら
 409 になることを確かめる。
 
 並行の 10 本の確認は、性質を 2 つに分け、どちらも条件なしで確かめる(台帳 I-5)。エミュレータは粗いロックで、
@@ -89,10 +89,10 @@ def test_ten_concurrent_moves_at_the_same_version_let_at_most_one_through_and_a_
     resent_wins = 0 if _is_conflict(resent) else 1
     assert len(concurrent_wins) + resent_wins == 1
 
-    # 失敗した 9 本(または 10 本)は、何も消費していない: version は 1、評価の残りは 15、記録は 1 件。
+    # 失敗した 9 本(または 10 本)は、何も消費していない: version は 1、評価の残りは 16、記録は 1 件。
     view = store.get_view(nid, "candidate")
     assert view.version == 1
-    assert view.budget.remaining_evaluations == 15
+    assert view.budget.remaining_evaluations == 16
     assert len(store.get_events(nid, "candidate")) == 1
 
 
@@ -140,7 +140,7 @@ def test_concurrent_principal_answers_at_the_same_version_let_at_most_one_throug
 
 def test_concurrent_bursts_never_let_the_evaluation_budget_go_negative(store):
     # DV-02: 上限を超える消費が起きない。評価回数の残りぶんを超える並行 check を
-    # 繰り返し送っても、最終的な消費はちょうど上限(16)で止まり、それ以上は増えない。
+    # 繰り返し送っても、最終的な消費はちょうど上限(17)で止まり、それ以上は増えない。
     nid = _create(store)
     package = sample_package()
 
@@ -158,12 +158,12 @@ def test_concurrent_bursts_never_let_the_evaluation_budget_go_negative(store):
         if ok_results:
             version = ok_results[0].version
         rounds += 1
-        assert rounds < 100  # 無限ループ防止(理論上 16 ラウンドで尽きるはず)
+        assert rounds < 100  # 無限ループ防止(理論上 17 ラウンドで尽きるはず)
 
     final_view = store.get_view(nid, "candidate")
     assert final_view.budget.remaining_evaluations == 0
     doc = store._negotiation_ref(nid).get().to_dict()
-    assert doc["counters"]["candidate"]["evaluations_used"] == 16  # 16 を超えない
+    assert doc["counters"]["candidate"]["evaluations_used"] == 17  # 17 を超えない
 
 
 def _retry_transient(fn, attempts=8):
@@ -231,8 +231,36 @@ def test_control_and_expire_are_idempotent_under_repetition_and_never_409(store)
         assert response.version == resumed_version
 
 
-def test_concurrent_accept_and_cancel_do_not_produce_two_outcomes(store):
-    # DV-02: accept の直後に取消を並行して送っても、結果が 2 通りにならない
+def test_stop_cost_limit_is_idempotent_under_repetition_and_never_409(store):
+    # DV-02 / 台帳 X-52: stop_cost_limit は、交渉が進んでいる最中でも 409 にならず、何度呼んでも(並行・逐次とも)1 回しか効かない
+    # (version が 1 しか進まず、終了の記録が 1 件だけ残る)。
+    nid = _create(store)
+    moved = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="check", package=sample_package())
+    )
+    stop = ControlRequest(side="candidate", action="stop_cost_limit")
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: _retry_transient(lambda: store.control(nid, stop)), range(4)))
+    assert all(r.status == "judged" for r in results)  # 例外(409)は一切起きない
+    assert {r.version for r in results} == {moved.version + 1}  # どの応答も同じ version: 効いたのは 1 回だけ
+
+    for _ in range(5):  # 逐次で何度呼んでも、状態も version も変わらない(冪等)
+        response = store.control(nid, stop)
+        assert (response.status, response.version) == ("judged", moved.version + 1)
+
+    doc = store._negotiation_ref(nid).get().to_dict()
+    assert (doc["end_reason"], doc["version"]) == ("stopped_cost", moved.version + 1)
+    assert len(list(store._events(nid).stream())) == 2  # check と終了の 2 件だけ(終了の記録が重ならない)
+    for side in ("candidate", "employer"):
+        assert [e.kind for e in store.get_events(nid, side)].count("final_result") == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "stop_reason"), [("cancel", "cancelled"), ("stop_cost_limit", "stopped_cost")]
+)
+def test_concurrent_accept_and_cancel_or_cost_stop_do_not_produce_two_outcomes(store, action, stop_reason):
+    # DV-02: accept の直後に取消(または費用の上限での停止。台帳 X-52)を並行して送っても、結果が 2 通りにならない
     # (judged の理由も、最終記録も、ちょうど 1 つに定まる)。
     nid = _create(store)
     package = sample_package()
@@ -245,7 +273,7 @@ def test_concurrent_accept_and_cancel_do_not_produce_two_outcomes(store):
         return _try_move(store, nid, MoveRequest(expected_version=v, side="employer", move="accept"))
 
     def do_cancel():
-        return store.control(nid, ControlRequest(side="candidate", action="cancel"))
+        return store.control(nid, ControlRequest(side="candidate", action=action))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         accept_future = pool.submit(do_accept)
@@ -255,14 +283,14 @@ def test_concurrent_accept_and_cancel_do_not_produce_two_outcomes(store):
 
     doc = store._negotiation_ref(nid).get().to_dict()
     assert doc["status"] == "judged"
-    assert doc["end_reason"] in ("agreed", "cancelled")  # ちょうど 1 つに定まる
+    assert doc["end_reason"] in ("agreed", stop_reason)  # ちょうど 1 つに定まる
 
     for side in ("candidate", "employer"):
         final_events = [e for e in store.get_events(nid, side) if e.kind == "final_result"]
         assert len(final_events) == 1  # 二重に記録されていない
 
-    # accept と cancel のどちらが勝っても、負けた側は例外(409)か、すでに judged 後の
-    # no-op のどちらかであり、勝者の結果を上書きしない。
+    # accept と cancel(または stop_cost_limit)のどちらが勝っても、負けた側は例外(409)か、
+    # すでに judged 後の no-op のどちらかであり、勝者の結果を上書きしない。
     if doc["end_reason"] == "agreed":
         assert not _is_conflict(accept_result)
         assert accept_result.status == "judged"

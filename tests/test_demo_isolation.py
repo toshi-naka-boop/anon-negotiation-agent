@@ -46,7 +46,7 @@ def test_two_concurrent_demos_do_not_share_counters(store):
 
     # デモ 2 では、まだ何も操作していないので、評価回数は満額残っているはず。
     demo_2_view = store.get_view(demo_2.nid, "candidate")
-    assert demo_2_view.budget.remaining_evaluations == 16
+    assert demo_2_view.budget.remaining_evaluations == 17
 
     # デモ 2 で check を 1 回。デモ 1 の残りには影響しない。
     v2 = 0
@@ -58,8 +58,8 @@ def test_two_concurrent_demos_do_not_share_counters(store):
 
     demo_1_view = store.get_view(demo_1.nid, "candidate")
     demo_2_view = store.get_view(demo_2.nid, "candidate")
-    assert demo_1_view.budget.remaining_evaluations == 16 - 3
-    assert demo_2_view.budget.remaining_evaluations == 16 - 1
+    assert demo_1_view.budget.remaining_evaluations == 17 - 3
+    assert demo_2_view.budget.remaining_evaluations == 17 - 1
 
     # イベント数もそれぞれ独立している。
     assert len(store.get_events(demo_1.nid, "candidate")) == 3

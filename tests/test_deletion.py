@@ -1,7 +1,7 @@
 """AC-17(次の 2 点。見回りで期限切れにする部分は後の段): design.md §3.1・§3.8。
 
 終わった交渉のコピーが、終了処理の後に残らない(合意・取消・期限切れ・上限での停止・
-エージェントの終了のどれでも)。デモ・攻撃の交渉の文書とイベントの各記録に TTL の項目が
+エージェントの終了・費用の上限での停止のどれでも)。デモ・攻撃の交渉の文書とイベントの各記録に TTL の項目が
 付き、本物の利用者の交渉には付かない。
 """
 
@@ -116,6 +116,16 @@ def test_snapshots_are_gone_after_ended_by_agent(store):
     nid = _create_demo(store)
     response = store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move="end"))
     assert response.end_reason == "ended_by_agent"
+    assert _snapshots_of(store, nid) is None
+
+
+def test_snapshots_are_gone_after_stop_cost_limit(store):
+    # AC-17: 費用の上限での停止(control の stop_cost_limit。台帳 X-52)でも、終了処理でコピーが消える。
+    # 一時停止中・途中確認中からの停止は tests/test_stop_cost_limit.py。
+    nid = _create_demo(store)
+    response = store.control(nid, ControlRequest(side="candidate", action="stop_cost_limit"))
+    assert response.status == "judged"
+    assert store._negotiation_ref(nid).get().to_dict()["end_reason"] == "stopped_cost"
     assert _snapshots_of(store, nid) is None
 
 
