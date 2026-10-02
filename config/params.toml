@@ -89,6 +89,15 @@ grid = ["medical_welfare", "it_web", "sales", "administration", "other"]
 model = "gemini-3.5-flash"
 # 交渉の探索を揺らさないため 0(§4.2)
 temperature = 0
+# 思考の量(§4.2・R-9。thinking_level: MINIMAL / LOW / MEDIUM / HIGH。3.5 Flash の既定は MEDIUM)。
+# 設計書 v14 の暫定は 計画 LOW・決定 MINIMAL だが、ユーザーの指示(2026-10-02: 費用より品質を優先。台帳 I-18)で、
+# 計画は既定の MEDIUM、決定は LOW から始める。DV-15 の実測を見てから下げる。
+plan_thinking_level = "MEDIUM"
+decide_thinking_level = "LOW"
+# 1 回の呼び出しの出力＋思考の上限(§4.2・台帳 X-50)。切れた出力は output_truncated の無効手になる(台帳 C-53)
+max_output_tokens = 2048
+# google-genai のクライアント側の自動再試行の回数(1 = 再試行なし。§4.2・台帳 X-55)。再試行はレフェリーだけが行う
+http_retry_attempts = 1
 # 受信本文の上限(バイト。暫定 32 KB。§4.3・U-03)
 max_request_body_bytes = 32768
 # 1 回の LLM 実行の上限(秒)。レフェリーの 1 呼び出しの上限(暫定 60 秒。§4.1)より短くする。
@@ -97,20 +106,37 @@ llm_timeout_seconds = 45
 # Agent Card に載せる、agents サービスの公開 URL。デプロイ時に差し替える(ローカル開発用の仮の値)。
 public_base_url = "http://localhost:8080"
 
+[agents.cost_targets]
+# DV-15(design.md §12.2)の判定の基準。scripts/run_demo.py --judge が使う。設計書の数値は暫定で、正本はここ。
+# 費用の上限(ドル/交渉)。設計書 v14 の暫定 0.15 を、ユーザーの指示(品質を優先。台帳 I-18)で 0.25 にした
+max_cost_usd_per_negotiation = 0.25
+# 200 応答の呼び出しの上限: 手の数(無効手と有効な途中確認を含む)× この値、かつ max_successful_calls 以下(§4.1)
+max_calls_per_move = 2
+max_successful_calls = 28
+# 思考トークン数の基準値(② の実測。台帳 I-15: 思考 $0.63 ÷ 単価 $9/100 万 ÷ 約 85 回)と、1 呼び出しの平均に許す比率。
+# 設計書 v14 の暫定は 0.5(半分以下)。品質を優先する指示で 1.0(基準値を超えないこと)にした
+thinking_tokens_baseline = 820
+max_avg_thinking_ratio = 1.0
+# 単価(ドル/100 万トークン。Vertex AI、global。調査 R-9、確認日 2026-10-02)。変えたら price_version も変える
+price_version = "2026-10-02"
+input_usd_per_million = 1.50
+cached_input_usd_per_million = 0.15
+output_usd_per_million = 9.00
+
 # --- vault が使う暫定値(design.md §3)。1b-1 の実装範囲でだけ使う ---
 # 上限・期限・寿命・TTL・T_high・1 日の予算はすべて未決事項(U-03・U-04・U-06)の暫定値。
 
 [vault.limits]
-# 評価回数の上限(自分の手で起きた評価だけ。側ごと。§3.5)
-evaluation_budget_per_side = 16
+# 評価回数の上限(自分の手で起きた評価だけ。側ごと。§3.5)。v14 で 16 から 17 にした(手数 6 ＋ 確かめ 10 ＋ 途中確認 1。台帳 X-59)
+evaluation_budget_per_side = 17
 # 手数の上限(有効な check・有効な ask_principal を除く。無効手を含む。側ごと。§3.5・台帳 C-38)
 moves_budget_per_side = 6
 # 途中確認の上限(側ごと。合計 2。§3.5・U-04)
 principal_checks_per_side = 1
 # 連続無効手の上限(側ごと。§3.5)
 consecutive_invalid_limit = 3
-# 本物の依頼者ごとの 24 時間の評価予算(交渉ごとに予約で引く。§3.5)
-daily_evaluation_budget_per_principal = 160
+# 本物の依頼者ごとの 24 時間の評価予算(交渉ごとに予約で引く。固定の窓。§3.5)。v14 で 160 から 170(評価 17 × 10 件)
+daily_evaluation_budget_per_principal = 170
 
 [vault.deadlines]
 # 交渉の絶対の寿命(作成時刻から。秒。§3.4)
@@ -149,6 +175,17 @@ wait_poll_interval_seconds = 2.0
 [web.sweeper]
 # 交渉の見回りの間隔(秒。起動時にも 1 回行う)
 interval_seconds = 60
+
+[web.llm_budget]
+# LLM に実際に送る回数の上限(design.md §4.1・§8.2。台帳 X-46・X-47・X-50・X-56)。送る前に数え、429・5xx でも戻さない。
+# 1 日は日本時間の 0 時区切り。発表の日は設定で上げる(大きく上げるときは分散カウンタにする。台帳 L14-7)
+daily_limit = 1500
+# 交渉ごとの上限(正常な上限 28 ＋ 429・再試行・409・再起動の余裕 16)。達したら control{stop_cost_limit} で「なし」
+per_negotiation_limit = 44
+# 1 日のカウンタの文書の TTL(秒。7 日)
+daily_counter_ttl_seconds = 604800
+# 計画 1 回で確かめる数の上限(§2.7。negotiation_core.MAX_PLANNED_CHECKS と同じ)
+max_checks_per_plan = 3
 
 # --- web が使う暫定値(design.md §6.3・§4.1・§3.8、台帳 I-6)。1d-2 の実装範囲(依頼者のセッション・利用記録・削除)で使う ---
 # 29 日・1 時間・30 日・10 分ごと・96 時間は、設計書の暫定値(未決事項 U-03 ほか)。決まったらここを差し替える。
