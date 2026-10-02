@@ -24,7 +24,6 @@ import agents.llm_agents as llm_agents
 from agents.app import create_app
 from agents.config import DEFAULT_AGENTS_CONFIG
 from agents.instructions import load_instruction
-from agents.output_schema import build_output_schema
 from agents.wire import PHASES
 from agents_helpers import (  # noqa: F401  (フィクスチャは import して使う)
     NID,
@@ -88,8 +87,8 @@ async def test_llm_input_is_the_fixed_preamble_and_the_turn_input_only(role, pha
     assert recorded.thinking_config.thinking_level == _configured_level(phase)
     assert recorded.temperature == DEFAULT_AGENTS_CONFIG.temperature == 0
     assert recorded.max_output_tokens == DEFAULT_AGENTS_CONFIG.max_output_tokens
-    # 出力スキーマは decide だけ Move。plan は JSON モード(応答スキーマなし。台帳 I-19)。ツールは持たない
-    assert recorded.response_schema == build_output_schema(phase)
+    # 計画・決定とも JSON モード(応答スキーマなし。台帳 I-19)。ツールは持たない
+    assert recorded.response_schema is None
     assert recorded.response_mime_type == "application/json"
     assert not recorded.tools
 
@@ -151,9 +150,9 @@ async def test_plan_and_decide_run_different_runners(agents_app, http, stub_llm)
 
     assert recorder.names == [f"{role}_{phase}_agent" for role in ROLES for phase in PHASES]
     assert len(stub_llm.requests) == 6
-    # 計画の Runner は応答スキーマなし(JSON モード)、決定の Runner には Move のスキーマ
-    schemas = [request.response_schema for request in stub_llm.requests]
-    assert schemas == [build_output_schema(phase) for _ in ROLES for phase in PHASES]
+    # どの Runner も応答スキーマなし(JSON モード。台帳 I-19)
+    assert [request.response_schema for request in stub_llm.requests] == [None] * 6
+    assert all(request.response_mime_type == "application/json" for request in stub_llm.requests)
 
 
 @pytest.mark.parametrize("phase", PHASES)

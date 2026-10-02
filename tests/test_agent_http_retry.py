@@ -268,12 +268,7 @@ async def test_the_http_request_carries_the_configured_generation_settings(phase
     assert config["maxOutputTokens"] == DEFAULT_AGENTS_CONFIG.max_output_tokens
     assert config["temperature"] == DEFAULT_AGENTS_CONFIG.temperature == 0
     assert config["responseMimeType"] == "application/json"
-    if phase == "decide":
-        schema_properties = config["responseSchema"]["properties"]  # 決定の出力スキーマ(Move)
-        assert "checks" not in schema_properties
-        assert schema_properties["schema"]["enum"] == ["move/v1"]
-    else:
-        assert "responseSchema" not in config  # 計画は JSON モード(応答スキーマなし。台帳 I-19)
+    assert "responseSchema" not in config  # 計画・決定とも JSON モード(応答スキーマなし。台帳 I-19)
     assert sent["systemInstruction"]["parts"] == [{"text": load_instruction("candidate")}]  # 前文だけ
     (content,) = sent["contents"]
     assert content["role"] == "user" and len(content["parts"]) == 1  # TurnInput の JSON が 1 件だけ
