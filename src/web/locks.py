@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from negotiation_core import Side
 
 from vault.api_models import (
+    ControlResponse,
     EventViewItem,
     MoveRequest,
     MoveResponse,
@@ -96,3 +97,7 @@ class PrincipalScopedVault:
     ) -> PrincipalAnswerResponse:
         async with self._locks.lock(self._principal_id):
             return await self._vault.post_principal_answer(nid, request)
+
+    async def stop_cost_limit(self, nid: str) -> ControlResponse:
+        async with self._locks.lock(self._principal_id):
+            return await self._vault.stop_cost_limit(nid)

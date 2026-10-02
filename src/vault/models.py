@@ -47,8 +47,9 @@ VaultMoveKind = Literal["propose", "accept", "reject", "check", "ask_principal",
 # move="invalid" で外から登録できる理由。金庫自身のガードが見つける理由
 # (off_grid・not_acceptable_to_own_principal・... )は、金庫がその場で自動的に付けるので、
 # 外からの登録では受け付けない(§3.5 の表の最終行: "レフェリーが見つけた無効手
-# (スキーマ違反、タイムアウト、A2A のエラー)を登録する")。
-RegisteredInvalidReason = Literal["schema_invalid", "agent_timeout"]
+# (スキーマ違反、タイムアウト、A2A のエラー)を登録する")。output_truncated は、出力が max_output_tokens で
+# 切れた呼び出し(§2.7・台帳 C-53。レフェリーが見つける)。
+RegisteredInvalidReason = Literal["schema_invalid", "agent_timeout", "output_truncated"]
 
 # POST .../principal-answer が受け付ける回答(§3.3・§4.4)。「受ける」は受けるアンカー、
 # 「受けない」は受けないアンカーへの追記に対応する。

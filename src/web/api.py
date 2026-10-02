@@ -19,6 +19,14 @@
 金庫に書く前に、利用記録 principals_meta がなければならない(面談の送信が作る。§5 の手順 9)。
 ブロックリストの登録と交渉の作成は、面談を送っていない(利用記録がない)依頼者には 409 で断る。
 
+交渉の作成(ライブ・デモ。§8.2・§3.3。台帳 C-45・X-53・X-57)は、金庫に作る前に、次の順で確かめる。
+1. 金庫の by-request(冪等キーの正本)を引き、既知のキーなら、作成も入場の制限もせずに、同じ交渉を返す(再送は、起動時の 503 と
+   入場の制限より先に通す)。
+2. 起動時の見回りが 1 回終わるまでは、新規の作成を受け付けない(503)。
+3. 入場の制限: 「その日の物理の数 ＋ 進行中の交渉の未消化分 ＋ 新しい交渉 1 件ぶんの上限」が 1 日の枠を超えるなら、429
+   (画面は「本日の上限に達しました」と出す)。数えられないとき(Firestore の失敗)は 503(閉じる側)。
+入場の制限は読むだけで、何も書かない(予約の記録を持たない)。二度押し・再送・金庫の拒否(already_active など)は、枠を消費しない。
+
 ログには、例外の型名だけを書く(組み合わせの値・クッキー・依頼者の入力は書かない)。
 """
 
@@ -51,6 +59,7 @@ from web.api_models import (
     PrincipalAnswerBody,
 )
 from web.deletion import DeletionOutcome
+from web.llm_budget import LlmBudgetUnavailable
 from web.referee import NegotiationContext
 from web.services import WebServices
 from web.session import PrincipalSession
@@ -105,6 +114,17 @@ def build_router(services: WebServices) -> APIRouter:
         except Exception as exc:
             _log.error("stage creation failed after negotiation creation error=%s", type(exc).__name__)
         services.referees.start(NegotiationContext(nid=nid, mode=mode, candidate_principal_id=principal_id))
+
+    async def admit_new_negotiation() -> None:
+        """新しい交渉(ライブ・デモ)を受け付けてよいか(入場の制限。§8.2)。受け付けられなければ HTTPException。"""
+        if not services.sweeper.first_sweep_done:
+            raise HTTPException(status_code=503, detail="starting_up")  # 進行中の交渉の一覧が、まだそろっていない
+        try:
+            admitted = await services.llm_budget.admits_new_negotiation(services.referees.running_nids())
+        except LlmBudgetUnavailable:
+            raise HTTPException(status_code=503, detail="temporarily_unavailable") from None
+        if not admitted:
+            raise HTTPException(status_code=429, detail="daily_limit_reached")
 
     # ------------------------------------------------------------------
     # 開始ページ(§6.3: 依頼者 ID を発行するのは、ここでだけ)
@@ -166,9 +186,15 @@ def build_router(services: WebServices) -> APIRouter:
     ) -> dict[str, str]:
         """本物の候補者が、求人(フィクスチャのテンプレート)を 1 件選んで交渉を始める(§6.1)。"""
         require_registered(session)
+        request_id = f"{pid}:{body.request_id}"  # 依頼者ごとの名前空間(他人の交渉 ID を返されない)
+        known = await vault.get_negotiation_by_request(request_id)
+        if known is not None:  # 同じ request_id の再送。入場の制限を通さずに、同じ交渉を返す(台帳 X-57)
+            await register_created_negotiation(known, "live", pid)
+            return {"nid": known}
+        await admit_new_negotiation()
         created = await vault.create_negotiation(
             CreateNegotiationRequest(
-                request_id=f"{pid}:{body.request_id}",  # 依頼者ごとの名前空間(他人の交渉 ID を返されない)
+                request_id=request_id,
                 mode="live",
                 candidate=CandidateParticipantRequest(is_fictional=False, principal_id=pid),
                 employer=EmployerParticipantRequest(template_id=body.employer_template_id),
@@ -251,9 +277,15 @@ def build_router(services: WebServices) -> APIRouter:
     @router.post("/v1/demo/negotiations")
     async def create_demo_negotiation(body: DemoCreateBody) -> dict[str, str]:
         """デモの交渉を、架空人物のテンプレートから作る(§3.7)。モードは demo 固定、依頼者は関わらない。"""
+        request_id = f"demo:{body.request_id}"
+        known = await vault.get_negotiation_by_request(request_id)
+        if known is not None:  # 同じ request_id の再送。入場の制限を通さずに、同じ交渉を返す(台帳 X-57)
+            await register_created_negotiation(known, "demo", None)
+            return {"nid": known}
+        await admit_new_negotiation()
         created = await vault.create_negotiation(
             CreateNegotiationRequest(
-                request_id=f"demo:{body.request_id}",
+                request_id=request_id,
                 mode="demo",
                 candidate=CandidateParticipantRequest(is_fictional=True, template_id=body.candidate_template_id),
                 employer=EmployerParticipantRequest(template_id=body.employer_template_id),

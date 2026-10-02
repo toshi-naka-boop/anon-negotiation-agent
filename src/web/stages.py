@@ -5,6 +5,8 @@
 - デモ・攻撃の段の状態に、金庫と同じ 96 時間の期限の項目(ttl_at)を付ける(台帳 I-6)。
 - デモ用のエンドポイントが、架空の候補者の交渉かを確かめる口(is_fictional_negotiation)。
 段の遷移(会う・承認・匿名職務要約)は後の段(④)で足す。
+交渉ごとの LLM の物理の呼び出し数(llm_calls。web.llm_budget が、送る前のトランザクションで進める。§8.2)も、この文書の項目
+として持つ(TTL と削除は段の状態と同じ。台帳 L13-5)。作成のときは 0 から始める。
 
 stages/{nid} は、交渉の作成直後に作る。作り損ねても、見回り(§4.1)と、画面で交渉を開いたときに、
 なければ作る(冪等)。そのため、判定の後に web が落ちても、段階開示の状態は失われない(DV-08)。
@@ -47,6 +49,7 @@ class StageDocument(BaseModel):
     stage: int = 0
     created_at: dt.datetime
     ttl_at: dt.datetime | None = None  # デモ・攻撃(候補者が架空人物)にだけ付ける(台帳 I-6)
+    llm_calls: int = 0  # この交渉の、LLM への物理の呼び出し数(§8.2。web.llm_budget が進める)
 
 
 class StageStore:

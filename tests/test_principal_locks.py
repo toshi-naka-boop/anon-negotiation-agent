@@ -384,7 +384,7 @@ async def test_the_referees_vault_calls_for_a_real_principal_wait_for_the_princi
     )
     live_referee = Referee(NegotiationContext(nid, "live", pid), deps)
     demo_referee = Referee(NegotiationContext(demo_nid, "demo", None), deps)
-    web_app.agents.script("candidate", move_dict("check", sample_package()), move_dict("check", sample_package()))
+    web_app.agents.script("candidate", move_dict("propose", sample_package()), move_dict("propose", sample_package()))
 
     async with web_app.services.locks.lock(pid):  # 別の操作が、この依頼者のロックを持っている
         live_step = asyncio.create_task(live_referee.step())
@@ -441,7 +441,7 @@ async def test_the_deletion_does_not_wait_for_the_agent_and_the_referee_task_end
 
     async def slow_reply(call):
         await reply.wait()
-        return move_dict("check", sample_package())
+        return move_dict("propose", sample_package())
 
     web_app.enable_referees()
     web_app.agents.script("candidate", slow_reply)

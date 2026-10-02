@@ -157,7 +157,7 @@ async def test_the_referee_logs_no_ids_when_the_agent_fails(store, web_env, web_
 
     assert "registering invalid move side=candidate reason=schema_invalid" in web_logs.text
     assert "registering invalid move side=candidate reason=agent_timeout" in web_logs.text
-    assert "agent call failed side=candidate error=RuntimeError" in web_logs.text
+    assert "agent call failed side=candidate phase=plan error=RuntimeError" in web_logs.text
     assert_ids_are_absent(web_logs, nid, pid)
 
 

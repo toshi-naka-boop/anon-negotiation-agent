@@ -1,8 +1,9 @@
 """金庫の内部 HTTP・JSON API を呼ぶ非同期クライアント(design.md §3.3・§4.1)。
 
 レフェリー・見回りが使う口(view・events・moves・principal-answer・control・expire・見回りの一覧
-(open=true))と、本人の操作・削除の流れが使う口(policy の PUT・GET、blocklist の PUT、本人の削除、
-本人の交渉一覧、交渉の作成)と、デモ用の読み出しの口(demo の events。台帳 X-38)を持つ。
+(open=true)・費用の上限での停止 stop_cost_limit)と、本人の操作・削除の流れが使う口(policy の PUT・GET、blocklist の PUT、
+本人の削除、本人の交渉一覧、交渉の作成、作成の冪等キーからの引き当て by-request)と、デモ用の読み出しの口(demo の events。
+台帳 X-38)を持つ。
 リクエスト・レスポンスの型は vault.api_models をそのまま使う(同じ形を二重に書かない)。
 
 サービス間の認証(Cloud Run の ID トークン。台帳 X-37)は、この httpx.AsyncClient の認証(`auth=`)として
@@ -14,6 +15,7 @@ AsyncClient(httpx.ASGITransport)を渡す。
 """
 
 from typing import TypeVar
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel
@@ -81,12 +83,14 @@ class VaultClient:
         *,
         params: dict | None = None,
         body: BaseModel | None = None,
+        json_body: dict | None = None,
     ):
         """リクエストを送り、失敗(4xx・5xx・通信エラー)は例外にして、成功した JSON を返す。
 
-        本文のない成功(204。PUT・DELETE)は None を返す。
+        本文のない成功(204。PUT・DELETE)は None を返す。本文は、型のあるもの(body)か、そのままの JSON(json_body)。
         """
-        json_body = body.model_dump(mode="json", exclude_none=True) if body is not None else None
+        if body is not None:
+            json_body = body.model_dump(mode="json", exclude_none=True)
         try:
             response = await self._http.request(method, path, params=params, json=json_body)
         except httpx.TransportError as exc:
@@ -168,6 +172,20 @@ class VaultClient:
         """POST /v1/negotiations/{nid}/control(一時停止・再開・取消。冪等)。"""
         return await self._request("POST", f"/v1/negotiations/{nid}/control", ControlResponse, body=request)
 
+    async def stop_cost_limit(self, nid: str) -> ControlResponse:
+        """POST /v1/negotiations/{nid}/control の action=stop_cost_limit(費用の上限での停止。§3.4・§8.2。台帳 X-52)。
+
+        冪等で、judged でなければどの状態(一時停止中・途中確認中を含む)からでも「なし」で終える。expected_version は取らない。
+        web の費用の歯止め(§8.2)だけが使い、画面からは呼ばない。side は金庫が使わない(どちらでもよい)ので、候補者側を渡す。
+        ControlRequest(型の action に stop_cost_limit を持つ)を通さず、JSON をそのまま送る。
+        """
+        data = await self._send(
+            "POST",
+            f"/v1/negotiations/{nid}/control",
+            json_body={"side": "candidate", "action": "stop_cost_limit"},
+        )
+        return ControlResponse.model_validate(data, strict=False)
+
     async def expire(self, nid: str) -> ExpireResponse:
         """POST /v1/negotiations/{nid}/expire(期限を過ぎていれば終了処理。冪等)。"""
         return await self._request("POST", f"/v1/negotiations/{nid}/expire", ExpireResponse)
@@ -214,3 +232,17 @@ class VaultClient:
     async def create_negotiation(self, request: CreateNegotiationRequest) -> CreateNegotiationResponse:
         """POST /v1/negotiations(request_id で冪等。断られたときは status=refused と reason。§3.5)。"""
         return await self._request("POST", "/v1/negotiations", CreateNegotiationResponse, body=request)
+
+    async def get_negotiation_by_request(self, request_id: str) -> str | None:
+        """GET /v1/negotiations/by-request/{request_id}(冪等キーから、すでに作った交渉の nid を引く。§3.3・台帳 X-57)。
+
+        冪等キーの正本は金庫にある。作成の前にこれを読み、既知のキーなら、作成も入場の判定もせずに同じ交渉を返す。
+        金庫が 404(まだ知らないキー)を返したら None。request_id は、web が作る名前空間つきの値(「依頼者 ID:画面の乱数」など)で、
+        どんな文字が入っても 1 つのパスの部分になるよう、符号化して送る。
+        """
+        try:
+            data = await self._send("GET", f"/v1/negotiations/by-request/{quote(request_id, safe='')}")
+        except VaultNotFoundError:
+            return None
+        nid = data.get("nid") if isinstance(data, dict) else None
+        return nid if isinstance(nid, str) else None

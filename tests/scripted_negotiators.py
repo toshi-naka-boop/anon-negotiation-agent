@@ -1,9 +1,15 @@
 """台本の交渉エージェント(LLM を使わない。design.md §8.4・§12.2 の DV-14)。
 
 交渉エージェント(Gemini)の代わりに、レフェリーの SendTurn の差し込み口に入れる。Gemini と同じく、TurnInput だけを見て
-Move を返す: 手番ごとに状態を持たず、直前の呼び出しの記憶がない(履歴・相手の提案・確認の結果は、すべて TurnInput から
-読み直す)。見えない条件(依頼者のポリシー)は、確認(check)と評価の 3 値からしか知れない。
+Plan・Move を返す: 手番ごとに状態を持たず、直前の呼び出しの記憶がない(履歴・相手の提案・確かめの結果は、すべて TurnInput から
+読み直す)。見えない条件(依頼者のポリシー)は、確かめと評価の 3 値からしか知れない。
 軸ごとの向き(どちらが自分の依頼者に良いか)は、TurnInput にないので、台本の側に持つ(指示文の「軸の向き」に当たる)。
+
+v14(§4.1・§4.2)の計画・決定の形で動く。1 手番に最大 2 回呼ばれる。
+- 計画(phase=plan): 確かめたい案を出したい順に並べて checks で返す(最大 max_checks 個)。確かめが要らないとき(相手の提案を
+  受ける・確かめずに出す型・受けられると分かっている案がすぐ出せる・確かめに使える評価が残っていない)は、checks を空にして、
+  手をそのまま返す(1 手番 1 回の呼び出し)。確かめは、レフェリーが金庫で実行する(エージェントは check という手を出せない)。
+- 決定(phase=decide): レフェリーが確かめた結果(checked と、読み直された history・last_check)から、手を 1 つ選ぶ。
 
 探し方は、7 巡目のシミュレーション(design/anon-negotiation-agent/reviews/round-7-sim/sim_case1.py の candidates_*・
 play_turn_budgeted)を移植した。そのシミュレーションでは、確認の結果をエージェントが自分の記憶に持っていたが、ここでは
@@ -14,12 +20,14 @@ TurnInput の history・pending_offer・last_check・last_invalid から作り�
 - concede: 年収を 1 段ずつ譲り、switch 回目の提案から他の軸も寄せる(3 行目は switch=1、4 行目は switch=3)
 
 手の選び方(シミュレーションの 1 手番と同じ)
-1. 相手の提案の評価が「受けられる」なら accept する。
+1. 相手の提案の評価が「受けられる」なら accept する(計画で、手として返す)。
 2. 候補の組み合わせ(探し方が決める)を順に見て、評価が「受けられる」と分かっているものを propose する。分からないものは、
-   確認(check)に使える評価が残っていれば check する(残りの評価が残りの手数以下なら確認しない。1 手番に max_checks 回まで)。
-3. 確認で「受けられる」組み合わせが見つからなければ、受けられると分かっている組み合わせのうち、相手の直前の提案に
+   計画の checks に並べる(出したい順。「受けられる」と分かっている案が来たら、そこまで。先に確かめた案より悪い案は、結果が
+   決まっているので並べない)。確かめに使える評価の数は、残りの評価回数 −(残りの手数 ＋ 残りの途中確認数)まで。1 手番に
+   max_checks 個まで。レフェリーは、並びの順に確かめ、「受けられる」が出たら残りは確かめない。
+3. 確かめで「受けられる」組み合わせが見つからなければ(決定)、受けられると分かっている組み合わせのうち、相手の直前の提案に
    いちばん近いものを propose する。
-check_first=False の探し方は、確認せずに候補の先頭を propose する(確認せずに譲歩案を出す型。7 巡目の表の 6 行目)。
+check_first=False の探し方は、確かめずに候補の先頭を propose する(確かめずに譲歩案を出す型。7 巡目の表の 6 行目)。
 途中確認(ask_principal)は使わない。ケース 1 のポリシーは、受けられる・受けられないがすべて決まっていて、
 「本人確認が必要」になる組み合わせがないので、使う場面がない。
 """
@@ -28,8 +36,8 @@ import itertools
 from dataclasses import dataclass
 from typing import Literal
 
-from negotiation_core import AXES, AXIS_KEYS, NUMERIC_AXIS_KEYS, Package, Side, TurnInput, Verdict
-from web_helpers import move_dict
+from negotiation_core import AXES, AXIS_KEYS, NUMERIC_AXIS_KEYS, Package, Side, TurnInput, Usage, Verdict
+from web_helpers import make_usage, move_dict, plan_dict
 
 # 7 軸のグリッド上の位置(AXIS_KEYS の順)。探し方の計算は、値ではなく位置で行う(シミュレーションと同じ)。
 Indices = tuple[int, ...]
@@ -93,23 +101,14 @@ def _known_evaluations(turn_input: TurnInput) -> dict[Indices, Verdict]:
     for evaluated in (turn_input.pending_offer, turn_input.last_check):  # 途中確認の回答で評価し直されたものを優先する
         if evaluated is not None:
             known[to_indices(evaluated.package)] = evaluated.own_evaluation
+    for checked in turn_input.checked:  # 決定の呼び出しで、レフェリーが確かめた結果(history・last_check にも出ているもの)
+        if checked.evaluation is not None:
+            known[to_indices(checked.package)] = checked.evaluation
     invalid = turn_input.last_invalid
     if invalid is not None and invalid.package is not None:
         # 確認せずに出して断られた組み合わせ。シミュレーションと同じく、「受けられるとは限らない」とだけ覚える。
         known[to_indices(invalid.package)] = Verdict.NEEDS_CONFIRMATION
     return known
-
-
-def _checks_this_turn(turn_input: TurnInput) -> int:
-    """この手番で、すでに使った確認の回数(history の末尾の、続けて確認した数)。直前の手が無効なら、数え直す。"""
-    if turn_input.last_invalid is not None:
-        return 0
-    count = 0
-    for entry in reversed(turn_input.history):
-        if entry.by != "self" or entry.move != "check":
-            break
-        count += 1
-    return count
 
 
 def _dominates_for(side: Side, better: Indices, worse: Indices) -> bool:
@@ -241,54 +240,103 @@ def _concede_candidates(
 _CANDIDATES = {"trade": _trade_candidates, "hybrid": _hybrid_candidates, "concede": _concede_candidates}
 
 
-# --- 1 手を決める ---
+# --- 1 手を決める(計画と決定) ---
 
 
-def decide(turn_input: TurnInput, negotiator: Negotiator) -> dict:
-    """TurnInput だけから、次の Move(dict)を決める。"""
+@dataclass(frozen=True)
+class _Scan:
+    """候補の組み合わせを順に見た結果。"""
+
+    chosen: Indices | None  # 「受けられる」と分かっている(または確かめずに出す)候補。なければ None
+    to_check: list[Indices]  # chosen より前にある、評価の分からない候補(確かめたい順)
+
+
+def _scan(turn_input: TurnInput, negotiator: Negotiator, *, check_limit: int) -> _Scan:
+    """候補の組み合わせを順に見る。評価の分かっている候補は使い、分からない候補は、確かめたい案として check_limit 個まで集める。
+
+    「受けられる」と分かっている候補が来たら、そこで止める(それが chosen)。確かめずに出す型(check_first=False)は、最初の
+    分からない候補を、そのまま chosen にする。先に集めた案より悪い案(その案が「受けられない」なら、これも「受けられない」と
+    決まる)は、確かめても結果が変わらないので集めない(monotone のとき)。check_limit に達したら、そこで止める。
+    """
     side = turn_input.side
     strategy = negotiator.strategy
-    pending = turn_input.pending_offer
-    if pending is not None and pending.own_evaluation is Verdict.ACCEPTABLE:
-        return move_dict("accept")
-
     opening = to_indices(negotiator.opening)
     mine, theirs = _proposals(turn_input)
     known = _known_evaluations(turn_input)
-    budget = turn_input.budget
-    chosen: Indices | None = None
+    to_check: list[Indices] = []
     for candidate in _CANDIDATES[strategy.kind](side, mine, theirs, opening, strategy):
         verdict = _infer(known, side, candidate, strategy.monotone)
         if verdict is Verdict.ACCEPTABLE:
-            chosen = candidate
-            break
+            return _Scan(candidate, to_check)
         if verdict is not None:
             continue
         if not strategy.check_first:
-            chosen = candidate  # 確認せずに出す
-            break
-        if budget.remaining_evaluations <= budget.remaining_moves or _checks_this_turn(turn_input) >= strategy.max_checks:
+            return _Scan(candidate, to_check)  # 確かめずに出す
+        if len(to_check) >= check_limit:
             break  # 残りの評価は、残りの手数ぶんの提案のガードに取っておく
-        return move_dict("check", to_package(candidate))
+        if strategy.monotone and any(_dominates_for(side, earlier, candidate) for earlier in to_check):
+            continue  # 先に確かめる案より悪い。その案が「受けられる」なら、そこで止まるので、確かめなくてよい
+        to_check.append(candidate)
+    return _Scan(None, to_check)
 
-    if chosen is None:
-        # 確認で見つからなかった。受けられると分かっている組み合わせのうち、相手の直前の提案にいちばん近いものを出す。
-        acceptable = [p for p, v in known.items() if v is Verdict.ACCEPTABLE and p not in mine]
-        if not acceptable:
-            acceptable = [p for p, v in known.items() if v is Verdict.ACCEPTABLE] or [opening]
-        target = theirs[-1] if theirs else opening
-        chosen = min(acceptable, key=lambda p: _distance(p, target))
+
+def _fallback(turn_input: TurnInput, negotiator: Negotiator) -> Indices:
+    """確かめで見つからなかったとき: 受けられると分かっている組み合わせのうち、相手の直前の提案にいちばん近いもの。"""
+    opening = to_indices(negotiator.opening)
+    mine, theirs = _proposals(turn_input)
+    known = _known_evaluations(turn_input)
+    acceptable = [p for p, v in known.items() if v is Verdict.ACCEPTABLE and p not in mine]
+    if not acceptable:
+        acceptable = [p for p, v in known.items() if v is Verdict.ACCEPTABLE] or [opening]
+    target = theirs[-1] if theirs else opening
+    return min(acceptable, key=lambda p: _distance(p, target))
+
+
+def _check_limit(turn_input: TurnInput, negotiator: Negotiator) -> int:
+    """この手番で、確かめに使える評価の数。残りの評価回数のうち、残りの手数と途中確認の分(提案のガードなど)は取っておく。"""
+    budget = turn_input.budget
+    spare = budget.remaining_evaluations - (budget.remaining_moves + budget.remaining_principal_checks)
+    return max(0, min(negotiator.strategy.max_checks, spare))
+
+
+def plan(turn_input: TurnInput, negotiator: Negotiator) -> dict:
+    """計画(phase=plan): TurnInput だけから、確かめたい案を出したい順に並べる(確かめが要らなければ、手をそのまま返す)。"""
+    pending = turn_input.pending_offer
+    if pending is not None and pending.own_evaluation is Verdict.ACCEPTABLE:
+        return plan_dict(move="accept")
+    scan = _scan(turn_input, negotiator, check_limit=_check_limit(turn_input, negotiator))
+    if scan.to_check:
+        return plan_dict(checks=[to_package(candidate) for candidate in scan.to_check])
+    chosen = scan.chosen if scan.chosen is not None else _fallback(turn_input, negotiator)
+    return plan_dict(move="propose", package=to_package(chosen))
+
+
+def choose(turn_input: TurnInput, negotiator: Negotiator) -> dict:
+    """決定(phase=decide): レフェリーの確かめの結果(checked と、読み直された history・last_check)から、手を 1 つ選ぶ。
+
+    確かめは計画でしか行えないので、ここでは、評価の分かっている候補だけを見る(評価の分からない候補は、確かめられなかった
+    ものなので、飛ばして、受けられると分かっているものを探す)。
+    """
+    pending = turn_input.pending_offer
+    if pending is not None and pending.own_evaluation is Verdict.ACCEPTABLE:
+        return move_dict("accept")
+    scan = _scan(turn_input, negotiator, check_limit=0)
+    chosen = scan.chosen if scan.chosen is not None else _fallback(turn_input, negotiator)
     return move_dict("propose", to_package(chosen))
 
 
 class ScriptedNegotiators:
     """SendTurn(web.referee)の形の台本のエージェント。role(candidate・employer)ごとに、探し方と最初の手を持つ。
 
-    LLM を呼ばず、通信もしない。TurnInput だけを見て Move の dict を返す。
+    LLM を呼ばず、通信もしない。TurnInput だけを見て、計画(phase=plan)なら Plan、決定(phase=decide)なら Move の dict を、
+    使用量(usage。台本は LLM を呼ばないので固定の値)と一緒に返す。
     """
 
-    def __init__(self, candidate: Negotiator, employer: Negotiator) -> None:
+    def __init__(self, candidate: Negotiator, employer: Negotiator, *, usage: Usage | None = None) -> None:
         self._negotiators = {"candidate": candidate, "employer": employer}
+        self._usage = usage if usage is not None else make_usage()
 
-    async def __call__(self, role, turn_input, *, nid, timeout_s) -> dict:
-        return decide(turn_input, self._negotiators[role])
+    async def __call__(self, role, turn_input, *, nid, timeout_s) -> tuple[dict, Usage]:
+        negotiator = self._negotiators[role]
+        payload = plan(turn_input, negotiator) if turn_input.phase == "plan" else choose(turn_input, negotiator)
+        return payload, self._usage

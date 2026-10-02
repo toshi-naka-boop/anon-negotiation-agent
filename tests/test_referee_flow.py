@@ -28,6 +28,7 @@ from web_helpers import (
     SpyVault,
     drive,
     move_dict,
+    plan_dict,
 )
 
 
@@ -78,6 +79,27 @@ async def test_attack_mode_employer_gets_an_attacker_turn_input_carrying_the_ins
     assert isinstance(attacker_call.turn_input, AttackerTurnInput)
     assert attacker_call.turn_input.principal_instruction == f"instruction for {nid[:4]}"
     assert env.agents.calls_for("employer") == []  # 通常の求人側の受信口は使わない
+
+
+@pytest.mark.anyio
+async def test_the_attack_mode_employer_gets_the_instruction_in_both_the_plan_and_the_decision(store, web_env):
+    # §4.1・§8.2: 攻撃モードの求人側は、1 手番 2 回の呼び出し(計画・決定)の、どちらにも AttackerTurnInput(principal_instruction つき)を受ける。
+    env = web_env
+    env.configure(attacker_instruction=lambda nid: "instruction")
+    nid = create_demo_negotiation(store, mode="attack")
+    package = sample_package()
+    env.agents.script("candidate", move_dict("propose", package))
+    env.agents.script("attacker", plan_dict(checks=[sample_package(salary=600)]), move_dict("accept"))
+
+    await drive(env.referee(nid, mode="attack"))
+
+    plan_call, decide_call = env.agents.calls_for("attacker")
+    assert (plan_call.turn_input.phase, decide_call.turn_input.phase) == ("plan", "decide")
+    for call in (plan_call, decide_call):
+        assert isinstance(call.turn_input, AttackerTurnInput)
+        assert call.turn_input.principal_instruction == "instruction"
+    assert [c.package.salary for c in decide_call.turn_input.checked] == [600]  # 確かめの結果も、そのまま渡る
+    assert type(env.agents.calls_for("candidate")[0].turn_input) is TurnInput  # 候補者側には、自由文が入る型を渡さない
 
 
 @pytest.mark.anyio
@@ -544,16 +566,16 @@ async def test_the_agent_is_still_called_while_the_side_has_a_move_left(store, w
 
 @pytest.mark.anyio
 async def test_only_the_moves_that_need_a_package_send_one_to_the_vault(store, web_env):
-    # propose・check・ask_principal だけが package を伴って登録される。accept・reject・end は、
-    # エージェントが余計な package を付けてきても、付けずに登録する(合意する組み合わせは金庫の
-    # pending_offer で決まる)。
+    # エージェントの手のうち、propose・ask_principal だけが package を伴って登録される(金庫の check は、レフェリーが計画の
+    # checks を実行して登録する確かめで、package を伴う)。accept・reject・end は、エージェントが余計な package を付けてきても、
+    # 付けずに登録する(合意する組み合わせは金庫の pending_offer で決まる)。
     env = web_env
     spy = SpyVault(env.vault)
     await env.restart(vault=spy)
     offered = sample_package(salary=700)
     other = sample_package(salary=500)
     nid = create_demo_negotiation(store)
-    env.agents.script("candidate", move_dict("check", offered), move_dict("propose", offered))
+    env.agents.script("candidate", plan_dict(checks=[offered]), move_dict("propose", offered))
     env.agents.script("employer", move_dict("accept", other))  # accept に別の package を付けてきた
 
     await drive(env.referee(nid))

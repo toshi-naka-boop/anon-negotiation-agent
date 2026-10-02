@@ -1,8 +1,9 @@
 """web の金庫クライアント(design.md §3.3・§4.1)。
 
 前半は httpx.MockTransport で、HTTP の失敗を例外に変換する規則とページ送りを確かめる
-(金庫を動かさない)。後半は本物の金庫の app を ASGI のままつないで、見回りの一覧に
-mode と candidate_principal_id が載ることを確かめる(1d-1 で金庫の一覧に足した項目)。
+(金庫を動かさない)。v14 で足した金庫の口(費用の上限での停止 stop_cost_limit・冪等キーからの引き当て by-request。別の作業者が
+金庫に作る口の、web 側の呼び方)も、ここで、送る形(パス・本文)を確かめる。後半は本物の金庫の app を ASGI のままつないで、
+見回りの一覧に mode と candidate_principal_id が載ることを確かめる(1d-1 で金庫の一覧に足した項目)。
 """
 
 import datetime as dt
@@ -47,6 +48,76 @@ async def test_http_failures_become_typed_client_errors(status, error_type):
     assert type(excinfo.value) is error_type
     assert excinfo.value.status_code == status
     assert "reason from the vault" in str(excinfo.value)
+
+
+@pytest.mark.anyio
+async def test_stop_cost_limit_posts_the_action_to_the_control_path_without_a_version():
+    # §3.4・§8.2: 費用の上限での停止は、control の action=stop_cost_limit(冪等。expected_version は取らない)。side は、金庫が使わない。
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={"version": 7, "status": "judged", "paused": False})
+
+    response = await _client(handler).stop_cost_limit("0123456789abcdef")
+
+    assert seen == [
+        ("POST", "/v1/negotiations/0123456789abcdef/control", {"side": "candidate", "action": "stop_cost_limit"})
+    ]
+    assert (response.version, response.status, response.paused) == (7, "judged", False)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [409, 503, 500])
+async def test_a_failed_stop_cost_limit_is_a_typed_error_like_the_other_calls(status):
+    client = _client(lambda request: httpx.Response(status, json={"detail": "reason"}))
+
+    with pytest.raises(VaultClientError) as excinfo:
+        await client.stop_cost_limit("0123456789abcdef")
+
+    assert excinfo.value.status_code == status
+
+
+@pytest.mark.anyio
+async def test_by_request_returns_the_nid_of_a_known_key_and_none_for_an_unknown_one():
+    # §3.3・台帳 X-57: 冪等キーの正本は金庫。200 {"nid"} なら既知、404 なら未知(None)。
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.raw_path.decode())
+        if request.url.path.endswith("known-key"):
+            return httpx.Response(200, json={"nid": "0123456789abcdef"})
+        return httpx.Response(404, json={"detail": "not found"})
+
+    client = _client(handler)
+
+    assert await client.get_negotiation_by_request("known-key") == "0123456789abcdef"
+    assert await client.get_negotiation_by_request("missing-key") is None
+    assert paths == ["/v1/negotiations/by-request/known-key", "/v1/negotiations/by-request/missing-key"]
+
+
+@pytest.mark.anyio
+async def test_by_request_encodes_the_key_into_one_path_segment():
+    # web が作る request_id(「依頼者 ID:画面の乱数」など)は、どんな文字が入っても、1 つのパスの部分として送る
+    # (「/」や「?」で別のパス・問い合わせに化けない)。
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.raw_path.decode())
+        return httpx.Response(404, json={"detail": "not found"})
+
+    await _client(handler).get_negotiation_by_request("0123456789abcdef:a/b?c#d e")
+
+    assert paths == ["/v1/negotiations/by-request/0123456789abcdef%3Aa%2Fb%3Fc%23d%20e"]
+
+
+@pytest.mark.anyio
+async def test_by_request_does_not_hide_a_failure_that_is_not_a_404():
+    # 金庫が応えない(503)ときに「未知のキー」と読むと、同じ request_id を二重に作ってしまう。404 以外は、そのまま例外にする。
+    client = _client(lambda request: httpx.Response(503, json={"detail": "down"}))
+
+    with pytest.raises(VaultUnavailableError):
+        await client.get_negotiation_by_request("some-key")
 
 
 @pytest.mark.anyio

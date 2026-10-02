@@ -15,7 +15,7 @@ import pytest
 from negotiation_core import Verdict
 from vault.api_models import ControlRequest, MoveRequest
 from vault_helpers import demo_create_request, put_candidate_and_employer_templates, sample_package
-from web_helpers import CrashAfterMove, SimulatedCrash, create_demo_negotiation, drive, move_dict
+from web_helpers import CrashAfterMove, SimulatedCrash, create_demo_negotiation, drive, move_dict, plan_dict
 
 
 def _create(store):
@@ -365,10 +365,10 @@ async def test_turn_input_shows_neither_the_version_nor_the_counterpartys_remain
     # DV-10: TurnInput に、version と相手の残り回数が現れない。budget は自分側の残りだけで、
     # 相手が評価・手数を使っても、自分の TurnInput の残りは減らない。
     env = web_env
-    p1 = sample_package()
+    p1, p2 = sample_package(), sample_package(salary=600)
     nid = create_demo_negotiation(store)
-    env.agents.script("candidate", move_dict("check", p1), move_dict("check", p1), move_dict("propose", p1))
-    env.agents.script("employer", move_dict("check", p1), move_dict("accept"))
+    env.agents.script("candidate", plan_dict(checks=[p1]), move_dict("propose", p1))
+    env.agents.script("employer", plan_dict(checks=[p2]), move_dict("accept"))
 
     await drive(env.referee(nid))
 
@@ -378,14 +378,14 @@ async def test_turn_input_shows_neither_the_version_nor_the_counterpartys_remain
 
     candidate_calls = env.agents.calls_for("candidate")
     employer_calls = env.agents.calls_for("employer")
-    # 候補者: check ×2(評価 2 回。有効な確認手は手数に数えない)→ propose のガード(評価 1 回)
-    assert [budget(c) for c in candidate_calls] == [(16, 6, 1), (15, 6, 1), (14, 6, 1)]
-    # 求人側: 候補者が評価を 3 回使った後でも、求人側は自分の分だけ(16)。check の後は 15。
-    assert [budget(c) for c in employer_calls] == [(16, 6, 1), (15, 6, 1)]
+    # 候補者: 計画 → 確かめ(評価 1 回。有効な確かめは手数に数えない)→ 決定(確かめの分だけ減った残り。提案のガードの評価はこの後)
+    assert [(c.turn_input.phase, budget(c)) for c in candidate_calls] == [("plan", (17, 6, 1)), ("decide", (16, 6, 1))]
+    # 求人側: 候補者が評価を 2 回(確かめとガード)・手を 1 回使った後でも、求人側は自分の分だけ(17)。確かめの後は 16。
+    assert [(c.turn_input.phase, budget(c)) for c in employer_calls] == [("plan", (17, 6, 1)), ("decide", (16, 6, 1))]
 
     # 自分の手の数(own_move_number)は、金庫の通し番号(version)とは別物: 求人側の 1 回目は、候補者の
-    # 記録が 3 件あって version は 3 だが、自分の手は 0 回。
-    assert [c.turn_input.own_move_number for c in candidate_calls] == [0, 1, 2]
+    # 記録が 2 件あって version は 2 だが、自分の手は 0 回。
+    assert [c.turn_input.own_move_number for c in candidate_calls] == [0, 1]
     assert [c.turn_input.own_move_number for c in employer_calls] == [0, 1]
 
     for call in env.agents.calls:
@@ -396,17 +396,30 @@ async def test_turn_input_shows_neither_the_version_nor_the_counterpartys_remain
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("crash_on_move_number", [1, 2])
+@pytest.mark.parametrize(
+    ("crash_on_move_number", "candidate_script"),
+    [
+        # 1 回目は、候補者の確かめ(check)が金庫にコミットされた直後に落ちる。作り直したレフェリーの計画は、同じ確かめを出し直すが、
+        # 済んだ確かめは履歴から埋まるので、金庫の check は重ならない。
+        pytest.param(
+            1,
+            [plan_dict(checks=[sample_package(salary=700)]), plan_dict(checks=[sample_package(salary=700)])],
+            id="crash_after_the_check",
+        ),
+        # 2 回目は、候補者の提案がコミットされた直後に落ちる。作り直したレフェリーは、求人側の手番から続ける。
+        pytest.param(2, [plan_dict(checks=[sample_package(salary=700)])], id="crash_after_the_proposal"),
+    ],
+)
 async def test_recreated_referee_leaves_no_gap_or_duplicate_in_history_after_a_crash_right_after_a_vault_operation(
-    store, web_env, vault_client, crash_on_move_number
+    store, web_env, vault_client, crash_on_move_number, candidate_script
 ):
     # DV-10: レフェリーを金庫の操作の直後で止めてから作り直しても、TurnInput.history に記録の欠けも重複もない。
-    # 1 回目は候補者の確認手、2 回目は候補者の提案が、金庫にコミットされた直後に落ちる。web は記録を写さず、
+    # 1 回目は候補者の確かめ、2 回目は候補者の提案が、金庫にコミットされた直後に落ちる。web は記録を写さず、
     # 履歴を金庫のイベント列から読み直すので、どちらでも同じ履歴になる。
     env = web_env
     p1, p2 = sample_package(salary=700), sample_package(salary=650)
     nid = create_demo_negotiation(store)
-    env.agents.script("candidate", move_dict("check", p1), move_dict("propose", p1), move_dict("propose", p2))
+    env.agents.script("candidate", *candidate_script, move_dict("propose", p1), move_dict("propose", p2))
     env.agents.script("employer", move_dict("reject"), move_dict("accept"))
 
     await env.restart(vault=CrashAfterMove(env.vault, crash_on_move_number=crash_on_move_number))
@@ -422,11 +435,20 @@ async def test_recreated_referee_leaves_no_gap_or_duplicate_in_history_after_a_c
 
     candidate_calls = env.agents.calls_for("candidate")
     employer_calls = env.agents.calls_for("employer")
-    assert len(candidate_calls) == 3 and len(employer_calls) == 2  # 呼び出しの数は、落ちた位置に依らない
+    assert len(employer_calls) == 2  # 求人側の呼び出しの数は、落ちた位置に依らない(どちらも計画の 1 回)
     assert history(candidate_calls[0]) == []
-    assert history(candidate_calls[1]) == [("self", "check", 700, Verdict.ACCEPTABLE)]  # 確認手は 1 件だけ
+    if crash_on_move_number == 1:
+        # 落ちる前の計画 1 回と、作り直した後の計画・決定・次の手番の計画。確かめは 1 件だけ(重ならない)。
+        assert [c.turn_input.phase for c in candidate_calls] == ["plan", "plan", "decide", "plan"]
+        assert history(candidate_calls[1]) == [("self", "check", 700, Verdict.ACCEPTABLE)]
+        decide = candidate_calls[2].turn_input
+        assert history(candidate_calls[2]) == [("self", "check", 700, Verdict.ACCEPTABLE)]
+        assert [(c.package.salary, c.evaluation) for c in decide.checked] == [(700, Verdict.ACCEPTABLE)]
+    else:
+        assert [c.turn_input.phase for c in candidate_calls] == ["plan", "decide", "plan"]
+        assert history(candidate_calls[1]) == [("self", "check", 700, Verdict.ACCEPTABLE)]  # 確かめは 1 件だけ
     assert history(employer_calls[0]) == [("counterparty", "propose", 700, Verdict.ACCEPTABLE)]  # 提案は 1 件だけ
-    assert history(candidate_calls[2]) == [
+    assert history(candidate_calls[-1]) == [
         ("self", "check", 700, Verdict.ACCEPTABLE),
         ("self", "propose", 700, Verdict.ACCEPTABLE),
         ("counterparty", "reject", 700, Verdict.ACCEPTABLE),

@@ -1,7 +1,7 @@
 """web の部品の組み立て(design.md §1.1・§4.1・§6.3)。
 
-金庫のクライアント・利用記録・段の状態・開示台帳・依頼者ごとのロック・削除の流れ・レフェリー・
-2 つの見回りを、1 か所で組み立てる。ロックは 1 つを、ミドルウェア・レフェリー・交渉の見回り・削除の流れが
+金庫のクライアント・利用記録・段の状態・開示台帳・LLM の物理の呼び出し数の計上・依頼者ごとのロック・削除の流れ・
+レフェリー・2 つの見回りを、1 か所で組み立てる。ロックは 1 つを、ミドルウェア・レフェリー・交渉の見回り・削除の流れが
 共有する(台帳 I-4: 同じ依頼者の操作と削除の流れを、1 つずつ順に処理するため)。
 外部の部品(金庫のクライアント・Firestore・エージェントを呼ぶ関数・時計・sleep)は、すべて差し込める。
 """
@@ -16,6 +16,7 @@ from vault.clock import Clock, SystemClock
 from web.config import DEFAULT_WEB_CONFIG, WebConfig
 from web.deletion import PrincipalDeletion
 from web.ledger import DisclosureLedger
+from web.llm_budget import LlmBudget
 from web.locks import PrincipalLocks
 from web.principal_sweeper import PrincipalSweeper
 from web.principals_meta import PrincipalsMetaStore
@@ -38,6 +39,7 @@ class WebServices:
     meta: PrincipalsMetaStore
     stages: StageStore
     ledger: DisclosureLedger
+    llm_budget: LlmBudget
     deletion: PrincipalDeletion
     referees: RefereeManager
     sweeper: Sweeper
@@ -62,6 +64,7 @@ def build_services(
     meta = PrincipalsMetaStore(default_db, clock, config.principals)
     stages = StageStore(default_db, clock, config.retention)
     ledger = DisclosureLedger(default_db)
+    llm_budget = LlmBudget(default_db, clock, config.llm_budget)
     deletion = PrincipalDeletion(vault=vault, meta=meta, stages=stages, ledger=ledger, locks=locks)
     referees = RefereeManager(
         RefereeDeps(
@@ -72,6 +75,8 @@ def build_services(
             config=config.referee,
             answerer=answerer,
             locks=locks,
+            llm_budget=llm_budget,
+            max_checks_per_plan=config.llm_budget.max_checks_per_plan,
         )
     )
     sweeper = Sweeper(
@@ -96,6 +101,7 @@ def build_services(
         meta=meta,
         stages=stages,
         ledger=ledger,
+        llm_budget=llm_budget,
         deletion=deletion,
         referees=referees,
         sweeper=sweeper,

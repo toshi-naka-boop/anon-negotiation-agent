@@ -15,7 +15,7 @@ import datetime as dt
 
 import httpx
 import pytest
-from agents_helpers import PACKAGE, agents_app, move_json, stub_llm  # noqa: F401  (フィクスチャは import して使う)
+from agents_helpers import PACKAGE, agents_app, move_json, plan_json, stub_llm  # noqa: F401  (フィクスチャは import して使う)
 
 import agents.client as agents_client_module
 from vault_helpers import put_candidate_and_employer_templates, sample_package
@@ -68,7 +68,7 @@ async def wired(store, clock, vault_client, default_db, session_key, agents_tran
 
 
 def _scripted_llm(stub_llm, *moves: str) -> None:
-    """スタブの LLM が、呼ばれた順に、moves(Move の JSON)を返すようにする。"""
+    """スタブの LLM が、呼ばれた順に、moves(確かめの要らない手の Plan の JSON)を返すようにする(v14: 1 手番 1 回の計画)。"""
     remaining = list(moves)
     stub_llm.behavior = lambda _request: remaining.pop(0)
 
@@ -80,7 +80,7 @@ async def test_a_demo_negotiation_runs_from_the_web_api_through_a2a_and_the_agen
     # 結合: デモの交渉が、web のレフェリー → A2A → agents(スタブの LLM)→ 金庫 の経路で、終了(judged)まで進む。
     # 候補者側の LLM が提案し、求人側の LLM が受ける。金庫が合意と判定を 1 つのトランザクションで行い、双方に
     # 同じ最終結果を記録する。
-    _scripted_llm(stub_llm, move_json("propose", PACKAGE), move_json("accept"))
+    _scripted_llm(stub_llm, plan_json("propose", PACKAGE), plan_json("accept"))
     candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
     browser = wired.browser()
 
@@ -121,7 +121,7 @@ async def test_a_real_principals_negotiation_runs_from_the_interview_through_the
     # 結合: 本物の候補者が、開始ページ → 面談の送信 → 交渉の作成の API を通り、レフェリー → A2A → agents → 金庫
     # の経路で判定まで進む。本人の一覧・活動ログに結果が出て、本人の側の見え方しか出ない。段の状態に期限は付かない。
     package = sample_package()  # 面談で丸めた受ける条件(年収 650 万以上・リモート 2 日以上・当直 4 回以下)を満たす
-    _scripted_llm(stub_llm, move_json("propose", package.model_dump()), move_json("accept"))
+    _scripted_llm(stub_llm, plan_json("propose", package.model_dump()), plan_json("accept"))
     browser = wired.browser()
     pid = await browser.register()
     template_id = wired.put_employer_template()
@@ -151,7 +151,7 @@ async def test_the_startup_runs_both_sweepers_and_the_sweeper_starts_the_referee
     # 起動(lifespan)で、交渉の見回り(60 秒ごと)と依頼者の見回り(10 分ごと)が動く。起動時の見回りが、金庫の一覧から
     # レフェリーのタスクを作り(交渉は、A2A → agents → 金庫 の経路で判定まで進む)、期限切れの依頼者を消す。
     # 止めるときは、見回りをすべて止める。
-    _scripted_llm(stub_llm, move_json("propose", PACKAGE), move_json("accept"))
+    _scripted_llm(stub_llm, plan_json("propose", PACKAGE), plan_json("accept"))
     browser = wired.browser()
     pid = await browser.register()
     wired.clock.advance(dt.timedelta(days=31))  # 依頼者の最終利用から 30 日を過ぎた

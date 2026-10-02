@@ -10,9 +10,10 @@
 
 DV-14(名前に case1_reachability を含むテスト)
 - web のレフェリーと、本物の金庫(Firestore エミュレータ)を通して、ケース 1 を交渉させる。交渉する側は、LLM を使わない
-  台本のエージェント(tests/scripted_negotiators.py。Gemini と同じく TurnInput だけを見る)。
+  台本のエージェント(tests/scripted_negotiators.py。Gemini と同じく TurnInput だけを見る)。v14 の計画・決定の形で動かし、
+  レフェリーの確かめの実行条件(残りの評価回数 > 残りの手数 ＋ 残りの途中確認数。台帳 C-47・X-59)を通す。
 - 36 通りの始め方(§8.4。候補者の最初の手 6 通り × 求人の最初の手 6 通り)× 探し方(7 巡目の表の行)。
-  上限は config/params.toml の値のまま(側ごとに手数 6・評価 16・途中確認 1)。
+  上限は config/params.toml の値のまま(側ごとに手数 6・評価 17・途中確認 1。v14)。
 - 合否に入れる探し方(1・2・5 行目)は、それぞれ 36 通り中 34 通り以上が合意(judged・agreed)に届くこと。
   記録だけの探し方(3・4・6 行目と、5 行目の向きを入れ替えたもの)の結果は、表にして出力する(合否に入れない)。
 """
@@ -254,8 +255,9 @@ async def test_case1_answerer_answers_the_referee_and_the_vault_appends_the_answ
     store, web_env, case1, asking_side, salary, expected_answer
 ):
     # 途中確認(ask_principal)に、レフェリーが自動回答(FixtureAnswerer)を呼び、金庫が回答を交渉用コピーに追記する(§4.4)。
-    # 追記の後は、同じ組み合わせの評価が、生の条件の答えどおりに決まる。ケース 1 の丸め済みポリシーは、判定が決まらない
-    # 組み合わせを持たないので、聞かれる側のポリシーだけを「何も決まっていない」ものに替えて確かめる。
+    # 追記の後は、同じ組み合わせの評価が、生の条件の答えどおりに決まる(回答の記録は、金庫が追記と同じトランザクションで評価し直した
+    # 結果を持つ)。ケース 1 の丸め済みポリシーは、判定が決まらない組み合わせを持たないので、聞かれる側のポリシーだけを
+    # 「何も決まっていない」ものに替えて確かめる。
     package = _opening(salary=salary, remote_days=0, night_duty=0, review_months=6)
     candidate_policy = (
         needs_confirmation_policy("candidate") if asking_side == "candidate" else accept_all_policy("candidate")
@@ -274,20 +276,19 @@ async def test_case1_answerer_answers_the_referee_and_the_vault_appends_the_answ
 
     env = web_env
     env.configure(answerer=FixtureAnswerer(case1))
-    ask_check_end = (move_dict("ask_principal", package), move_dict("check", package), move_dict("end"))
+    ask_then_end = (move_dict("ask_principal", package), move_dict("end"))
     if asking_side == "candidate":
-        env.agents.script("candidate", *ask_check_end)
+        env.agents.script("candidate", *ask_then_end)
     else:
         env.agents.script("candidate", move_dict("propose", package))
-        env.agents.script("employer", *ask_check_end)
+        env.agents.script("employer", *ask_then_end)
     await drive(env.referee(created.nid))
 
     events = store.get_events(created.nid, asking_side)
     answer = next(e for e in events if e.kind == "principal_answer")
     assert answer.answer == expected_answer
-    check = next(e for e in events if e.kind == "check")
     expected_verdict = Verdict.ACCEPTABLE if expected_answer == "accept" else Verdict.NOT_ACCEPTABLE
-    assert Verdict(check.own_evaluation) is expected_verdict
+    assert Verdict(answer.own_evaluation) is expected_verdict
 
 
 # ----------------------------------------------------------------------

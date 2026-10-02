@@ -1,6 +1,6 @@
-"""web が使う暫定値の読み込み(config/params.toml の [web.*]。design.md §4.1・§6.3・§3.8)。
+"""web が使う暫定値の読み込み(config/params.toml の [web.*]。design.md §4.1・§6.3・§3.8・§8.2)。
 
-エージェント呼び出しの上限・再試行・見回りの間隔・クッキーの寿命・利用記録の更新の間隔・
+エージェント呼び出しの上限・再試行・見回りの間隔・LLM の物理の呼び出し数の上限・クッキーの寿命・利用記録の更新の間隔・
 自動削除までの日数・段の状態の TTL は、決まったら設定ファイル側を差し替えるだけで済むようにする
 (vault/config.py と同じ立て付け)。
 """
@@ -8,6 +8,8 @@
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from negotiation_core import MAX_PLANNED_CHECKS
 
 # src/web/config.py から見て、プロジェクト直下の config/params.toml を指す。
 _CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "params.toml"
@@ -36,6 +38,21 @@ class SweeperConfig:
     """交渉の見回りの暫定値(§4.1)。"""
 
     interval_seconds: float
+
+
+@dataclass(frozen=True)
+class LlmBudgetConfig:
+    """LLM に実際に送る回数の上限(物理の呼び出し数。§4.1・§8.2。台帳 X-46・X-47・X-50・X-56)。
+
+    daily_limit は日本時間の 0 時区切りの 1 日の上限、per_negotiation_limit は交渉ごとの上限。
+    daily_counter_ttl_seconds は 1 日のカウンタの文書の TTL。max_checks_per_plan は 1 回の計画から実行する確かめの数の上限
+    (negotiation_core.MAX_PLANNED_CHECKS 以下)。
+    """
+
+    daily_limit: int
+    per_negotiation_limit: int
+    daily_counter_ttl_seconds: int
+    max_checks_per_plan: int
 
 
 @dataclass(frozen=True)
@@ -87,6 +104,7 @@ class LimitsConfig:
 class WebConfig:
     referee: RefereeConfig
     sweeper: SweeperConfig
+    llm_budget: LlmBudgetConfig
     session: SessionConfig
     principals: PrincipalsConfig
     principal_sweeper: PrincipalSweeperConfig
@@ -112,6 +130,13 @@ def load_web_config(path: Path = _CONFIG_PATH) -> WebConfig:
             wait_poll_interval_seconds=float(referee_raw["wait_poll_interval_seconds"]),
             client_error_wait_seconds=sweeper.interval_seconds,
         )
+        llm_budget_raw = web_raw["llm_budget"]
+        llm_budget = LlmBudgetConfig(
+            daily_limit=int(llm_budget_raw["daily_limit"]),
+            per_negotiation_limit=int(llm_budget_raw["per_negotiation_limit"]),
+            daily_counter_ttl_seconds=int(llm_budget_raw["daily_counter_ttl_seconds"]),
+            max_checks_per_plan=int(llm_budget_raw["max_checks_per_plan"]),
+        )
         session = SessionConfig(cookie_max_age_seconds=int(web_raw["session"]["cookie_max_age_seconds"]))
         principals = PrincipalsConfig(
             touch_interval_seconds=int(web_raw["principals"]["touch_interval_seconds"]),
@@ -133,6 +158,12 @@ def load_web_config(path: Path = _CONFIG_PATH) -> WebConfig:
         raise ValueError(f"{path} is missing a required [web] key: {exc}") from exc
     if not referee.agent_retry_backoff_seconds:
         raise ValueError(f"{path}: agent_retry_backoff_seconds must not be empty")
+    if llm_budget.daily_limit < 1 or llm_budget.per_negotiation_limit < 1:
+        raise ValueError(f"{path}: web.llm_budget limits must be positive")
+    if not 1 <= llm_budget.max_checks_per_plan <= MAX_PLANNED_CHECKS:
+        raise ValueError(
+            f"{path}: web.llm_budget.max_checks_per_plan must be between 1 and {MAX_PLANNED_CHECKS} (§2.7)"
+        )
     if session.cookie_max_age_seconds + _MIN_COOKIE_MARGIN_SECONDS > principals.retention_seconds:
         raise ValueError(
             f"{path}: the cookie lifetime (web.session.cookie_max_age_seconds) must be at least "
@@ -141,6 +172,7 @@ def load_web_config(path: Path = _CONFIG_PATH) -> WebConfig:
     return WebConfig(
         referee=referee,
         sweeper=sweeper,
+        llm_budget=llm_budget,
         session=session,
         principals=principals,
         principal_sweeper=principal_sweeper,

@@ -169,7 +169,7 @@ async def test_creating_a_negotiation_is_refused_with_the_vaults_reason_and_is_i
     assert others != nid  # 他人の交渉の ID は返らない
     assert (refused.status_code, refused.json()) == (409, {"detail": "already_active"})
     assert [s.nid for s in web_app.store.list_principal_negotiations(pid)] == [nid]
-    assert web_app.store._principal_ref(pid).get().to_dict()["evaluation_budget"]["used"] == 16  # 予約は 1 回だけ
+    assert web_app.store._principal_ref(pid).get().to_dict()["evaluation_budget"]["used"] == 17  # 予約は 1 回だけ(側ごとの評価の上限)
     unknown = await browser.post(
         f"/v1/principals/{pid}/negotiations", {"request_id": "request-0003", "employer_template_id": "no-such-template"}
     )

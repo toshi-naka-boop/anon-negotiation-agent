@@ -12,7 +12,8 @@ from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from negotiation_core import AttackerTurnInput, Move, Package, Policy, TurnInput
+from agents.config import DEFAULT_AGENTS_CONFIG
+from negotiation_core import AttackerTurnInput, Move, Package, Plan, Policy, TurnInput, Usage
 from vault.clock import FixedClock
 from vault.models import EmployerRule
 from vault.templates import put_template
@@ -25,6 +26,7 @@ from vault_helpers import (
     put_candidate_policy,
 )
 from web.config import DEFAULT_WEB_CONFIG, RefereeConfig
+from web.llm_budget import LlmBudget
 from web.referee import (
     NegotiationContext,
     Referee,
@@ -52,8 +54,30 @@ class SimulatedCrash(BaseException):
 
 
 def move_dict(move: str, package: Package | None = None) -> dict:
-    """エージェントが返す Move の dict(Move で検証済みの形)。"""
+    """エージェントが決定の呼び出しで返す Move の dict(Move で検証済みの形)。
+
+    計画の呼び出しで台本に入れると、確かめのない計画(checks が空で、この手を出す Plan)として扱われる(ScriptedAgents)。
+    """
     return Move(schema="move/v1", move=move, package=package).model_dump(mode="json", by_alias=True)
+
+
+def plan_dict(checks=(), move: str | None = None, package: Package | None = None) -> dict:
+    """エージェントが計画の呼び出しで返す Plan の dict(Plan で検証済みの形)。checks が空なら、move が要る。"""
+    return Plan(schema="plan/v1", checks=list(checks), move=move, package=package).model_dump(mode="json", by_alias=True)
+
+
+def make_usage(**overrides) -> Usage:
+    """エージェントの 1 回の呼び出しの使用量(台本の既定値。モデル ID は設定ファイルの値)。"""
+    values = dict(
+        model=DEFAULT_AGENTS_CONFIG.model,
+        prompt_tokens=1200,
+        cached_tokens=0,
+        thoughts_tokens=100,
+        output_tokens=40,
+        requests=1,
+    )
+    values.update(overrides)
+    return Usage(**values)
 
 
 @dataclass
@@ -67,10 +91,13 @@ class AgentCall:
 
 
 class ScriptedAgents:
-    """SendTurn の形のスタブ。role ごとの台本を先頭から 1 つずつ消費する。
+    """SendTurn の形のスタブ。role ごとの台本を先頭から 1 つずつ消費する(計画・決定のどちらの呼び出しも、1 つ消費する)。
 
-    台本の要素は次のどれか。
-    - dict: そのまま返す(スキーマ違反の dict を返して検証を試すこともできる)
+    台本の要素は次のどれか。返すのは (payload, usage)。usage は、要素が (dict, Usage) の組ならその Usage、そうでなければ
+    make_usage() の既定値。
+    - dict: そのまま payload として返す(スキーマ違反の dict を返して検証を試すこともできる)。ただし、計画の呼び出し
+      (turn_input.phase が plan)に、Move の dict(schema が move/v1。move_dict)が来たら、確かめのない計画(checks が空の
+      Plan)に直して返す: 手だけを出す台本を、そのまま書けるようにするため(無効な Move は、無効な Plan のまま)
     - 例外のクラス・インスタンス: 投げる(ConnectionError・TimeoutError・ValueError など)
     - 関数: 呼び出しの記録(AgentCall)を渡して呼び、その戻り値を上の規則で扱う(awaitable も可)
     """
@@ -86,7 +113,7 @@ class ScriptedAgents:
     def calls_for(self, role: str) -> list[AgentCall]:
         return [call for call in self.calls if call.role == role]
 
-    async def __call__(self, role, turn_input, *, nid, timeout_s) -> dict:
+    async def __call__(self, role, turn_input, *, nid, timeout_s) -> tuple[dict, Usage]:
         call = AgentCall(role=role, nid=nid, timeout_s=timeout_s, turn_input=turn_input)
         self.calls.append(call)
         queue = self._scripts[role]
@@ -99,7 +126,14 @@ class ScriptedAgents:
                 item = await item
         if isinstance(item, BaseException) or (isinstance(item, type) and issubclass(item, BaseException)):
             raise item
-        return item
+        payload, usage = item if isinstance(item, tuple) else (item, make_usage())
+        if turn_input.phase == "plan" and isinstance(payload, dict) and payload.get("schema") == "move/v1":
+            payload = {**payload, "schema": "plan/v1", "checks": []}  # 手だけを出す台本は、確かめのない計画として扱う
+        return payload, usage
+
+    def calls_in_phase(self, phase: str, role: str | None = None) -> list[AgentCall]:
+        """phase(plan・decide)の呼び出しだけ(role を渡せば、その種類だけ)。"""
+        return [c for c in self.calls if c.turn_input.phase == phase and (role is None or c.role == role)]
 
 
 class Blocker:
@@ -226,6 +260,7 @@ class WebEnv:
     answerer: ScriptedAnswerer | None
     config: RefereeConfig
     attacker_instruction: Callable[[str], str] | None = None
+    llm_budget: LlmBudget | None = None  # 渡すと、レフェリーは送る前に物理の呼び出し数を数える(既定は数えない)
     stages: StageStore = field(init=False)
     deps: RefereeDeps = field(init=False)
     manager: RefereeManager = field(init=False)
@@ -244,6 +279,7 @@ class WebEnv:
             config=self.config,
             answerer=self.answerer,
             attacker_instruction=self.attacker_instruction,
+            llm_budget=self.llm_budget,
         )
         self.manager = RefereeManager(self.deps)
         self.sweeper = Sweeper(

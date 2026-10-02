@@ -9,6 +9,10 @@
 一覧の 1 件の処理が失敗しても、ほかの交渉の見回りは続ける(次の見回りでやり直す)。1 件の中でも、
 3 つの処理は互いに独立に失敗を扱う(段階開示の状態を作れなくても、期限切れとタスクの作り直しは行う)。
 
+最初の 1 回の見回りが終わるまで(first_sweep_done が False の間)は、新しい交渉の作成を受け付けない(503。§8.2・台帳 X-53)。
+進行中の交渉の一覧(レフェリーのタスクの一覧)が、一覧を読み終えて、タスクを作り直すまでは、作成の入場の制限が、進行中の交渉の
+未消化分を少なく数えるため。
+
 依頼者の見回り(30 日使われていない依頼者の削除。§4.1・§6.3)は、別の見回り(web.principal_sweeper)。
 
 本物の候補者の交渉の stages/{nid} の作成は、その依頼者のロックの下で行う(locks と meta を渡したとき。台帳 I-4)。
@@ -74,6 +78,12 @@ class Sweeper:
         self._config = config
         self._locks = locks
         self._meta = meta
+        self._first_sweep_done = False
+
+    @property
+    def first_sweep_done(self) -> bool:
+        """起動してから、見回りが 1 回終わったか(金庫の一覧を読み、交渉ごとの処理を済ませた。作成の入場の制限が使う)。"""
+        return self._first_sweep_done
 
     async def run(self) -> None:
         """起動時に 1 回、その後は interval_seconds ごとに見回る。止めるにはタスクを cancel する。"""
@@ -92,6 +102,7 @@ class Sweeper:
         report.listed = len(items)
         for item in items:
             await self._sweep_item(item, report)
+        self._first_sweep_done = True
         return report
 
     async def _sweep_item(self, item: OpenNegotiationSummary, report: SweepReport) -> None:

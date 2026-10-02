@@ -10,8 +10,9 @@
 自分側のポリシーで評価して無効と判断した手なら、その自分側の評価(own_evaluation)が入ること。相手には見えないこと。
 レフェリーが登録した無効手(schema_invalid・agent_timeout)は、手の種類も分からないので入らないこと。
 
-web(レフェリー)の部分(末尾。1d-1): 台本のエージェントのスキーマ違反が invalid として登録され、
-次の TurnInput.last_error に理由が入り、直した手で交渉が続くこと。一時的なエラー
+web(レフェリー)の部分(末尾。1d-1。v14 で、計画・決定の 2 回の呼び出しに合わせた): 台本のエージェントのスキーマ違反が invalid として
+登録され、次の TurnInput.last_error に理由が入り、直した手で交渉が続くこと。無効な決定の後は、確かめを挟んだ同じ手番の決定と、次の
+手番の計画の両方に、last_error・last_invalid が残ること(台帳 X-51)。一時的なエラー
 (ConnectionError・TimeoutError)は再試行されて無効手にならず、再試行を使い切ったら agent_timeout に
 なること。ValueError(受信口が拒否した、または一時的と印のない失敗。台帳 L9-5)は再試行せず schema_invalid にすること
 (LLM の出力が JSON でないなどの失敗を、本物の agents の受信口を通して確かめるのは tests/test_web_integration.py)。
@@ -20,6 +21,7 @@ web(レフェリー)の部分(末尾。1d-1): 台本のエージェントのス�
 from dataclasses import replace
 
 import pytest
+from negotiation_core import LastInvalid
 from vault.api_models import MoveRequest, PrincipalAnswerRequest
 from vault.models import EmployerRule
 from vault_helpers import (
@@ -32,7 +34,7 @@ from vault_helpers import (
 )
 from web.config import DEFAULT_WEB_CONFIG
 from web.referee import StepOutcome
-from web_helpers import Blocker, FakeSleep, create_demo_negotiation, drive, move_dict
+from web_helpers import Blocker, FakeSleep, create_demo_negotiation, drive, move_dict, plan_dict
 
 
 def _create(store, candidate_policy=None, employer_rules=None):
@@ -452,7 +454,54 @@ async def test_vault_detected_invalid_move_also_reaches_the_next_turn_input(stor
 
     second = env.agents.calls_for("candidate")[1].turn_input
     assert second.last_error == "not_acceptable_to_own_principal"
-    assert second.budget.remaining_evaluations == 15
+    assert second.budget.remaining_evaluations == 16
+
+
+@pytest.mark.anyio
+async def test_after_an_invalid_decision_the_last_error_survives_the_referees_checks_and_reaches_the_next_plan_and_decision(
+    store, web_env
+):
+    # DV-03・台帳 X-51: 無効な決定(スキーマ違反)の後、次の手番の計画にも、そこで確かめを挟んだ同じ手番の決定にも、last_error・
+    # last_invalid が残り、直した手で交渉が続く。レフェリーの確かめ(金庫の check。有効)は、エージェントの手ではないので、
+    # これを消さない。直した手(有効なエージェントの手)の後で、初めて null に戻る。
+    env = web_env
+    first, second = sample_package(salary=700), sample_package(salary=650)
+    nid = create_demo_negotiation(store)
+    broken = {"schema": "move/v1", "move": "withdraw"}  # 決定の呼び出しが返す、列挙外の手
+    env.agents.script(
+        "candidate",
+        plan_dict(checks=[first]),  # 手番 1 の計画: 確かめ
+        broken,  # 手番 1 の決定: 無効(schema_invalid)
+        plan_dict(checks=[second]),  # 手番 2 の計画(last_error あり): 確かめ
+        move_dict("propose", second),  # 手番 2 の決定(last_error が残っている): 直した手
+        move_dict("end"),  # 手番 3 の計画(直した手の後。last_error は null)
+    )
+    env.agents.script("employer", move_dict("reject"))
+    referee = env.referee(nid)
+
+    assert await referee.step() is StepOutcome.MOVED  # 手番 1: 計画 → 確かめ → 決定(無効手として登録)
+    assert await referee.step() is StepOutcome.MOVED  # 手番 2: 計画 → 確かめ → 決定(提案)
+    assert await referee.step() is StepOutcome.MOVED  # 求人側が断る
+    assert await referee.step() is StepOutcome.FINISHED  # 手番 3: 計画(end)
+
+    calls = [(c.turn_input.phase, c.turn_input) for c in env.agents.calls_for("candidate")]
+    assert [phase for phase, _ in calls] == ["plan", "decide", "plan", "decide", "plan"]
+    schema_invalid = LastInvalid(move=None, package=None, evaluation=None)  # レフェリーが登録した無効手は、手の中身が分からない
+    assert [(t.last_error, t.last_invalid) for _, t in calls] == [
+        (None, None),  # 手番 1 の計画
+        (None, None),  # 手番 1 の決定(まだ無効な手は出ていない)
+        ("schema_invalid", schema_invalid),  # 手番 2 の計画
+        ("schema_invalid", schema_invalid),  # 手番 2 の決定: 間に確かめ(check)が入っても、残っている
+        (None, None),  # 手番 3 の計画: 有効な提案と相手の断りの後
+    ]
+    assert [e.kind for e in store.get_events(nid, "candidate")] == [
+        "check",
+        "invalid",
+        "check",
+        "propose",
+        "offer_rejected",
+        "final_result",
+    ]
 
 
 @pytest.mark.anyio

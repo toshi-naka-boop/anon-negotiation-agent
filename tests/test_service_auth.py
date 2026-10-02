@@ -22,7 +22,7 @@ import logging
 
 import httpx
 import pytest
-from agents_helpers import NID, PACKAGE, agents_app, move_json, stub_llm, valid_data  # noqa: F401  (フィクスチャは import して使う)
+from agents_helpers import NID, PACKAGE, agents_app, move_json, plan_json, stub_llm, valid_data  # noqa: F401  (フィクスチャは import して使う)
 from negotiation_core.schema import TurnInput
 
 import agents.client as agents_client_module
@@ -495,7 +495,7 @@ async def test_a_failure_to_obtain_the_token_is_a_connection_error_for_the_refer
 
 async def _run_demo_until_judged(env, store, stub_llm) -> str:
     """デモの交渉を作り、レフェリーが金庫と agents を呼んで判定まで進めるのを待つ。"""
-    remaining = [move_json("propose", PACKAGE), move_json("accept")]
+    remaining = [plan_json("propose", PACKAGE), plan_json("accept")]
     stub_llm.behavior = lambda _request: remaining.pop(0)
     candidate_template, employer_template = put_candidate_and_employer_templates(store._db)
     created = await env.browser().post(
@@ -817,7 +817,7 @@ async def test_send_turn_gets_a_new_token_and_sends_once_more_when_agents_reject
     # 同じリクエストを 1 回だけ送り直す。送り直しが通れば、受信口は 1 回だけ動き、Move が返る。
     agents_calls.reject_first, agents_calls.reject_status = 1, status  # 最初の 1 回は、app に渡さずに断る
 
-    data = await send_turn(
+    data, _usage = await send_turn(
         AGENTS_URL, "candidate", _turn_input(), nid=NID, timeout_s=5, auth=IdTokenAuth(provider, AGENTS_URL)
     )
 

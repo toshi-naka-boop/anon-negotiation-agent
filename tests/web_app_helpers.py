@@ -45,7 +45,7 @@ class IdleAgents(ScriptedAgents):
     タスクの cancel(テストの後始末)でだけ抜ける。
     """
 
-    async def __call__(self, role, turn_input, *, nid, timeout_s) -> dict:
+    async def __call__(self, role, turn_input, *, nid, timeout_s):
         if not self._scripts[role]:
             self.calls.append(AgentCall(role=role, nid=nid, timeout_s=timeout_s, turn_input=turn_input))
             await asyncio.Event().wait()
@@ -194,12 +194,15 @@ def build_web_env(
     use_stub_agents: bool = True,
     run_referees: bool = False,
     token_provider=None,
+    startup_sweep_done: bool = True,
 ) -> WebAppEnv:
     """web の app を組み立てる。vault には、金庫のクライアントを包んだもの(止める仕掛けなど)も渡せる。
 
     use_stub_agents=False にすると、send_turn を差し込まず、agents_base_url を束ねた本物の
     agents.client.send_turn を使う(結合のテスト)。run_referees の既定は False(モジュールの docstring を参照)。
     token_provider を渡すと、本物の send_turn は、agents の呼び出しにサービス間の ID トークンを付ける(台帳 X-37)。
+    startup_sweep_done の既定は True: テストの app は lifespan(起動時の見回り)を動かさないので、起動時の見回りが終わるまで
+    新規の作成を断る仕組み(§8.2・台帳 X-53)を、既定では済ませたことにする(その仕組みを確かめるテストだけ False にする)。
     """
     agents = IdleAgents()
     sleep = FakeSleep(clock)
@@ -232,6 +235,8 @@ def build_web_env(
     )
     if not run_referees:
         env.disable_referees()
+    if startup_sweep_done:
+        env.services.sweeper._first_sweep_done = True
     return env
 
 

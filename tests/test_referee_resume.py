@@ -24,6 +24,7 @@ from web_helpers import (
     create_demo_negotiation,
     create_live_negotiation,
     move_dict,
+    plan_dict,
 )
 
 _HOUR = dt.timedelta(hours=1)
@@ -45,34 +46,38 @@ async def _finish(env, nid, timeout: float = 30) -> None:
 @pytest.mark.anyio
 async def test_recreated_referee_task_continues_from_the_same_turn(store, web_env):
     # DV-08: レフェリーのタスクを途中で止めて作り直すと、見回りが一覧から拾い、同じ手番から続く。
-    # 候補者の 2 手目のエージェント呼び出しの最中に web が落ちる → 起動し直した見回りがタスクを作り直し、
-    # 同じ入力(同じ手番・同じ history)で呼び直す。すでに登録された手(確認手)は重複しない。
+    # 候補者の手番の、確かめの後の決定の呼び出しの最中に web が落ちる → 起動し直した見回りがタスクを作り直し、
+    # 同じ手番を計画から始める。済んだ確かめは履歴から埋まるので、金庫の check は重複せず、評価も重ねて消費しない。
+    # 決定の入力は、落ちる前と同じになる(同じ手番・同じ history・同じ checked・同じ残り)。
     env = web_env
     package = sample_package()
     nid = create_demo_negotiation(store)
     blocker = Blocker()
-    env.agents.script("candidate", move_dict("check", package), blocker)
+    env.agents.script("candidate", plan_dict(checks=[package]), blocker)  # 計画 → 確かめ → 決定(応答のないまま落ちる)
 
     first_report = await env.sweeper.sweep_once()
     assert (first_report.listed, first_report.tasks_started) == (1, 1)
     await asyncio.wait_for(blocker.started.wait(), timeout=10)
     interrupted = env.agents.calls[-1]
+    assert interrupted.turn_input.phase == "decide"
+    assert store.get_view(nid, "candidate").budget.remaining_evaluations == 16  # 確かめで評価を 1 使った
 
     await env.restart()  # web が落ちて、タスクが消えた
     assert not env.manager.is_running(nid)
 
-    env.agents.script("candidate", move_dict("propose", package))
+    env.agents.script("candidate", plan_dict(checks=[package]), move_dict("propose", package))
     env.agents.script("employer", move_dict("accept"))
     second_report = await env.sweeper.sweep_once()
     assert (second_report.listed, second_report.tasks_started) == (1, 1)
     assert second_report.stages_created == 0  # 段階開示の状態は、すでにある
     await _finish(env, nid)
 
-    resumed = env.agents.calls[2]
-    assert (resumed.role, resumed.nid) == (interrupted.role, interrupted.nid)
+    replanned, resumed = env.agents.calls[2], env.agents.calls[3]
+    assert (replanned.role, replanned.nid) == (interrupted.role, interrupted.nid)
+    assert replanned.turn_input.phase == "plan" and replanned.turn_input.own_move_number == 1  # 確かめ 1 回は登録済み
+    assert resumed.turn_input.phase == "decide"
     assert resumed.turn_input.model_dump() == interrupted.turn_input.model_dump()  # 同じ手番・同じ入力
-    assert resumed.turn_input.own_move_number == 1  # 確認手 1 回は登録済み
-    assert [e.kind for e in store.get_events(nid, "candidate")] == ["check", "propose", "final_result"]
+    assert [e.kind for e in store.get_events(nid, "candidate")] == ["check", "propose", "final_result"]  # 確かめは重ならない
     assert store.get_view(nid, "candidate").status == "judged"
 
 
