@@ -12,7 +12,7 @@ from a2a.helpers import new_data_part, new_text_part
 from google.protobuf import json_format, struct_pb2
 from negotiation_core.schema import AttackerTurnInput, Move, TurnInput
 
-from agents.wire import ROLES, endpoint_path, part_kind, struct_to_python, value_to_python
+from agents.wire import PHASES, ROLES, endpoint_path, part_kind, struct_to_python, value_to_python
 from agents_helpers import PACKAGE, valid_data
 
 
@@ -69,3 +69,8 @@ def test_part_kind_distinguishes_data_and_text():
 def test_endpoint_paths_follow_the_design_table():
     # §4.3 (受信口のパス)
     assert [endpoint_path(role) for role in ROLES] == ["/a2a/candidate", "/a2a/employer", "/a2a/attacker"]
+
+
+def test_phases_follow_the_schema():
+    # §2.7・§4.2 (呼び出しの種類は、計画(plan)と決定(decide)の 2 つ。TurnInput.phase の列挙と同じ)
+    assert PHASES == ("plan", "decide")

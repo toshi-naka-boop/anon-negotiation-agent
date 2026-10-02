@@ -10,6 +10,11 @@ a2a-sdk のサーバで、受信口ごとに自前の AgentExecutor(agents.execu
 
 - 各受信口は JSON-RPC の口で、その下の `/.well-known/agent-card.json` に Agent Card を公開する
   (A2A の標準の場所。例: `/a2a/candidate/.well-known/agent-card.json`)。
+- 各受信口は、`TurnInput.phase` で、計画の LlmAgent(出力は Plan)か決定の LlmAgent(出力は Move)かを選ぶ。つまり
+  LlmAgent は 側 × 呼び出しの種類 の 6 体で、指示文は側ごとに 1 つを共有する(§4.2)。応答の artifact の metadata に、その
+  呼び出しの使用量 `usage` を載せる(§4.3・台帳 X-58)。
+- モデルは、ADK の `Gemini` に、クライアント側の自動再試行を切る設定(attempts=1)を渡して作る。起動時(この
+  `create_app`)に、設定の再試行の回数が 1 であることを検証し、違えば起動を止める(台帳 X-55)。
 - 受信本文の上限は 32 KB(設定ファイル)。超えたら、LLM を動かさずに A2A のエラーを返す。
 - agents はストレージを持たない。A2A のタスクは保存せず(受け取った入力を保持しない)、
   ADK のセッションも実行のたびに作って捨てる(§1.1・§4.2)。
@@ -57,9 +62,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from agents.config import DEFAULT_AGENTS_CONFIG, AgentsConfig
 from agents.executor import NegotiationExecutor
-from agents.llm_agents import build_llm_agent, build_runner
+from agents.llm_agents import build_gemini_model, build_llm_agent, build_runner, require_no_http_retry
 from agents.validation import validate_request
-from agents.wire import DATA_MEDIA_TYPE, ROLES, Role, endpoint_path, struct_to_python
+from agents.wire import DATA_MEDIA_TYPE, PHASES, ROLES, Role, endpoint_path, struct_to_python
 from negotiation_core.schema import AttackerTurnInput, TurnInput
 
 _AGENT_VERSION = "0.1.0"
@@ -73,16 +78,17 @@ _INPUT_MODELS: dict[Role, type[TurnInput]] = {
 
 _CARD_DESCRIPTIONS: dict[Role, str] = {
     "candidate": (
-        "Negotiation agent for the candidate side. "
-        "Takes one turn-input/v1 DataPart, returns one move/v1 DataPart."
+        "Negotiation agent for the candidate side. Takes one turn-input/v1 DataPart, "
+        "returns one plan/v1 DataPart (phase=plan) or one move/v1 DataPart (phase=decide)."
     ),
     "employer": (
-        "Negotiation agent for the employer side. "
-        "Takes one turn-input/v1 DataPart, returns one move/v1 DataPart."
+        "Negotiation agent for the employer side. Takes one turn-input/v1 DataPart, "
+        "returns one plan/v1 DataPart (phase=plan) or one move/v1 DataPart (phase=decide)."
     ),
     "attacker": (
         "Employer-side negotiation agent for attack mode. Takes one turn-input/v1 DataPart with a "
-        "principal_instruction field, returns one move/v1 DataPart."
+        "principal_instruction field, returns one plan/v1 DataPart (phase=plan) or one move/v1 DataPart "
+        "(phase=decide)."
     ),
 }
 
@@ -192,8 +198,8 @@ def _build_agent_card(role: Role, config: AgentsConfig) -> AgentCard:
                 id="negotiate-turn",
                 name="Negotiate one turn",
                 description=(
-                    "Decide one move (propose, accept, reject, check, ask_principal or end) "
-                    "for the given turn input."
+                    "Plan which packages to check, or decide one move (propose, accept, reject, ask_principal "
+                    "or end), for the given turn input."
                 ),
                 tags=["negotiation"],
                 input_modes=[DATA_MEDIA_TYPE],
@@ -203,25 +209,33 @@ def _build_agent_card(role: Role, config: AgentsConfig) -> AgentCard:
     )
 
 
-def create_app(*, model: str | BaseLlm | None = None, config: AgentsConfig = DEFAULT_AGENTS_CONFIG) -> Starlette:
+def create_app(*, model: BaseLlm | None = None, config: AgentsConfig = DEFAULT_AGENTS_CONFIG) -> Starlette:
     """3 つの受信口(候補者側・求人側・攻撃モードの求人側)を持つ Starlette アプリを作る。
 
-    model を渡すと、設定ファイルのモデル名の代わりに、その BaseLlm(テスト用のスタブ)を 3 体とも使う。
-    LLM を呼ぶ前に接続することはない(モデルの解決は、最初の実行のときに行われる)。
+    LlmAgent は 側 × 呼び出しの種類(計画・決定)の 6 体で、受信口ごとに、phase で動かす Runner を選ぶ(§4.2)。
+    model を渡すと、その BaseLlm(テスト用のスタブ)を 6 体とも使う。渡さなければ、設定のモデル名の ADK `Gemini` を、
+    クライアント側の自動再試行を切って(attempts=1)作る。設定の再試行の回数が 1 でなければ、ここで ValueError を
+    投げて起動を止める(台帳 X-55。スタブを渡したときも検証する)。LLM を呼ぶ前に接続することはない
+    (モデルへの接続は、最初の実行のときに行われる)。
     """
-    llm = config.model if model is None else model
+    require_no_http_retry(config)
+    llm = build_gemini_model(config) if model is None else model
     routes = []
     handlers = []
     runners = {}
     for role in ROLES:
-        agent = build_llm_agent(role, model=llm, temperature=config.temperature)
-        runner = build_runner(agent, InMemorySessionService())
+        role_runners = {}
+        for phase in PHASES:
+            agent = build_llm_agent(role, phase, model=llm, config=config)
+            role_runners[phase] = build_runner(agent, InMemorySessionService())
+            runners[(role, phase)] = role_runners[phase]
         card = _build_agent_card(role, config)
         handler = DefaultRequestHandler(
             agent_executor=NegotiationExecutor(
                 role=role,
                 input_model=_INPUT_MODELS[role],
-                runner=runner,
+                runners=role_runners,
+                model_name=config.model,
                 llm_timeout_seconds=config.llm_timeout_seconds,
             ),
             task_store=_NullTaskStore(),
@@ -231,7 +245,6 @@ def create_app(*, model: str | BaseLlm | None = None, config: AgentsConfig = DEF
         routes += create_jsonrpc_routes(handler, rpc_url=endpoint_path(role))
         routes += create_agent_card_routes(card, card_url=endpoint_path(role) + AGENT_CARD_WELL_KNOWN_PATH)
         handlers.append(handler)
-        runners[role] = runner
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -244,5 +257,6 @@ def create_app(*, model: str | BaseLlm | None = None, config: AgentsConfig = DEF
         middleware=[Middleware(BodySizeLimitMiddleware, max_bytes=config.max_request_body_bytes)],
         lifespan=lifespan,
     )
-    app.state.runners = runners  # role -> ADK の Runner(セッションが残っていないことの確認などに使う)
+    # (側, 呼び出しの種類) -> ADK の Runner(セッションが残っていないことの確認、診断用のプラグインの登録などに使う)
+    app.state.runners = runners
     return app

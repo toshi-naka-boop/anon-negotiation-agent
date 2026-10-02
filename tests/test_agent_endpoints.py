@@ -1,6 +1,9 @@
 """agents の A2A 受信口(design.md §4.2・§4.3・§8.1 の壁 1)。
 
-- 壁 1 の経路: 有効な TurnInput が /a2a/candidate に届くと、LLM(スタブ)が動き、Move が DataPart で返る。
+- 壁 1 の経路: 有効な TurnInput が /a2a/candidate に届くと、LLM(スタブ)が動き、計画(phase=plan)なら Plan、決定(phase=decide)なら
+  Move が DataPart で返る。応答の artifact の metadata に、その呼び出しの usage(台帳 X-58)が載る。
+- 出力が max_output_tokens で切れた(finish_reason が MAX_TOKENS)ときは、一時的でない A2A のエラー(truncated の印と usage つき。
+  台帳 C-53)になる。
 - Agent Card が A2A の標準の場所で公開される。
 - LLM の一時的なエラー(429・5xx・時間切れ)は、一時的だと分かる A2A のエラーで返る。それ以外の失敗は印なし。
 - 入力・出力の値が、エラーにもログにも出てこない。何も保存しない(タスク・セッション)。
@@ -15,15 +18,18 @@ import re
 import httpx
 import pytest
 from a2a.client import A2ACardResolver
+from google.adk.models.google_llm import Gemini
+from google.adk.models.llm_response import LlmResponse
 from google.genai import errors as genai_errors
+from google.genai import types
 from google.protobuf import json_format, struct_pb2
-from negotiation_core.schema import Move
+from negotiation_core.schema import Move, Plan, Usage
 from pydantic import ValidationError
 
 import agents.executor as executor_module
 from agents.app import create_app
 from agents.config import DEFAULT_AGENTS_CONFIG
-from agents.wire import value_to_python
+from agents.wire import PHASES, value_to_python
 from agents_helpers import (  # noqa: F401  (フィクスチャは import して使う)
     BASE_URL,
     NID,
@@ -36,14 +42,18 @@ from agents_helpers import (  # noqa: F401  (フィクスチャは import して
     assert_rejected,
     data_part,
     http,
+    llm_response,
     message_json,
     move_data_of,
     move_json,
+    plan_json,
+    remaining_sessions,
     rpc_body,
     send_message,
     send_raw,
     stub_llm,
     text_part,
+    usage_of,
     valid_data,
 )
 
@@ -69,26 +79,169 @@ def _error_info(body: dict) -> dict:
 # --- 壁 1 の経路 ---
 
 
-async def test_valid_turn_input_reaches_the_llm_and_the_move_comes_back_as_a_datapart(http, stub_llm):
-    # §8.1 壁 1 (有効な TurnInput が /a2a/candidate に届くと、LLM が動き、Move が DataPart で返る)
-    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+@pytest.mark.parametrize("phase", PHASES)
+async def test_valid_turn_input_reaches_the_llm_and_the_plan_or_move_comes_back_as_a_datapart(phase, http, stub_llm):
+    # §8.1 壁 1 (有効な TurnInput が /a2a/candidate に届くと、LLM が動き、phase=plan なら Plan、phase=decide なら Move が
+    # DataPart で返る。レフェリーも壁 1 の画面も、返ってきた data をその型として検証する)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate", phase))])
 
     assert len(stub_llm.requests) == 1
-    data = move_data_of(body)  # タスクは COMPLETED で、DataPart がちょうど 1 つ
-    assert data == json.loads(move_json())
-    part = body["result"]["task"]["artifacts"][0]["parts"][0]
-    assert part["mediaType"] == "application/json"
-    # レフェリーは、返ってきた data を Move として検証する。線の上の数値(double)は、整数に戻せば有効
+    data = move_data_of(body)  # タスクは COMPLETED で、artifact も DataPart もちょうど 1 つ
+    expected = plan_json("propose") if phase == "plan" else move_json()
+    assert data == json.loads(expected)
+    artifact = body["result"]["task"]["artifacts"][0]
+    assert artifact["name"] == ("plan" if phase == "plan" else "move")
+    assert artifact["parts"][0]["mediaType"] == "application/json"
+    # 線の上の数値(double)は、整数に戻せば有効
     restored = value_to_python(json_format.ParseDict(data, struct_pb2.Value()))
-    assert Move.model_validate(restored).package.salary == PACKAGE["salary"]
+    model = Plan if phase == "plan" else Move
+    assert model.model_validate_json(json.dumps(restored)).package.salary == PACKAGE["salary"]
 
 
-async def test_the_move_is_returned_as_is_without_validation(http, stub_llm):
-    # §4.1・§4.3 (Move としての検証はレフェリーの仕事。スキーマ違反の手も、そのままレフェリーに届く)
+@pytest.mark.parametrize("phase", PHASES)
+async def test_the_plan_or_move_is_returned_as_is_without_validation(phase, http, stub_llm):
+    # §4.1・§4.3 (Plan・Move としての検証はレフェリーの仕事。スキーマ違反の出力も、そのままレフェリーに届く)
     off_grid = dict(PACKAGE, salary=610)
-    stub_llm.behavior = lambda _request: move_json("propose", off_grid)
+    if phase == "plan":
+        stub_llm.behavior = lambda _request: plan_json(checks=[off_grid])
+    else:
+        stub_llm.behavior = lambda _request: move_json("propose", off_grid)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate", phase))])
+    data = move_data_of(body)
+    assert (data["checks"][0] if phase == "plan" else data["package"])["salary"] == 610
+
+
+# --- 使用量(usage。台帳 X-58) ---
+
+
+@pytest.mark.parametrize("phase", PHASES)
+@pytest.mark.parametrize("role", ROLES)
+async def test_the_response_artifact_metadata_carries_the_usage_of_the_call(role, phase, http, stub_llm):
+    # §4.3・台帳 X-58 (応答の artifact の metadata は usage だけ。ADK の最終応答の usage_metadata から作る。model は設定の値、
+    # requests はその実行で LLM を呼んだ回数(1))
+    output = plan_json("propose") if phase == "plan" else move_json()
+    stub_llm.behavior = lambda _request: llm_response(output, prompt=1234, cached=100, thoughts=300, output=50)
+    body = await send_message(http, role, [data_part(valid_data(role, phase))])
+
+    usage = usage_of(body)
+    assert usage == {
+        "model": DEFAULT_AGENTS_CONFIG.model,
+        "prompt_tokens": 1234,
+        "cached_tokens": 100,
+        "thoughts_tokens": 300,
+        "output_tokens": 50,
+        "requests": 1,
+    }
+    # 線の上の数値(double)を整数に戻せば、strict な Usage として有効
+    restored = value_to_python(json_format.ParseDict(usage, struct_pb2.Value()))
+    assert Usage.model_validate_json(json.dumps(restored)).thoughts_tokens == 300
+
+
+async def test_usage_items_that_the_model_did_not_report_are_zero(http, stub_llm):
+    # §4.3 (取れない項目は 0。usage_metadata が丸ごとない応答でも、requests は 1 で、model は設定の値)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])  # スタブの既定の応答は usage_metadata なし
+    assert usage_of(body) == {
+        "model": DEFAULT_AGENTS_CONFIG.model,
+        "prompt_tokens": 0,
+        "cached_tokens": 0,
+        "thoughts_tokens": 0,
+        "output_tokens": 0,
+        "requests": 1,
+    }
+
+    stub_llm.behavior = lambda _request: llm_response(plan_json("propose"), prompt=40, thoughts=None, output=7, cached=None)
     body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
-    assert move_data_of(body)["package"]["salary"] == 610
+    assert usage_of(body) == {
+        "model": DEFAULT_AGENTS_CONFIG.model,
+        "prompt_tokens": 40,
+        "cached_tokens": 0,
+        "thoughts_tokens": 0,
+        "output_tokens": 7,
+        "requests": 1,
+    }
+
+
+async def test_usage_names_the_configured_model_not_the_stub_model(http, stub_llm):
+    # §4.3 (usage.model は、設定ファイルのモデル名。差し込んだスタブの名前(stub-llm)ではない)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    assert stub_llm.model == "stub-llm"
+    assert usage_of(body)["model"] == DEFAULT_AGENTS_CONFIG.model == "gemini-3.5-flash"
+
+
+# --- 出力が max_output_tokens で切れた(finish_reason が MAX_TOKENS。台帳 C-53) ---
+
+
+def _cut_off(output_text: str | None) -> LlmResponse:
+    """finish_reason が MAX_TOKENS の応答。text があれば途中で切れた出力、なければ思考だけで尽きた(ADK の error_code の形)。"""
+    usage_metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=900, thoughts_token_count=2000, candidates_token_count=48
+    )
+    if output_text is None:
+        return LlmResponse(
+            error_code="MAX_TOKENS",
+            error_message="max tokens",
+            usage_metadata=usage_metadata,
+            finish_reason=types.FinishReason.MAX_TOKENS,
+        )
+    return LlmResponse(
+        content=types.Content(role="model", parts=[types.Part(text=output_text)]),
+        usage_metadata=usage_metadata,
+        finish_reason=types.FinishReason.MAX_TOKENS,
+    )
+
+
+@pytest.mark.parametrize("phase", PHASES)
+@pytest.mark.parametrize(
+    "cut_off_output",
+    ['{"schema": "plan/v1", "checks": [{"salary": "65', None, '{"schema": "move/v1", "move": "end"}'],
+    ids=["cut_in_the_middle_of_the_json", "no_output_at_all", "complete_json_but_finish_reason_is_max_tokens"],
+)
+async def test_an_output_cut_off_at_max_output_tokens_is_a_truncated_non_transient_error_with_usage(
+    phase, cut_off_output, http, stub_llm, agents_app
+):
+    # §4.3・台帳 C-53・DV-17 (finish_reason が MAX_TOKENS なら、結果を返さず、一時的でない InternalError に truncated の印と、
+    # その呼び出しの usage を付けて返す。切れ方によらない: JSON の途中で切れた・出力が 1 文字もない(思考で尽きた)・
+    # たまたま完結している。レフェリーは output_truncated の無効手として登録する)
+    stub_llm.behavior = lambda _request: _cut_off(cut_off_output)
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate", phase))])
+
+    assert "result" not in body
+    assert body["error"]["code"] == -32603  # InternalError
+    info = _error_info(body)
+    assert info["truncated"] == "true"
+    assert "transient" not in info  # 一時的ではない(再試行しても同じ入力では同じように切れ得る)
+    assert info["usage"] == {
+        "model": DEFAULT_AGENTS_CONFIG.model,
+        "prompt_tokens": 900,
+        "cached_tokens": 0,
+        "thoughts_tokens": 2000,
+        "output_tokens": 48,
+        "requests": 1,
+    }
+    assert len(stub_llm.requests) == 1  # 受信口は再試行しない
+    assert await remaining_sessions(agents_app) == []
+
+
+async def test_a_finished_output_is_not_marked_truncated(http, stub_llm):
+    # §4.3 (対照: finish_reason が STOP の応答は、切れた印のない成功。他の終わり方(finish_reason なし)も同じ)
+    for finish_reason in (types.FinishReason.STOP, None):
+        stub_llm.behavior = lambda _request, reason=finish_reason: llm_response(
+            plan_json("propose"), finish_reason=reason, prompt=10, thoughts=5, output=5
+        )
+        body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+        assert "error" not in body, body
+        assert usage_of(body)["thoughts_tokens"] == 5
+
+
+async def test_the_cut_off_output_does_not_appear_in_the_error_or_the_logs(http, stub_llm, caplog):
+    # §7・台帳 C-53 (切れた出力は、入力の値を含み得る。エラーにもログにも出さない。載せるのは usage の数とモデル名だけ)
+    caplog.set_level(logging.INFO)
+    stub_llm.behavior = lambda _request: _cut_off(f'{{"schema": "plan/v1", "note": "{CANARY}')
+    body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
+    assert _error_info(body)["truncated"] == "true"
+    assert CANARY not in json.dumps(body, ensure_ascii=False)
+    assert CANARY not in caplog.text
+    assert "cut off" in caplog.text  # 対照: 切れたことは、値なしでログに残る
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -236,17 +389,21 @@ async def test_llm_run_that_takes_too_long_is_a_transient_error():
         body = await send_message(http, "candidate", [data_part(valid_data("candidate"))])
     assert body["error"]["code"] == -32603
     assert _error_info(body).get("transient") == "true"
-    sessions = await app.state.runners["candidate"].session_service.list_sessions(app_name="agents")
-    assert sessions.sessions == []  # 途中で止めても、セッションは残らない
+    assert await remaining_sessions(app) == []  # 途中で止めても、セッションは残らない
 
 
 async def test_default_model_is_the_one_r3_confirmed_and_the_app_does_not_connect_until_the_first_run():
-    # §4.2・R-3・台帳 I-10 (設定ファイルのモデル名は、R-3 で確かめた gemini-3.5-flash。プロジェクトと場所は、設定に書かず
-    # 環境変数で渡す)。スタブを差し込まない create_app は、モデル名を渡すだけで、最初の実行まで Vertex AI に接続しない
-    # (実行すると本物の Gemini を呼ぶので、ここでは動かさない。本物の実行は scripts/run_demo.py --live)
+    # §4.2・R-3・台帳 I-10・X-55 (設定ファイルのモデル名は、R-3 で確かめた gemini-3.5-flash。プロジェクトと場所は、設定に書かず
+    # 環境変数で渡す)。スタブを差し込まない create_app は、ADK の Gemini を、クライアント側の自動再試行を切って
+    # (retry_options.attempts=1)作るだけで、最初の実行まで Vertex AI に接続しない(実行すると本物の Gemini を呼ぶので、ここでは
+    # 動かさない。本物の実行は scripts/run_demo.py --live。HTTP の要求が 1 回であることは tests/test_agent_http_retry.py)
     assert DEFAULT_AGENTS_CONFIG.model == "gemini-3.5-flash"
     app = create_app()
-    assert {runner.agent.model for runner in app.state.runners.values()} == {"gemini-3.5-flash"}
+    models = [runner.agent.model for runner in app.state.runners.values()]
+    assert len(models) == 6  # 側 × 呼び出しの種類
+    assert all(isinstance(model, Gemini) for model in models)
+    assert {model.model for model in models} == {"gemini-3.5-flash"}
+    assert {model.retry_options.attempts for model in models} == {1}
 
 
 # --- 何も保存しない ---
@@ -261,9 +418,9 @@ async def test_no_session_remains_after_a_run(error, http, stub_llm, agents_app)
     # §4.2 (A2A のタスクごとに新しいセッションを作って捨てる。成功でも失敗でも残らない)
     if error is not None:
         stub_llm.behavior = _raises(error)
-    await send_message(http, "candidate", [data_part(valid_data("candidate"))])
-    sessions = await agents_app.state.runners["candidate"].session_service.list_sessions(app_name="agents")
-    assert sessions.sessions == []
+    for phase in PHASES:
+        await send_message(http, "candidate", [data_part(valid_data("candidate", phase))])
+    assert await remaining_sessions(agents_app) == []
 
 
 async def test_no_background_task_remains_after_requests(http, stub_llm):

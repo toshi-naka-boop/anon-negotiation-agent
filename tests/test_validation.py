@@ -2,7 +2,8 @@
 
 AC-04 が挙げる 8 種のうち、スキーマ(pydantic)だけで判定できる 5 種
 (未定義の項目・列挙外の値・範囲外の数値・グリッド外の値・ID の形式違反)を、
-§2.7 のすべてのメッセージ型(Package・TurnInput・AttackerTurnInput・Move)について確かめる(1a)。
+§2.7 のすべてのメッセージ型(Package・TurnInput・AttackerTurnInput・Move・Plan)について確かめる(1a。Plan・phase・
+checked は v14 で足した: 呼び出しの種類 phase は必須で、plan・decide のどちらかだけ。checked は最大 3 件)。
 
 1c(受信口)では、8 種すべてを、agents の 3 つの受信口(/a2a/candidate・/a2a/employer・/a2a/attacker)で
 確かめる(ファイルの後半)。残りの 3 種(TextPart、TurnInput 用の受信口への principal_instruction、
@@ -48,7 +49,7 @@ import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from negotiation_core.policy import Package, Verdict
-from negotiation_core.schema import AttackerTurnInput, Budget, Id, Move, TurnInput
+from negotiation_core.schema import AttackerTurnInput, Budget, CheckedPackage, Id, Move, Plan, TurnInput
 from web.referee import StepOutcome
 from web_helpers import create_demo_negotiation
 
@@ -93,7 +94,9 @@ def _valid_turn_input_dict() -> dict:
         pending_offer=None,
         last_check=None,
         last_error=None,
-        budget={"remaining_evaluations": 16, "remaining_moves": 6, "remaining_principal_checks": 1},
+        budget={"remaining_evaluations": 17, "remaining_moves": 6, "remaining_principal_checks": 1},
+        phase="plan",
+        checked=[],
     )
 
 
@@ -150,7 +153,14 @@ def test_move_rejects_undefined_field():
 def test_move_rejects_out_of_enum_move_type():
     # AC-04 (列挙外の値 / Move)
     with pytest.raises(ValidationError):
-        Move(schema="move/v1", move="withdraw", package=dict(VALID_PACKAGE))  # 6 種のどれでもない
+        Move(schema="move/v1", move="withdraw", package=dict(VALID_PACKAGE))  # 5 種のどれでもない
+
+
+def test_move_rejects_check_because_it_is_not_a_move_the_agent_can_make():
+    # AC-04・§2.7・台帳 X-45 (check は、エージェントが出せる手ではない。確かめは Plan.checks でしか行えない。列挙外の値として拒否)
+    with pytest.raises(ValidationError):
+        Move(schema="move/v1", move="check", package=dict(VALID_PACKAGE))
+    assert Move(schema="move/v1", move="propose", package=dict(VALID_PACKAGE)).move == "propose"  # 対照: 5 種は通る
 
 
 def test_move_rejects_off_grid_numeric_in_nested_package():
@@ -158,6 +168,70 @@ def test_move_rejects_off_grid_numeric_in_nested_package():
     bad_package = dict(VALID_PACKAGE, night_duty=3)  # 0,2,4,6,8 のどれでもない
     with pytest.raises(ValidationError):
         Move(schema="move/v1", move="propose", package=bad_package)
+
+
+# --- Plan(計画の出力。§2.7・§4.1。checks は最大 3 件、checks が空のときだけ手を出す) ---
+
+
+def test_a_valid_plan_is_accepted_in_each_of_its_shapes():
+    # AC-04 の対照: 有効な Plan は通る(確かめる案だけ・確かめの要らない手だけ・両方)。以降の拒否が、違反のためであることを示す。
+    # 両方があるときは、レフェリーが checks を実行して move を無視する(台帳 C-51)ので、検証は通る。
+    only_checks = Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE), dict(VALID_PACKAGE, salary=700)])
+    only_move = Plan(schema="plan/v1", checks=[], move="accept")
+    move_with_package = Plan(schema="plan/v1", checks=[], move="propose", package=dict(VALID_PACKAGE))
+    both = Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE)], move="propose", package=dict(VALID_PACKAGE))
+
+    assert [package.salary for package in only_checks.checks] == [650, 700]
+    assert only_move.move == "accept" and only_move.package is None
+    assert move_with_package.package.salary == 650
+    assert both.checks and both.move == "propose"
+    assert Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE)] * 3).checks  # 3 件ちょうどは通る
+
+
+def test_plan_rejects_undefined_field():
+    # AC-04 (未定義の項目 / Plan)
+    with pytest.raises(ValidationError):
+        Plan(schema="plan/v1", checks=[], move="accept", extra_field=1)
+
+
+def test_plan_rejects_a_wrong_schema_name():
+    # AC-04 (列挙外の値 / Plan。スキーマ名は plan/v1 だけ。Move の move/v1 は通らない)
+    with pytest.raises(ValidationError):
+        Plan(schema="move/v1", checks=[], move="accept")
+
+
+def test_plan_rejects_out_of_enum_and_check_moves():
+    # AC-04・§2.7・台帳 X-45 (列挙外の値 / Plan.move。check は、計画の手としても出せない。確かめは checks に並べるだけ)
+    for bad in ("withdraw", "check", "invalid"):
+        with pytest.raises(ValidationError):
+            Plan(schema="plan/v1", checks=[], move=bad, package=dict(VALID_PACKAGE))
+
+
+def test_plan_rejects_more_than_three_checks():
+    # AC-04・§2.7 (範囲外の数 / Plan.checks。最大 3 件)
+    with pytest.raises(ValidationError):
+        Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE)] * 4)
+
+
+def test_plan_rejects_off_grid_numeric_in_checks_and_in_package():
+    # AC-04 (グリッド外の値 / Plan。checks の要素と、package)
+    with pytest.raises(ValidationError):
+        Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE, salary=310)])
+    with pytest.raises(ValidationError):
+        Plan(schema="plan/v1", checks=[], move="propose", package=dict(VALID_PACKAGE, night_duty=3))
+    with pytest.raises(ValidationError):
+        Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE, unexpected_field="x")])  # 組み合わせの中の未定義の項目
+
+
+def test_plan_needs_checks_or_a_move_and_a_move_that_needs_a_package_has_one():
+    # §2.7・台帳 L12-3 (どちらもない Plan は無効。checks が空で propose・ask_principal なら package が要る)
+    with pytest.raises(ValidationError):
+        Plan(schema="plan/v1")
+    with pytest.raises(ValidationError):
+        Plan(schema="plan/v1", checks=[])
+    for move in ("propose", "ask_principal"):
+        with pytest.raises(ValidationError):
+            Plan(schema="plan/v1", checks=[], move=move)
 
 
 # --- TurnInput・AttackerTurnInput(線の上のデータと同じく、JSON として検証する。モジュールの docstring を参照) ---
@@ -263,6 +337,99 @@ def test_attacker_turn_input_rejects_off_grid_numeric_in_history_package():
     data = _valid_attacker_turn_input_dict()
     data["history"][0]["package"]["review_months"] = 9  # 6,12 のどちらでもない
     assert _violated_fields(AttackerTurnInput, data) == {("history", 0, "package", "review_months")}
+
+
+# --- phase・checked(TurnInput の内側。§2.7・§4.1。TurnInput・AttackerTurnInput のどちらでも同じ) ---
+
+_CHECKED_ENTRY = {"package": dict(VALID_PACKAGE), "evaluation": "acceptable"}
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+@pytest.mark.parametrize("phase", ["plan", "decide"])
+def test_phase_accepts_plan_and_decide(model, builder, phase):
+    # AC-04 の対照(§2.7): 呼び出しの種類 phase は plan・decide のどちらでも通り、値がそのまま読み出せる
+    data = builder()
+    data["phase"] = phase
+    assert _validate_as_on_the_wire(model, data).phase == phase
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+def test_phase_is_required(model, builder):
+    # AC-04 (§2.7: phase は必須。受信口が phase で、計画の LlmAgent か決定の LlmAgent かを選ぶので、省けない)
+    data = builder()
+    del data["phase"]
+    assert _violated_fields(model, data) == {("phase",)}
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+@pytest.mark.parametrize("bad", ["check", "review", "", "PLAN", None, 1])
+def test_phase_rejects_out_of_enum_values(model, builder, bad):
+    # AC-04 (列挙外の値 / phase。plan・decide だけ)
+    data = builder()
+    data["phase"] = bad
+    assert _violated_fields(model, data) == {("phase",)}
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+@pytest.mark.parametrize(
+    "checked",
+    [
+        [],
+        [_CHECKED_ENTRY],
+        [{"package": dict(VALID_PACKAGE), "evaluation": None}],  # 確かめなかった案
+        [_CHECKED_ENTRY, {"package": dict(VALID_PACKAGE, salary=700), "evaluation": "not_acceptable"}, {"package": dict(VALID_PACKAGE, salary=750), "evaluation": None}],
+    ],
+    ids=["empty", "one", "unchecked", "three_in_order"],
+)
+def test_checked_accepts_the_valid_shapes(model, builder, checked):
+    # AC-04 の対照(§2.7): checked は、確かめた結果の並び(0〜3 件。確かめなかった案は evaluation が null)
+    data = builder()
+    data["phase"] = "decide"
+    data["checked"] = checked
+
+    validated = _validate_as_on_the_wire(model, data)
+
+    assert validated.model_dump(mode="json")["checked"] == checked
+    assert all(isinstance(entry, CheckedPackage) for entry in validated.checked)
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+@pytest.mark.parametrize(
+    "checked",
+    [
+        [{**_CHECKED_ENTRY, "note": "x"}],  # 未定義の項目
+        [{"package": dict(VALID_PACKAGE), "evaluation": "maybe"}],  # 列挙外の値(3 値)
+        [{"package": dict(VALID_PACKAGE, salary=305), "evaluation": "acceptable"}],  # グリッド外の値
+        [{"package": dict(VALID_PACKAGE, night_duty=3), "evaluation": None}],  # グリッド外の値
+        [{"package": dict(VALID_PACKAGE, unexpected_field="x"), "evaluation": None}],  # 組み合わせの中の未定義の項目
+        [{"package": dict(VALID_PACKAGE)}],  # 項目の欠け(evaluation は必須。値だけ null を許す)
+        [{"evaluation": "acceptable"}],  # package の欠け
+        [_CHECKED_ENTRY] * 4,  # 4 件(最大 3 件)
+        "acceptable",  # 配列でない
+        [None],  # 要素が辞書でない
+    ],
+    ids=[
+        "undefined_field",
+        "out_of_enum_evaluation",
+        "off_grid_salary",
+        "off_grid_night_duty",
+        "undefined_field_in_package",
+        "missing_evaluation",
+        "missing_package",
+        "four_entries",
+        "not_a_list",
+        "entry_is_null",
+    ],
+)
+def test_checked_rejects_violations(model, builder, checked):
+    # AC-04 (未定義の項目・列挙外の値・グリッド外の値・件数の超過 / checked。TurnInput・AttackerTurnInput の両方)。
+    # 拒否されるのは checked だけが違反だから: ほかの項目が同じで有効な checked なら、上の対照のとおり通る。
+    data = builder()
+    data["phase"] = "decide"
+    data["checked"] = checked
+    with pytest.raises(ValidationError) as excinfo:
+        _validate_as_on_the_wire(model, data)
+    assert {error["loc"][0] for error in excinfo.value.errors()} == {"checked"}
 
 
 # --- last_invalid(TurnInput の内側。台帳 C-40。TurnInput・AttackerTurnInput のどちらでも同じ) ---
@@ -430,6 +597,34 @@ def _violate_off_grid_in_last_invalid(data, metadata):
     data["last_invalid"] = _last_invalid(package=dict(VALID_PACKAGE, salary=305))
 
 
+def _violate_missing_phase(data, metadata):
+    del data["phase"]  # 呼び出しの種類は必須(§2.7)
+
+
+def _violate_out_of_enum_phase(data, metadata):
+    data["phase"] = "check"  # plan・decide のどちらでもない
+
+
+def _violate_off_grid_in_checked(data, metadata):
+    data["phase"] = "decide"
+    data["checked"] = [{"package": dict(VALID_PACKAGE, salary=305), "evaluation": "acceptable"}]
+
+
+def _violate_out_of_enum_evaluation_in_checked(data, metadata):
+    data["phase"] = "decide"
+    data["checked"] = [{"package": dict(VALID_PACKAGE), "evaluation": "maybe"}]
+
+
+def _violate_too_many_checked(data, metadata):
+    data["phase"] = "decide"
+    data["checked"] = [{"package": dict(VALID_PACKAGE), "evaluation": None}] * 4  # 最大 3 件
+
+
+def _violate_undefined_field_in_checked(data, metadata):
+    data["phase"] = "decide"
+    data["checked"] = [{"package": dict(VALID_PACKAGE), "evaluation": None, "note": "x"}]
+
+
 SCHEMA_VIOLATIONS = {
     "undefined_field": _violate_undefined_field,
     "out_of_enum": _violate_out_of_enum,
@@ -443,6 +638,13 @@ SCHEMA_VIOLATIONS = {
     "undefined_field_in_last_invalid": _violate_undefined_field_in_last_invalid,
     "out_of_enum_in_last_invalid": _violate_out_of_enum_in_last_invalid,
     "off_grid_in_last_invalid": _violate_off_grid_in_last_invalid,
+    # v14: 新しい項目 phase・checked も、同じ違反が拒否される(受信口が phase で LlmAgent を選ぶので、phase は必須)。
+    "missing_phase": _violate_missing_phase,
+    "out_of_enum_phase": _violate_out_of_enum_phase,
+    "off_grid_in_checked": _violate_off_grid_in_checked,
+    "out_of_enum_evaluation_in_checked": _violate_out_of_enum_evaluation_in_checked,
+    "too_many_checked": _violate_too_many_checked,
+    "undefined_field_in_checked": _violate_undefined_field_in_checked,
 }
 
 
@@ -479,12 +681,34 @@ _VIOLATIONS = {
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["plan", "decide"])
 @pytest.mark.parametrize("role", ROLES)
-async def test_valid_message_is_accepted_by_every_endpoint(role, http, stub_llm):
-    # AC-04 (対照: 違反のない有効なメッセージは通る。以降の拒否が、違反のためであることを示す)
-    body = await send_message(http, role, [data_part(valid_data(role))])
+async def test_valid_message_is_accepted_by_every_endpoint(role, phase, http, stub_llm):
+    # AC-04 (対照: 違反のない有効なメッセージは、計画(plan)でも決定(decide。checked つき)でも通る。以降の拒否が、違反のためであること
+    # を示す)
+    body = await send_message(http, role, [data_part(valid_data(role, phase))])
     assert "error" not in body, body
     assert len(stub_llm.requests) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ROLES)
+async def test_a_valid_checked_is_accepted_by_every_endpoint_and_reaches_the_llm_input(role, http, stub_llm):
+    # AC-04 の対照 / §2.7: 有効な checked(3 件。確かめなかった案は evaluation が null)は、どの受信口でも通り、LLM に渡る入力
+    # (TurnInput の JSON)に、計画の順のまま載る。
+    data = valid_data(role, "decide")
+    data["checked"] = [
+        {"package": dict(VALID_PACKAGE, salary=700), "evaluation": "not_acceptable"},
+        {"package": dict(VALID_PACKAGE, salary=650), "evaluation": "acceptable"},
+        {"package": dict(VALID_PACKAGE, salary=600), "evaluation": None},
+    ]
+
+    body = await send_message(http, role, [data_part(data)])
+
+    assert "error" not in body, body
+    (request,) = stub_llm.requests
+    (llm_input,) = [text for _, texts in request.contents for text in texts]
+    assert json.loads(llm_input)["checked"] == data["checked"]
 
 
 @pytest.mark.anyio
@@ -745,6 +969,11 @@ def _add_extra_to_pending_offer(data) -> None:
     data["pending_offer"] = {"package": dict(VALID_PACKAGE, **{SECRET: 1}), "own_evaluation": "acceptable"}
 
 
+def _add_extra_to_checked_package(data) -> None:
+    data["phase"] = "decide"
+    data["checked"] = [{"package": dict(VALID_PACKAGE, **{SECRET: 1}), "evaluation": "acceptable"}]
+
+
 # 名前を作れる場所ごとの、要求の作り方と、エラーに載るはずの場所(<unknown> つき)→ 件数。
 UNKNOWN_NAME_CASES = {
     "message_metadata": (
@@ -770,6 +999,10 @@ UNKNOWN_NAME_CASES = {
     "data_package_in_pending_offer": (
         _data_with(_add_extra_to_pending_offer),
         {"pending_offer.package.<unknown>": 1},
+    ),
+    "data_package_in_checked": (
+        _data_with(_add_extra_to_checked_package),
+        {"checked.0.package.<unknown>": 1},
     ),
 }
 

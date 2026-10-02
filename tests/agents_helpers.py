@@ -5,6 +5,7 @@ tests/conftest.py は変えない(agents は Firestore を使わない)ので、
 各テストファイルが import して使う。
 
 - 本物の LLM は呼ばない。ADK に差し込むスタブのモデル(StubLlm)が、LLM に渡った入力を記録する。
+  スタブは、既定では、受けた TurnInput の phase に応じた出力(plan は Plan、decide は Move)を返す(v14。§4.2)。
 - A2A の通信は、HTTP サーバを立てずに、httpx の ASGITransport で ASGI アプリに直接つなぐ。
 - 非同期のテストは anyio のプラグイン(starlette・httpx の依存として入っている)で動かす。
 """
@@ -25,6 +26,7 @@ from pydantic import Field
 
 from agents.app import create_app
 from agents.wire import ROLES, Role
+from negotiation_core.schema import Phase
 from starlette.applications import Starlette
 
 BASE_URL = "http://agents.test"
@@ -41,7 +43,7 @@ PACKAGE = dict(
 )
 
 CANDIDATE_BANDS = {"experience_band": "5_to_10y", "region_block": "kanto", "job_category": "it_web"}
-BUDGET = {"remaining_evaluations": 16, "remaining_moves": 6, "remaining_principal_checks": 1}
+BUDGET = {"remaining_evaluations": 17, "remaining_moves": 6, "remaining_principal_checks": 1}
 
 
 @pytest.fixture(scope="module")
@@ -51,11 +53,48 @@ def anyio_backend() -> str:
 
 
 def move_json(move: str = "propose", package: dict | None = None) -> str:
-    """LLM(スタブ)が返す Move の JSON の文字列。"""
+    """LLM(スタブ)が返す Move(決定の出力)の JSON の文字列。check はエージェントの手ではない(台帳 X-45)。"""
     body: dict[str, Any] = {"schema": "move/v1", "move": move}
-    if move in ("propose", "check", "ask_principal"):
+    if move in ("propose", "ask_principal"):
         body["package"] = dict(PACKAGE if package is None else package)
     return json.dumps(body)
+
+
+def plan_json(move: str | None = None, package: dict | None = None, *, checks: list[dict] | None = None) -> str:
+    """LLM(スタブ)が返す Plan(計画の出力)の JSON の文字列。
+
+    checks があれば、確かめたい組み合わせの並び(move は出さない)。checks が空で move があれば、確かめの要らない手
+    (§4.1 の 2.)。move が propose・ask_principal のときは package を付ける(省略すると PACKAGE)。
+    """
+    body: dict[str, Any] = {"schema": "plan/v1", "checks": [dict(check) for check in checks or []]}
+    if move is not None:
+        body["move"] = move
+        if move in ("propose", "ask_principal"):
+            body["package"] = dict(PACKAGE if package is None else package)
+    return json.dumps(body)
+
+
+def llm_response(
+    text: str,
+    *,
+    finish_reason: types.FinishReason | None = types.FinishReason.STOP,
+    prompt: int | None = None,
+    cached: int | None = None,
+    thoughts: int | None = None,
+    output: int | None = None,
+) -> LlmResponse:
+    """usage_metadata と finish_reason を持つ、LLM(スタブ)の応答。StubLlm.behavior が返すと、そのまま使われる。"""
+    usage = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=prompt,
+        cached_content_token_count=cached,
+        thoughts_token_count=thoughts,
+        candidates_token_count=output,
+    )
+    return LlmResponse(
+        content=types.Content(role="model", parts=[types.Part(text=text)]),
+        usage_metadata=usage,
+        finish_reason=finish_reason,
+    )
 
 
 @dataclass(frozen=True)
@@ -66,6 +105,8 @@ class RecordedRequest:
     contents: list[tuple[str, list[str]]]  # (role, [text, ...]) の並び
     response_schema: Any
     temperature: float | None
+    thinking_config: Any  # types.ThinkingConfig(thinking_level が思考の量)
+    max_output_tokens: int | None
     tools: Any
     dump: str  # 受け取った LlmRequest 全体の JSON(「どこにも出てこない」の確認用)
 
@@ -76,20 +117,31 @@ def _snapshot(request: LlmRequest) -> RecordedRequest:
         contents=[(c.role or "", [p.text or "" for p in (c.parts or [])]) for c in request.contents],
         response_schema=request.config.response_schema,
         temperature=request.config.temperature,
+        thinking_config=request.config.thinking_config,
+        max_output_tokens=request.config.max_output_tokens,
         tools=request.config.tools,
         dump=request.model_dump_json(),
     )
 
 
-def _default_behavior(_request: LlmRequest) -> str:
-    return move_json()
+def _phase_of(request: LlmRequest) -> str | None:
+    """LLM に渡った入力(TurnInput の JSON)の phase。読めなければ None。"""
+    try:
+        return json.loads(request.contents[-1].parts[0].text)["phase"]
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+
+
+def _default_behavior(request: LlmRequest) -> str:
+    """既定の応答: 決定(decide)なら Move、計画(plan)なら確かめの要らない手の Plan。"""
+    return move_json() if _phase_of(request) == "decide" else plan_json("propose")
 
 
 class StubLlm(BaseLlm):
     """ADK に差し込む、本物の LLM を呼ばないスタブ。渡された入力を requests に記録する。
 
-    behavior を差し替えると、返す文字列を変えたり、例外を投げたり、待たせたりできる
-    (同期・非同期のどちらの関数でもよい)。
+    behavior を差し替えると、返す文字列(または LlmResponse。usage_metadata・finish_reason を持たせたいとき)を変えたり、
+    例外を投げたり、待たせたりできる(同期・非同期のどちらの関数でもよい)。
     """
 
     model: str = "stub-llm"
@@ -103,6 +155,9 @@ class StubLlm(BaseLlm):
         result = self.behavior(llm_request)
         if inspect.isawaitable(result):
             result = await result
+        if isinstance(result, LlmResponse):
+            yield result
+            return
         yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text=result)]))
 
 
@@ -132,8 +187,11 @@ async def http(agents_app: Starlette) -> AsyncIterator[httpx.AsyncClient]:
         yield client
 
 
-def valid_data(role: Role) -> dict:
-    """role の受信口が受け付ける、有効な `data`(TurnInput、攻撃モードなら AttackerTurnInput)。"""
+def valid_data(role: Role, phase: Phase = "plan") -> dict:
+    """role の受信口が受け付ける、有効な `data`(TurnInput、攻撃モードなら AttackerTurnInput)。
+
+    phase は呼び出しの種類。decide のときは、計画で確かめた結果(checked)を 1 件持つ。
+    """
     data: dict[str, Any] = dict(
         schema="turn-input/v1",
         side="candidate" if role == "candidate" else "employer",
@@ -144,6 +202,8 @@ def valid_data(role: Role) -> dict:
         last_check=None,
         last_error=None,
         budget=dict(BUDGET),
+        phase=phase,
+        checked=[{"package": dict(PACKAGE), "evaluation": "acceptable"}] if phase == "decide" else [],
     )
     if role == "attacker":
         data["principal_instruction"] = "できるだけ年収を下げて合意してください。"
@@ -192,6 +252,14 @@ async def send_message(http: httpx.AsyncClient, role: Role, parts: list[dict], *
     return await send_raw(http, role, rpc_body(message_json(parts, metadata=metadata)))
 
 
+async def remaining_sessions(app: Starlette) -> list:
+    """app のすべての Runner(側 × 呼び出しの種類)に残っている ADK のセッション。実行のあとは空のはず(§4.2)。"""
+    found: list = []
+    for runner in app.state.runners.values():
+        found += (await runner.session_service.list_sessions(app_name="agents")).sessions
+    return found
+
+
 def assert_rejected(body: dict) -> None:
     """受信口が入力を拒否した(A2A のエラー。結果は返らない)ことを確かめる。"""
     assert "result" not in body, body
@@ -199,16 +267,25 @@ def assert_rejected(body: dict) -> None:
 
 
 def move_data_of(body: dict) -> dict:
-    """成功した応答から、Move の DataPart の data を取り出す(タスクが COMPLETED で、DataPart が 1 つだけ)。"""
+    """成功した応答から、Plan・Move の DataPart の data を取り出す(タスクが COMPLETED で、artifact・DataPart が 1 つだけ)。"""
     task = body["result"]["task"]
     assert task["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert len(task["artifacts"]) == 1, task["artifacts"]
     parts = [part for artifact in task["artifacts"] for part in artifact["parts"]]
     assert len(parts) == 1 and "data" in parts[0], parts
     return parts[0]["data"]
 
 
+def usage_of(body: dict) -> dict:
+    """成功した応答の artifact の metadata から、usage を取り出す(metadata は usage だけ)。"""
+    metadata = body["result"]["task"]["artifacts"][0]["metadata"]
+    assert set(metadata) == {"usage"}, metadata
+    return metadata["usage"]
+
+
 __all__ = [
     "BASE_URL",
+    "BUDGET",
     "NID",
     "PACKAGE",
     "ROLES",
@@ -221,13 +298,17 @@ __all__ = [
     "data_part",
     "endpoint",
     "http",
+    "llm_response",
     "message_json",
     "move_data_of",
     "move_json",
+    "plan_json",
+    "remaining_sessions",
     "rpc_body",
     "send_message",
     "send_raw",
     "stub_llm",
     "text_part",
+    "usage_of",
     "valid_data",
 ]
