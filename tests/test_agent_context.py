@@ -88,8 +88,9 @@ async def test_llm_input_is_the_fixed_preamble_and_the_turn_input_only(role, pha
     assert recorded.thinking_config.thinking_level == _configured_level(phase)
     assert recorded.temperature == DEFAULT_AGENTS_CONFIG.temperature == 0
     assert recorded.max_output_tokens == DEFAULT_AGENTS_CONFIG.max_output_tokens
-    # 出力スキーマは phase の Plan・Move。ツールは持たない
+    # 出力スキーマは decide だけ Move。plan は JSON モード(応答スキーマなし。台帳 I-19)。ツールは持たない
     assert recorded.response_schema == build_output_schema(phase)
+    assert recorded.response_mime_type == "application/json"
     assert not recorded.tools
 
 
@@ -150,7 +151,7 @@ async def test_plan_and_decide_run_different_runners(agents_app, http, stub_llm)
 
     assert recorder.names == [f"{role}_{phase}_agent" for role in ROLES for phase in PHASES]
     assert len(stub_llm.requests) == 6
-    # 計画の Runner には Plan のスキーマ、決定の Runner には Move のスキーマ
+    # 計画の Runner は応答スキーマなし(JSON モード)、決定の Runner には Move のスキーマ
     schemas = [request.response_schema for request in stub_llm.requests]
     assert schemas == [build_output_schema(phase) for _ in ROLES for phase in PHASES]
 

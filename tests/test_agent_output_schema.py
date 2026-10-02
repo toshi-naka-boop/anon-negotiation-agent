@@ -27,7 +27,7 @@ from agents.llm_agents import build_llm_agent, thinking_level_for
 from agents.output_schema import (
     build_move_output_schema,
     build_output_schema,
-    build_plan_output_schema,
+
     restore_numeric_axes,
 )
 from agents.wire import PHASES, ROLES, value_to_python
@@ -44,9 +44,8 @@ from agents_helpers import (  # noqa: F401  (フィクスチャは import して
     valid_data,
 )
 
-# (phase, 出力の型、スキーマの作り方)。plan は Plan、decide は Move
+# (phase, 出力の型、スキーマの作り方)。応答スキーマを使うのは decide(Move)だけ。plan は JSON モード(台帳 I-19)
 SCHEMAS = [
-    pytest.param("plan", Plan, build_plan_output_schema, id="plan"),
     pytest.param("decide", Move, build_move_output_schema, id="decide"),
 ]
 
@@ -176,18 +175,16 @@ def test_move_schema_fields_are_enums_too():
     assert sorted(schema.required) == ["move", "schema"]  # package は propose・ask_principal のときだけ必須(§2.7)
 
 
-def test_plan_schema_has_at_most_three_checks_and_the_move_fields_are_optional():
-    # §2.7 (計画: checks は最大 3 件のグリッド値の並び。move・package は checks が空のときだけ。null を許す。check は出せない)
-    schema = build_plan_output_schema()
-    checks = schema.properties["checks"]
-    assert checks.type == types.Type.ARRAY
-    assert checks.max_items == MAX_PLANNED_CHECKS == 3
-    assert checks.items.type == types.Type.OBJECT
-    assert schema.properties["schema"].enum == ["plan/v1"]
-    assert schema.properties["move"].enum == list(get_args(AgentMoveType))
-    assert schema.properties["move"].nullable is True
-    assert _package_schema(schema).nullable is True
-    assert schema.required == ["schema"]  # checks・move・package は、どれも省ける(Plan の規則はレフェリーが検証する)
+def test_plan_has_no_response_schema_and_its_rules_live_in_the_pydantic_model():
+    # §2.7・台帳 I-19 (計画は JSON モード。応答スキーマで縛ると Vertex の制約付きデコードが 20〜55 秒かかるため。
+    # checks は最大 3 件、checks か move のどちらか、check は出せない、はレフェリーが Plan で検証する)
+    assert build_output_schema("plan") is None
+    package = dict(valid_data("candidate")["history"][0]["package"])
+    with pytest.raises(ValueError):
+        Plan.model_validate({"schema": "plan/v1", "checks": [package] * (MAX_PLANNED_CHECKS + 1)})
+    with pytest.raises(ValueError):
+        Plan.model_validate({"schema": "plan/v1", "checks": [], "move": "check", "package": package})
+    assert Plan.model_validate({"schema": "plan/v1", "checks": [package] * MAX_PLANNED_CHECKS}).move is None
 
 
 @pytest.mark.parametrize(("phase", "model", "build"), SCHEMAS)
@@ -222,10 +219,9 @@ def test_google_genai_accepts_the_output_schema(phase, model, build):
 
 
 def test_build_output_schema_picks_the_schema_by_phase():
-    # §4.2 (plan は Plan のスキーマ、decide は Move のスキーマ)
-    assert build_output_schema("plan") == build_plan_output_schema()
+    # §4.2・台帳 I-19 (plan は応答スキーマなし、decide は Move のスキーマ)
+    assert build_output_schema("plan") is None
     assert build_output_schema("decide") == build_move_output_schema()
-    assert build_plan_output_schema() != build_move_output_schema()
 
 
 @pytest.mark.parametrize("phase", PHASES)
@@ -282,13 +278,16 @@ async def test_the_llm_receives_the_phases_output_schema_and_the_configured_sett
     assert recorded.temperature == 0
     assert not recorded.tools
     assert recorded.response_schema == build_output_schema(phase)
+    assert recorded.response_mime_type == "application/json"  # どちらも JSON だけを出させる
     assert recorded.max_output_tokens == DEFAULT_AGENTS_CONFIG.max_output_tokens
     expected_level = DEFAULT_AGENTS_CONFIG.plan_thinking_level if phase == "plan" else DEFAULT_AGENTS_CONFIG.decide_thinking_level
     assert recorded.thinking_config.thinking_level == types.ThinkingLevel[expected_level]
-    salary = _package_schema(recorded.response_schema).properties["salary"]
-    assert salary.enum == [str(value) for value in AXES["salary"].grid]
-    # plan だけが checks を持つ(出力スキーマが phase で切り替わっている)
-    assert ("checks" in recorded.response_schema.properties) == (phase == "plan")
+    if phase == "decide":
+        salary = _package_schema(recorded.response_schema).properties["salary"]
+        assert salary.enum == [str(value) for value in AXES["salary"].grid]
+        assert "checks" not in recorded.response_schema.properties
+    else:
+        assert recorded.response_schema is None  # 計画は JSON モード(台帳 I-19)
 
 
 @pytest.mark.anyio

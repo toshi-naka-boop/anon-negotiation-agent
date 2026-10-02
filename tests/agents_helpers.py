@@ -104,6 +104,7 @@ class RecordedRequest:
     system_instruction: str
     contents: list[tuple[str, list[str]]]  # (role, [text, ...]) の並び
     response_schema: Any
+    response_mime_type: str | None
     temperature: float | None
     thinking_config: Any  # types.ThinkingConfig(thinking_level が思考の量)
     max_output_tokens: int | None
@@ -116,6 +117,7 @@ def _snapshot(request: LlmRequest) -> RecordedRequest:
         system_instruction=str(request.config.system_instruction),
         contents=[(c.role or "", [p.text or "" for p in (c.parts or [])]) for c in request.contents],
         response_schema=request.config.response_schema,
+        response_mime_type=request.config.response_mime_type,
         temperature=request.config.temperature,
         thinking_config=request.config.thinking_config,
         max_output_tokens=request.config.max_output_tokens,

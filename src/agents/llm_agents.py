@@ -98,16 +98,21 @@ def build_llm_agent(role: Role, phase: Phase, *, model: str | BaseLlm, config: A
     出力スキーマは phase で決まる(plan は Plan、decide は Move)。指示文は role ごとに 1 つで、2 つの phase で共有する。
     """
     instruction = load_instruction(role)
+    output_schema = build_output_schema(phase)
+    generate_content_config = types.GenerateContentConfig(
+        temperature=config.temperature,
+        max_output_tokens=config.max_output_tokens,
+        thinking_config=types.ThinkingConfig(thinking_level=thinking_level_for(phase, config)),
+    )
+    if output_schema is None:
+        # 計画は JSON モード(応答スキーマなし。agents.output_schema.build_output_schema の説明。台帳 I-19)
+        generate_content_config.response_mime_type = "application/json"
     return LlmAgent(
         name=f"{role}_{phase}_agent",
         model=model,
         instruction=_fixed_instruction(instruction),
-        output_schema=build_output_schema(phase),
-        generate_content_config=types.GenerateContentConfig(
-            temperature=config.temperature,
-            max_output_tokens=config.max_output_tokens,
-            thinking_config=types.ThinkingConfig(thinking_level=thinking_level_for(phase, config)),
-        ),
+        output_schema=output_schema,
+        generate_content_config=generate_content_config,
         before_model_callback=_pin_system_instruction(instruction),
     )
 

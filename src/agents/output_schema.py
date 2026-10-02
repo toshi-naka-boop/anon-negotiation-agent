@@ -83,16 +83,17 @@ def _build_output_schema(model: type[BaseModel]) -> types.Schema:
     )
 
 
-def build_plan_output_schema() -> types.Schema:
-    """計画(phase=plan)の出力 Plan のスキーマ。checks は最大 3 件で、各要素・package の各軸がグリッド値の enum。"""
-    return _build_output_schema(Plan)
-
-
 def build_move_output_schema() -> types.Schema:
     """決定(phase=decide)の出力 Move のスキーマ(move に check はなく、package の各軸がグリッド値の enum)。"""
     return _build_output_schema(Move)
 
 
-def build_output_schema(phase: Phase) -> types.Schema:
-    """phase の出力スキーマ(plan は Plan、decide は Move。§4.2)。"""
-    return build_plan_output_schema() if phase == "plan" else build_move_output_schema()
+def build_output_schema(phase: Phase) -> types.Schema | None:
+    """phase の出力スキーマ。decide は Move のスキーマ、plan は None(JSON モード。§4.2、台帳 I-19)。
+
+    計画の出力 Plan(確かめの組み合わせの配列)を応答スキーマで縛ると、Vertex AI の制約付きデコードが 20〜55 秒かかり
+    (JSON モードなら 4〜7 秒。2026-10-03 の実測)、レフェリーの 1 回の上限(45 秒)を超えて手番が落ちる。計画は
+    `response_mime_type="application/json"` だけで出させ、Plan の規則(グリッド値・最大 3 件・checks か move)は
+    レフェリーが検証する(違反は schema_invalid・off_grid の無効手)。決定(Move)のスキーマは 2〜3 秒で済むので残す。
+    """
+    return None if phase == "plan" else build_move_output_schema()
