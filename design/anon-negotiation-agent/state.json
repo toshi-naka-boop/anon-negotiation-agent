@@ -1,38 +1,29 @@
 {
   "currentNode": "実装",
   "status": "in_progress",
-  "designVersion": "v10",
-  "approvedDesignVersion": "v10",
-  "approvedDesignSha256": "27b1a4d9d6fbab87901b1c2c0b3c81801df300b5e785f454975e4309b06379d2",
-  "approvedAt": "2026-09-28T22:38:09+09:00",
-  "approvalEvidence": "v10:27b1a4d9d6fb を承認します。前提は P-1 案1（＋利用規約でブロック先は現職企業のみ）、P-2 案1、P-3 案1、P-4 案1、P-5 案1、P-6 案2 で確定します。",
-  "requiredApprovalFingerprint": "v10:27b1a4d9d6fb",
+  "designVersion": "v14",
+  "approvedDesignVersion": "v14",
+  "approvedDesignSha256": "4109a75c582c1eb7bb8517847aa06a408bfc793ee51805fe73577bcea7a107fc",
+  "approvedAt": "2026-10-02T22:41:10+09:00",
+  "approvalEvidence": "v14:4109a75c582c承認します。\n費用は思ったよりも低そうなので品質を優先してほしい。",
+  "requiredApprovalFingerprint": "v14:4109a75c582c",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
-  "criticRound": 11,
+  "criticRound": 14,
   "openIssueIds": [
-    "I-1",
-    "I-2",
-    "I-3",
-    "I-4",
-    "I-6",
     "I-7",
     "I-9",
-    "I-10",
-    "I-11",
-    "I-12",
-    "I-13",
-    "I-14"
+    "I-10"
   ],
   "requiredReads": [
     "design.md",
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v10 はユーザーが承認済み。① の実装と反証は完了。② も完了（2026-10-02）: DV-14 は 3 つの型とも 36/36、DV-15 は本物の Gemini（gemini-3.5-flash、global、temperature 0、プロジェクト anon-nego-toshixa）で 2 回合格（3 回目・4 回目。経過は台帳 I-13）。テストは 1124 件。② のコミットはユーザーの承認待ち（②-a と指示文／②-b とスキーマの直しと I-11／台帳と state）。次の予定（§11）: 10/5〜6 は TEE スパイク（⑥ の判断）。10/7〜11 は ③（丸めの検証テスト、3 枚の壁、攻撃モード、レート制限、メーター）・④（段階開示）・⑤（トレース、活動ログ、開示台帳、管理画面）・面談・デモ 3 ケース・リプレイ・デモ動画。10/12〜14 は信頼境界図・説明文・Zenn 記事・デプロイの確認・提出。面談の段の前に、設計書の文面の直し（I-1〜I-4・I-6・I-12・I-13、C-38・C-40、X-37 のデプロイ構成ほか）をまとめて、ユーザーに承認し直してもらう。ユーザーの判断待ち: I-9（基盤のリクエストログ）、I-10（処理場所の注記）、I-7 のトークン失敗時のログ、429 に備えた利用枠の申請、temperature（Gemini 3 の推奨は 1.0）。 【2026-10-02 更新2】ユーザーの判断: TEE を実施する（U-11）。金庫のコードの公開と費用を受け入れる（台帳 I-14）。TEE のスパイクのための調査を委譲中（報告書は research/tee-spike.md）。調査の結果を呼び出し側が確かめ、ユーザーに GCP のコマンドの手順と費用の見込みを出す。スパイクは 10/3〜10/4、予備 10/5〜6。② のコミットは引き続きユーザーの承認待ち。",
+  "nextAction": "v14 を承認済み（2026-10-02）。ユーザーの追加の指示: 費用より品質を優先する → 暫定の設定を 計画 MEDIUM（モデルの既定）・決定 LOW、費用の合格の線を 0.25 ドルにする（設計の数値は暫定で、正本は config。台帳 I-18）。③-0 の実装: 呼び出し側がスキーマと設定を先に直してから、vault・agents・web+tests の 3 つを sonnet に並行で委譲し、完了条件（DV-14・DV-17・DV-18・DV-15 の再実行）は呼び出し側が実行して判定する。TEE の判断待ち。",
   "lastUpdated": "2026-10-02",
   "delegation": {
-    "批評": "claude/design-critic(opus) + codex exec (gpt-5.6-sol, xhigh)",
-    "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）",
+    "批評": "claude/design-critic（model: fable。ユーザーの指示 2026-10-02。11 巡目までは opus）+ codex exec (gpt-5.6-sol, xhigh)",
+    "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）",
     "反証": "claude/design-critic(opus)（正しさ）+ codex exec xhigh（安全性。実際のモデルはログで確かめて記録する）。ユーザーの指示で 2 レンズ（2026-09-30）"
   }
 }
