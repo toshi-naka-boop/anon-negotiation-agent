@@ -900,6 +900,8 @@ TDX にする場合の差分（C の VM 作成コマンドの、この部分だ�
 
 ### D. 本番の条件・本番イメージに切り替える
 
+順序が大事（批評 X-70・C-56）: 鍵の新しい版を primary にして古い版を無効化し、debug の間の DEK を消してから、本番の VM を初めて起動する。本番の金庫の最初の DEK が新しい版で包まれ、起動後に版を回す必要がなくなる（金庫は、`_tee/dek` を包んだ鍵の版が primary でなければ起動しない。契約 §16）。
+
 プロバイダの条件を、本番用（STABLE・dbgstat・hwmodel・プロジェクト・SA を要求）に更新する。
 
 ```
@@ -912,19 +914,13 @@ debug の VM を削除する（検証用の VM。破壊的な操作。名前を�
 gcloud compute instances delete vault-tee --zone="$ZONE"
 ```
 
-金庫の VM を本番イメージで作り直す（digest でイメージを指定。ログは Cloud Logging だけ。落ちたら再起動）。
+負の試験（C-56）のために、debug の間に金庫が作った `_tee/dek` を手元に控える（Firestore の REST。手元のオーナー権限で読める。暗号文と鍵の版の名前だけで、平文の DEK は含まない）。
 
 ```
-gcloud compute instances create vault-tee --zone="$ZONE" --machine-type=n2d-standard-2 --confidential-compute-type=SEV --maintenance-policy=MIGRATE --min-cpu-platform="AMD Milan" --shielded-secure-boot --image-project=confidential-space-images --image-family=confidential-space --boot-disk-size=20GB --network=vault-vpc --subnet=vault-subnet --private-network-ip=10.10.0.10 --no-address --tags=vault-tee --service-account="$VAULT_SA" --scopes=cloud-platform --metadata="^~^tee-image-reference=${REPO}/vault@${IMAGE_DIGEST}~tee-container-log-redirect=cloud_logging~tee-restart-policy=OnFailure"
+mkdir -p tmp/tee_spike && curl -sS -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/vault-db/documents/_tee/dek" -o tmp/tee_spike/old_dek.json && head -c 300 tmp/tee_spike/old_dek.json
 ```
 
-本番イメージの launcher のログを読む（結果を貼る。`@sha256` の参照が通らなければ、`tee-image-reference` をタグ参照に戻す）。
-
-```
-gcloud logging read "logName=\"projects/${PROJECT_ID}/logs/confidential-space-launcher\"" --freshness=30m --order=asc --limit=200 --format=json
-```
-
-本番イメージの金庫が起動したら、KEK の新しい版を作って primary にする（debug の間に作った DEK の包みを、運営者が本番に持ち込めないようにする。金庫は、`_tee/dek` を包んだ鍵の版が primary でなければ起動しない。批評 C-56）。
+KEK の新しい版を作って primary にする（debug の間に作った DEK の包みを、運営者が本番に持ち込めないようにする）。
 
 ```
 gcloud kms keys versions create --location="$REGION" --keyring=vault-tee --key=vault-kek --primary
@@ -948,13 +944,43 @@ debug の間に作った DEK と自己試験の文書を消す（手元の ADC�
 uv run python scripts/tee_reset_dek.py --yes
 ```
 
-本番の VM を再起動して、新しい版で DEK を作り直させる（起動後の launcher のログで `sealing self-test ok` を確かめる）。
+金庫の VM を本番イメージで作る（digest でイメージを指定。ログは Cloud Logging だけ。落ちたら再起動。初回の起動で、新しい版で DEK を作る）。
+
+```
+gcloud compute instances create vault-tee --zone="$ZONE" --machine-type=n2d-standard-2 --confidential-compute-type=SEV --maintenance-policy=MIGRATE --min-cpu-platform="AMD Milan" --shielded-secure-boot --image-project=confidential-space-images --image-family=confidential-space --boot-disk-size=20GB --network=vault-vpc --subnet=vault-subnet --private-network-ip=10.10.0.10 --no-address --tags=vault-tee --service-account="$VAULT_SA" --scopes=cloud-platform --metadata="^~^tee-image-reference=${REPO}/vault@${IMAGE_DIGEST}~tee-container-log-redirect=cloud_logging~tee-restart-policy=OnFailure"
+```
+
+本番イメージの launcher のログを読む（結果を貼る。`sealing self-test ok` が出ること。`@sha256` の参照が通らなければ、`tee-image-reference` をタグ参照に戻す）。
+
+```
+gcloud logging read "logName=\"projects/${PROJECT_ID}/logs/confidential-space-launcher\"" --freshness=30m --order=asc --limit=200 --format=json
+```
+
+VM を再起動して、既存の暗号文（`_tee/selftest`）が同じ DEK で開くことを確かめる（ログに `sealing self-test ok`。契約 §16 の自己試験）。
 
 ```
 gcloud compute instances reset vault-tee --zone="$ZONE"
 ```
 
-負の試験（C-56）: 消す前に写しておいた古い `_tee/dek` を書き戻して VM を再起動すると、金庫は起動せずに `non-primary key version` のログを残す（確かめたら、もう一度 `tee_reset_dek.py --yes` と再起動）。
+負の試験（C-56）: 控えておいた古い `_tee/dek` を書き戻して VM を再起動すると、金庫は起動せずに `non-primary key version` のログを残す。
+
+```
+curl -sS -X PATCH -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "Content-Type: application/json" "https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/vault-db/documents/_tee/dek" -d @tmp/tee_spike/old_dek.json -o /dev/null -w "%{http_code}\n"
+```
+
+```
+gcloud compute instances reset vault-tee --zone="$ZONE"
+```
+
+確かめたら、もう一度 DEK を消して再起動する（新しい版で作り直される）。
+
+```
+uv run python scripts/tee_reset_dek.py --yes
+```
+
+```
+gcloud compute instances reset vault-tee --zone="$ZONE"
+```
 
 ### E. Cloud Run から VPC 経由でつなぐ（Direct VPC egress）
 

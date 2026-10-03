@@ -186,7 +186,7 @@ gcloud kms keys add-iam-policy-binding vault-kek --location="$REGION" --keyring=
 
 ### どの手順の段で
 
-- B の最後(KMS の鍵に digest の権限を付ける)→ C(テスト用の条件で鍵の解放を確かめる)→ D(本番の条件に更新、debug の VM を削除、本番イメージの VM を作る)→ 切り替え直後の鍵の入れ替え(KEK の新しい版を primary にして旧版を無効化し、DEK を作り直す。研究報告 R22、契約 §13 の追記 C-56・C-57)→ 負の試験 2・3 と、文書が暗号文であることの確認。負の試験 1 は D の中で行う。
+- B の最後(KMS の鍵に digest の権限を付ける)→ C(テスト用の条件で鍵の解放を確かめる)→ D(本番の条件に更新 → 負の試験 1 → debug の VM を削除 → 古い `_tee/dek` を控える → KEK の新しい版を primary にして旧版を無効化 → DEK を消す → 本番イメージの VM を作る → 再起動 → 負の試験 C-56。研究報告 R22、契約 §16)→ 負の試験 2・3 と、文書が暗号文であることの確認。
 - 時間の枠は 3 時間(10/3 午後)。STS の交換が 3 時間通らなければ不合格。
 - 合格の基準(研究報告の表): 本番条件の VM の金庫が DEK を復号でき、封印した試験文書を Firestore に書いて読み戻せる。負の試験 3 つ(debug の VM・digest 違い・手元のオーナー)が拒否される。手元から文書を読むと暗号文。
 
@@ -214,95 +214,20 @@ gcloud logging read "logName=\"projects/${PROJECT_ID}/logs/confidential-space-la
 uv run pytest tests/test_tee_key_release.py tests/test_tee_sealing.py -q
 ```
 
-**D(本番の条件に更新し、負の試験 1 を行う)**
+**D(本番の条件に更新し、鍵の版を回してから、本番イメージの VM を作る。負の試験 1 と C-56 を含む)**
 
-プロバイダの条件を本番用に更新する(研究報告 D)。
+研究報告 D のコマンドを、書いてある順に実行する(順序が大事。批評 X-70: 鍵の新しい版を primary にして古い版を無効化し、debug の間の DEK を消してから、本番の VM を初めて起動する。本番の最初の DEK が新しい版で包まれ、起動後に版を回さずに済む)。ここでは、各段で確かめることだけを書く。コマンドは研究報告 D のとおり。
 
-```
-gcloud iam workload-identity-pools providers update-oidc attestation-verifier --location=global --workload-identity-pool=vault-tee-pool --attribute-condition="assertion.swname == 'CONFIDENTIAL_SPACE' && 'STABLE' in assertion.submods.confidential_space.support_attributes && assertion.dbgstat == 'disabled-since-boot' && assertion.hwmodel in ['GCP_AMD_SEV','GCP_INTEL_TDX'] && assertion.submods.gce.project_id == '${PROJECT_ID}' && '${VAULT_SA}' in assertion.google_service_accounts"
-```
-
-負の試験 1(debug の VM は STS に拒否される)。debug の VM がまだあるうちに、停止して開始する(研究報告 F のコマンド)。
-
-```
-gcloud compute instances stop vault-tee --zone="$ZONE"
-```
-
-```
-gcloud compute instances start vault-tee --zone="$ZONE"
-```
-
-起動してしばらく待ち、シリアル出力の末尾を読む(研究報告 C)。STS の 4xx のステータスが出て、金庫が終了していること。
-
-```
-gcloud compute instances get-serial-port-output vault-tee --zone="$ZONE"
-```
-
-そのあと、研究報告 D の順に、debug の VM を削除し(破壊的な操作。名前を確かめてから実行する)、本番イメージの VM を研究報告 D の作成コマンドで作り直す。
-
-```
-gcloud compute instances delete vault-tee --zone="$ZONE"
-```
-
-本番イメージの VM の launcher のログを読む(研究報告 D)。`sealing self-test ok` が出ていること(これが合格の最初の項目)。
-
-```
-gcloud logging read "logName=\"projects/${PROJECT_ID}/logs/confidential-space-launcher\"" --freshness=30m --order=asc --limit=200 --format=json
-```
-
-**切り替え直後の鍵の入れ替え**(KEK の版の更新と、DEK の作り直し。研究報告 R22、契約 §13 の追記 C-56・C-57)。debug の間に作った DEK の包み(`_tee/dek`)は、運営者が SSH で root として見られた鍵の包みである。本物のデータを入れる前に、次の順で行う。(1) KEK の新しい版を primary にし、古い版を無効化して、旧版で包んだ包みを本番に持ち込めないようにする。金庫は、`_tee/dek` を包んだ鍵の版が primary でなければ起動しない。(2) `_tee/dek` を削除して、DEK を本番イメージの VM で作り直す。金庫は `_tee/dek` が無ければ、起動のときに新しい DEK を作る。
-
-(追加)手元の ADC を作る(すでにあれば飛ばす。`scripts/tee_reset_dek.py` が使う)。
-
-```
-gcloud auth application-default login
-```
-
-(追加)KEK の版の一覧を見る。古い版の番号(下の `disable` の `1`)をここで確かめる。
-
-```
-gcloud kms keys versions list --location="$REGION" --keyring=vault-tee --key=vault-kek
-```
-
-(追加)KEK の新しい版を作って、primary にする(契約 §13 の追記)。
-
-```
-gcloud kms keys versions create --location="$REGION" --keyring=vault-tee --key=vault-kek --primary
-```
-
-(追加)primary が新しい版になったことを確かめる(出力が `.../cryptoKeyVersions/2` のように、新しい版の番号で終われば合格)。
-
-```
-gcloud kms keys describe vault-kek --location="$REGION" --keyring=vault-tee --format="value(primary.name)"
-```
-
-旧版で包んだ `_tee/dek` が残ったままでは、金庫が起動しないことを確かめる(古い `_tee/dek` を書き戻された状態と同じ)。VM を停止し、開始し(負の試験 1 と同じ stop・start のコマンド)、数分待ってから、launcher のログを読む(上の D のコマンド)。`non-primary key version` が出て、金庫が起動せず、再起動を繰り返していること。
-
-(追加)古い版を無効化する(契約 §13 の追記。`1` は古い版の番号)。
-
-```
-gcloud kms keys versions disable 1 --location="$REGION" --keyring=vault-tee --key=vault-kek
-```
-
-金庫の VM を停止する(研究報告 F)。
-
-```
-gcloud compute instances stop vault-tee --zone="$ZONE"
-```
-
-(追加)`_tee/dek` と `_tee/selftest` を削除する(`--yes` が無いと、説明だけ出して何もしない)。
-
-```
-uv run python scripts/tee_reset_dek.py --yes --project "$PROJECT_ID"
-```
-
-金庫の VM を開始する(研究報告 F)。新しい DEK は、この起動で、新しい primary の版で包まれて作られる。
-
-```
-gcloud compute instances start vault-tee --zone="$ZONE"
-```
-
-そのあと、launcher のログを読む(上の D のコマンド)。`sealing self-test ok` が出ていること。
+1. プロバイダの条件を本番用に更新する(研究報告 D の 1 つ目)。
+2. 負の試験 1: debug の VM がまだあるうちに、停止して開始する(研究報告 F のコマンド)。シリアル出力の末尾(研究報告 C の `get-serial-port-output`)に STS の 4xx のステータスが出て、金庫が終了していること(debug イメージは `STABLE` を持たず、本番条件で落ちる)。
+3. debug の VM を削除する(破壊的な操作。名前を確かめてから実行する)。
+4. 古い `_tee/dek` を手元に控える(研究報告 D の `curl`。`tmp/tee_spike/old_dek.json` に `wrapped_dek`・`kek`・`kek_version` の項目が見えること。平文の DEK は含まれない)。
+5. KEK の新しい版を作って primary にし、`versions list` で古い版の番号(`ENABLED` で primary でないもの)を確かめ、古い版を無効化する。
+6. `uv run python scripts/tee_reset_dek.py --yes`(手元の ADC。無ければ先に `gcloud auth application-default login`)。接続先の表示が本物の Firestore とこのプロジェクトであること。`_tee/dek` と `_tee/selftest` の 2 件を消したと出ること。
+7. 本番イメージの VM を作る。launcher のログに `sealing self-test ok` が出ること(これが合格の最初の項目)。`@sha256` の参照が通らなければ、`tee-image-reference` をタグ参照に戻して作り直す。
+8. VM を再起動(`gcloud compute instances reset`)して、もう一度 `sealing self-test ok` が出ること(既存の暗号文 `_tee/selftest` が同じ DEK で開く。契約 §16)。
+9. 負の試験(C-56): 控えた古い `_tee/dek` を書き戻し(研究報告 D の `PATCH`。HTTP 200)、VM を再起動すると、launcher のログに `non-primary key version` が出て金庫が終了すること(`tee-restart-policy=OnFailure` で再起動を繰り返すので、同じ行が複数回出る)。
+10. 確かめたら、`tee_reset_dek.py --yes` と再起動で、新しい版の DEK を作り直す(`sealing self-test ok`)。
 
 **負の試験 2(digest の違うイメージは、KMS に拒否される)**(研究報告に手順がないので追加)。コードを 1 行変える代わりに、`_COMMIT` を別の値でビルドする(ラベルが変わるので digest が変わる)。この digest には、鍵の権限を付けない。
 
