@@ -31,9 +31,10 @@ from vault.app import create_app as create_vault_app
 from vault.app import create_app_from_env as create_vault_app_from_env
 from vault_helpers import accept_all_policy, sample_package
 from web.app import create_app, create_app_from_env, mask_ids_in_logs
-from web.referee import NegotiationContext, RefereeManager
+from web.referee import NegotiationContext, RefereeManager, StepOutcome
 from web.session import SESSION_KEY_ENV
-from web.vault_client import VaultClientError
+from web.service_auth import ServiceAuthError
+from web.vault_client import VaultClientError, VaultUnavailableError
 from web_app_helpers import DeletionProbe
 from web_helpers import create_demo_negotiation, create_live_negotiation, drive, move_dict
 
@@ -207,6 +208,34 @@ async def test_the_sweeper_logs_no_ids_when_a_step_fails(store, web_env, web_log
 
     assert report.errors == 1
     assert "sweep step failed step=_expire_if_due error=VaultClientError" in web_logs.text
+    assert_ids_are_absent(web_logs, nid)
+
+
+@pytest.mark.anyio
+async def test_the_referee_logs_why_the_vault_is_unavailable_once_without_ids_or_token_text(store, web_env, web_logs):
+    # I-7: 金庫に届かない(ID トークンを取れない・宛先違いを含む)とき、レフェリーは理由(ステータス・通信エラーの型名)を
+    # 1 回だけ書く。同じ理由が続く間は書き直さない。例外の文(金庫の detail・トークンの手がかり)と交渉 ID は書かない。
+    env = web_env
+    nid = create_demo_negotiation(store)
+    real_vault = env.vault
+
+    class UnreachableVault:
+        def __getattr__(self, name):
+            return getattr(real_vault, name)
+
+        async def get_view(self, nid, side):
+            cause = ServiceAuthError(f"could not get an ID token for {nid}; token=eyJ-CANARY")
+            raise VaultUnavailableError(f"vault is unreachable: ServiceAuthError {nid}") from cause
+
+    await env.restart(vault=UnreachableVault())
+    referee = env.referee(nid)
+
+    assert await referee.step() is StepOutcome.WAITING
+    assert await referee.step() is StepOutcome.WAITING
+
+    assert web_logs.text.count("vault unavailable status=None cause=ServiceAuthError; waiting") == 1
+    assert "eyJ-CANARY" not in web_logs.text
+    assert "could not get an ID token" not in web_logs.text
     assert_ids_are_absent(web_logs, nid)
 
 

@@ -200,6 +200,8 @@ class Referee:
         self._deps = deps
         # run() が、WAITING・RETRY の後に待つ秒数。step() が、その結果ごとに決める(台帳 L10-1)。
         self._wait_seconds = deps.config.wait_poll_interval_seconds
+        # 直前に書いた「金庫が応えない」理由(ステータス・通信エラーの型名)。同じ理由が続く間は書き直さない(台帳 I-7)。
+        self._unavailable_cause: tuple[int | None, str] | None = None
         # 金庫への操作の口。本物の候補者の交渉なら、依頼者のロックの下で 1 回ずつ行う口にする(台帳 I-4)。
         self._vault: VaultClient | PrincipalScopedVault = deps.vault
         if deps.locks is not None and context.candidate_principal_id is not None:
@@ -223,12 +225,13 @@ class Referee:
         """金庫の状態を読み直して、手番の側について 1 手番だけ進める(§4.1 の 1〜5。確かめを含む)。"""
         self._wait_seconds = self._deps.config.wait_poll_interval_seconds
         try:
-            return await self._step()
+            outcome = await self._step()
         except VaultNotFoundError:
             return StepOutcome.FINISHED  # 依頼者の削除などで、交渉そのものが消えた
         except VaultConflictError:
             return StepOutcome.RETRY  # 状態が変わった。読み直してから進める(§4.1 の 3)
-        except VaultUnavailableError:
+        except VaultUnavailableError as exc:
+            self._log_unavailable(exc)
             return StepOutcome.WAITING  # 金庫が一時的に応えない。待って読み直す
         except LlmBudgetUnavailable:
             return StepOutcome.WAITING  # 物理の呼び出し数のカウンタに書けない。送らずに、待って読み直す(閉じる側。台帳 X-50)
@@ -241,6 +244,20 @@ class Referee:
                 # 呼ぶので、2 秒ごとに呼び直さず、見回りの間隔まで待つ(台帳 L10-1)。5xx は、これまでどおり(一時的かもしれない)。
                 self._wait_seconds = self._deps.config.client_error_wait_seconds
             return StepOutcome.WAITING
+        self._unavailable_cause = None
+        return outcome
+
+    def _log_unavailable(self, exc: VaultUnavailableError) -> None:
+        """金庫が応えない理由(ステータスと、通信エラーの型名)を、理由が変わったときに 1 回だけ書く(台帳 I-7)。
+
+        ID トークンを取れない・宛先違いのとき(ServiceAuthError)もここに来るので、運用で気づける。待つたびに(2 秒ごとに)
+        書き直さない。exc の文(金庫の detail を含み得る)と、トークンの値は書かない(台帳 X-40)。
+        """
+        cause = type(exc.__cause__).__name__ if exc.__cause__ is not None else "-"
+        key = (exc.status_code, cause)
+        if key != self._unavailable_cause:
+            self._unavailable_cause = key
+            _log.warning("vault unavailable status=%s cause=%s; waiting", exc.status_code, cause)
 
     async def _step(self) -> StepOutcome:
         view, side = await self._read_turn_view()
