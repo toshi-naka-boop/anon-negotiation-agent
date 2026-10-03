@@ -44,6 +44,7 @@ class WebServices:
     referees: RefereeManager
     sweeper: Sweeper
     principal_sweeper: PrincipalSweeper
+    default_db: firestore.Client
 
 
 def build_services(
@@ -106,4 +107,5 @@ def build_services(
         referees=referees,
         sweeper=sweeper,
         principal_sweeper=principal_sweeper,
+        default_db=default_db,
     )

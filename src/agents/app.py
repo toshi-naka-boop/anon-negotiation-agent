@@ -8,6 +8,7 @@ a2a-sdk のサーバで、受信口ごとに自前の AgentExecutor(agents.execu
 | `/a2a/employer` | TurnInput | 通常の交渉の求人側 |
 | `/a2a/attacker` | AttackerTurnInput | 攻撃モードの求人側だけ |
 
+- `GET /healthz`(死活確認。AC-22)は 200 `{"status":"ok"}` を返す。LLM は動かさない。
 - 各受信口は JSON-RPC の口で、その下の `/.well-known/agent-card.json` に Agent Card を公開する
   (A2A の標準の場所。例: `/a2a/candidate/.well-known/agent-card.json`)。
 - 各受信口は、`TurnInput.phase` で、計画の LlmAgent(出力は Plan)か決定の LlmAgent(出力は Move)かを選ぶ。つまり
@@ -58,6 +59,9 @@ from google.adk.sessions import InMemorySessionService
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from agents.config import DEFAULT_AGENTS_CONFIG, AgentsConfig
@@ -209,6 +213,11 @@ def _build_agent_card(role: Role, config: AgentsConfig) -> AgentCard:
     )
 
 
+async def _healthz(request: Request) -> JSONResponse:
+    """死活確認(AC-22)。認証なしで 200 {"status":"ok"}。LLM は動かさない。"""
+    return JSONResponse({"status": "ok"})
+
+
 def create_app(*, model: BaseLlm | None = None, config: AgentsConfig = DEFAULT_AGENTS_CONFIG) -> Starlette:
     """3 つの受信口(候補者側・求人側・攻撃モードの求人側)を持つ Starlette アプリを作る。
 
@@ -220,7 +229,7 @@ def create_app(*, model: BaseLlm | None = None, config: AgentsConfig = DEFAULT_A
     """
     require_no_http_retry(config)
     llm = build_gemini_model(config) if model is None else model
-    routes = []
+    routes = [Route("/healthz", _healthz, methods=["GET"])]
     handlers = []
     runners = {}
     for role in ROLES:

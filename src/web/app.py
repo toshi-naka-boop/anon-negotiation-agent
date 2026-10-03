@@ -12,6 +12,7 @@
   起動を拒否する(MissingSessionKeyError)。base64url として読めて 32 バイト以上でなければ、これも起動を拒否する
   (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
   乱数でない鍵)でも拒否する。create_app_from_env・create_app のどちらでも同じ。
+- GET /healthz(死活確認。AC-22): 認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(利用記録の Firestore にも触れない)。
 - ログに ID を残さない(§3.8。台帳 X-40)。本番の起動口(create_app_from_env)が、uvicorn のアクセスログの URL の ID を
   伏せる(mask_ids_in_logs。vault の起動口と共通の処理で、negotiation_core.log_privacy にある)。
 - TEE モード(環境変数 VAULT_TEE=true。design.md §9、research/tee-spike-contract.md §7): 金庫は Confidential Space の VM で動く。
@@ -58,6 +59,8 @@ from web.vault_client import (
 
 _log = logging.getLogger(__name__)
 
+# 死活確認(AC-22)。認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(Firestore にも金庫にも触れない)。
+HEALTHZ_PATH = "/healthz"
 VAULT_BASE_URL_ENV = "VAULT_BASE_URL"
 # TEE モード(契約 §7)
 VAULT_TEE_ENV = "VAULT_TEE"
@@ -133,13 +136,18 @@ def create_app(
     app = FastAPI(title="web", lifespan=lifespan)
     app.state.services = services
     app.include_router(build_router(services, tee))
+
+    @app.get(HEALTHZ_PATH)
+    async def _healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
     app.add_middleware(
         PrincipalSessionMiddleware,
         codec=services.codec,
         meta=services.meta,
         locks=services.locks,
         clock=services.clock,
-        session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX),
+        session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTHZ_PATH),
     )
 
     @app.exception_handler(RequestValidationError)

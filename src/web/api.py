@@ -71,6 +71,7 @@ from vault.api_models import (
 from vault.ids import generate_id
 from vault.models import NegotiationMode
 
+from web.activity_api import build_activity_router
 from web.api_models import (
     BlocklistRequest,
     ControlBody,
@@ -490,4 +491,5 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
             """金庫の attestation を検証した結果。nonce を渡すと、その nonce で金庫に確かめさせる(クライアントごとに 10 秒に 1 回まで)。"""
             return await endpoint.respond(nonce, client_ip(request))
 
+    router.include_router(build_activity_router(services, require_own_negotiation))  # 活動ログ・並べて見る画面(§7)
     return router

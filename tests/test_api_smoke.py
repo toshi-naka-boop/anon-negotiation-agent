@@ -281,3 +281,38 @@ def test_negotiation_by_request_over_http(api_client, store):
     # request_id が "view"・"events" でも、{nid}/view・{nid}/events と取り違えない(取り違えると、side がなくて 422 になる)。
     for word in ("view", "events"):
         assert api_client.get(f"/v1/negotiations/by-request/{word}").status_code == 404
+
+
+def test_healthz_over_http_does_not_touch_the_store():
+    # AC-22: GET /healthz は、認証なしで 200 {"status":"ok"}。ストレージ(Firestore)には触れない(死活確認が、ストレージの状態に左右されない)。
+    from fastapi.testclient import TestClient
+
+    from vault.app import create_app
+
+    class UntouchableStore:
+        def __getattr__(self, name):
+            raise AssertionError(f"/healthz touched the store ({name})")
+
+    client = TestClient(create_app(UntouchableStore()))
+
+    response = client.get("/healthz")
+
+    assert (response.status_code, response.json()) == (200, {"status": "ok"})
+    assert client.post("/healthz").status_code == 405  # GET だけ
+
+
+def test_healthz_is_open_while_every_other_route_needs_authentication(store):
+    # TEE 版(caller_verifier あり)でも、/healthz は認証なしで通る(attestation と同じく、依存の外の素の経路)。ほかの経路は 401 のまま。
+    from fastapi import HTTPException
+    from fastapi.testclient import TestClient
+
+    from vault.app import create_app
+
+    def deny_everyone() -> None:
+        raise HTTPException(status_code=401, detail="unauthenticated")
+
+    client = TestClient(create_app(store, caller_verifier=deny_everyone))
+
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert client.get("/v1/negotiations").status_code == 401
+    assert client.get(f"/v1/principals/{new_id('nobody')}/policy").status_code == 401

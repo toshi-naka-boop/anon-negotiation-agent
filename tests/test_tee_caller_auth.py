@@ -528,7 +528,7 @@ def guarded_client(store, verifier) -> TestClient:
 
 
 def test_every_route_of_the_vault_requires_a_valid_token(guarded_client, key, same_kid_other_key):
-    routes = guarded_client.app.routes
+    routes = [route for route in guarded_client.app.routes if route.path != "/healthz"]  # 死活確認だけは認証の外(下の test)
     assert all(isinstance(route, APIRoute) for route in routes)  # 認証の外にある素の経路・文書の経路がない
     assert len(routes) >= 14
     requests = [(method, _concrete(route.path)) for route in routes for method in sorted(route.methods)]
@@ -542,6 +542,16 @@ def test_every_route_of_the_vault_requires_a_valid_token(guarded_client, key, sa
         )
         # 通ったあとは、金庫自身の応答(本文がなければ 422、無ければ 404 など)になる。認証の応答ではない
         assert guarded_client.request(method, path, headers=bearer(key.token())).status_code not in (401, 403, 405)
+
+
+def test_healthz_is_the_only_route_outside_the_authentication(guarded_client):
+    # AC-22: 死活確認(GET /healthz)は、認証なしで 200。認証の外にある素の経路は、これだけ(増えるときは、ここで気づく)。
+    assert [route.path for route in guarded_client.app.routes if not isinstance(route, APIRoute)] == ["/healthz"]
+
+    response = guarded_client.get("/healthz")
+
+    assert (response.status_code, response.json()) == (200, {"status": "ok"})
+    assert guarded_client.post("/healthz").status_code == 405  # GET だけ
 
 
 @pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"])
