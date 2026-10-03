@@ -10,10 +10,15 @@ DEK は `vault-db` の文書 `_tee/dek` に、KMS で包んだ形(wrapped_dek)�
 image_digest(DEK を作ったイメージの digest。既定トークンから署名を確かめずに読んだ記録用の値)。
 
 鍵の版の確認(批評 C-56): debug イメージの間に運営者が写した `_tee/dek` を、本番に切り替えた後に書き戻す手口を止めるため、
-DEK を解く前に `GET <鍵の名前>` で鍵の `primary.name` を取り、`_tee/dek.kek_version` と完全に一致しなければ、解かずに失敗する
+DEK を解く前に、鍵の primary の版を調べ、`_tee/dek.kek_version` と完全に一致しなければ、解かずに失敗する
 (運営者が新しい版を primary にし、古い版を無効化していれば、写し取った古い版の DEK は解けない)。`kek_version` のない古い文書も拒否する。
-拒否したときは、固定文と 2 つの版の名前をログに書く(DEK も暗号文も書かない)。直すには DEK を作り直す(`_tee/dek` と、古い DEK で
-封印した `_tee/selftest` を消す。scripts/tee_reset_dek.py)。
+primary の版は、1 バイトの探りを `:encrypt` して、応答の `name` を使う(encrypt は常に primary の版を使う)。`GET <鍵の名前>` は使わない:
+`cloudkms.cryptoKeys.get` は `roles/cloudkms.cryptoKeyEncrypterDecrypter` に含まれず、本番で 403 になるため。追加の IAM は要らず、
+費用は起動ごとに暗号操作 1 回。探りの暗号文は捨てる。
+拒否したときは、固定文と 2 つの版の名前をログに書く(DEK も暗号文も書かない)。固定文は、運用者が誤って DEK を消さないよう(批評 C-60)、
+実データがあるときは DEK を作り直さずに、保管された版を再び有効にして primary に戻すか、DEK を包み直すよう求める
+(DEK を消すと、その DEK で封印した既存の暗号文が開かなくなる)。実データのない試験の間だけ、`_tee/dek` と `_tee/selftest` を消して
+作り直してよい(scripts/tee_reset_dek.py)。
 
 失敗の扱い: STS・KMS の 4xx は「条件に合わない」として、ステータスだけをログに書いて失敗(やり直さない)。5xx・通信エラーは、
 2 秒・4 秒・8 秒の間隔で最大 3 回やり直してから失敗する。失敗は KeyReleaseError(起動口は非 0 で終了し、再起動ポリシーが再起動する)。
@@ -44,7 +49,10 @@ KMS_BASE_URL = "https://cloudkms.googleapis.com/v1/"
 TEE_COLLECTION = "_tee"
 DEK_DOCUMENT = "dek"
 RETRY_DELAYS_SECONDS = (2.0, 4.0, 8.0)  # 5xx・通信エラーのやり直しの前に待つ秒数(最大 3 回)
-NON_PRIMARY_MESSAGE = "DEK was wrapped by a non-primary key version; rotate the DEK"
+NON_PRIMARY_MESSAGE = (
+    "DEK was wrapped by a non-primary key version; refusing to start. "
+    "If live data exists do NOT reset the DEK: re-enable and re-promote the stored version, or re-wrap the DEK."
+)
 _TIMEOUT_SECONDS = 10.0
 
 
@@ -67,23 +75,17 @@ def sts_audience(metadata: InstanceMetadata, config: VaultTeeConfig) -> str:
 
 
 class _Rest:
-    """STS・KMS への JSON の呼び出し。4xx はやり直さず、5xx・通信エラーはやり直す(契約 §5 の 5)。"""
+    """STS・KMS への JSON の POST。4xx はやり直さず、5xx・通信エラーはやり直す(契約 §5 の 5)。"""
 
     def __init__(self, http: httpx.Client, sleep: Callable[[float], None]) -> None:
         self._http = http
         self._sleep = sleep
 
-    def get(self, step: str, url: str, *, access_token: str) -> dict:
-        return self._send("GET", step, url, None, access_token)
-
     def post(self, step: str, url: str, body: dict, *, access_token: str | None = None) -> dict:
-        return self._send("POST", step, url, body, access_token)
-
-    def _send(self, method: str, step: str, url: str, body: dict | None, access_token: str | None) -> dict:
         headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
         for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
             try:
-                response = self._http.request(method, url, json=body, headers=headers)
+                response = self._http.post(url, json=body, headers=headers)
             except httpx.HTTPError as exc:
                 reason = type(exc).__name__
             else:
@@ -162,18 +164,20 @@ def _bytes_field(data: dict, field: str, step: str) -> bytes:
     return value
 
 
-def _encrypt(rest: _Rest, access_token: str, key_name: str, dek: bytes) -> tuple[bytes, str]:
+def _encrypt(
+    rest: _Rest, access_token: str, key_name: str, plaintext: bytes, *, step: str = "KMS encrypt"
+) -> tuple[bytes, str]:
     """KMS の encrypt。(暗号文, 使った鍵の版の名前)を返す。版の名前は、応答の `name` をそのまま使う。"""
     data = rest.post(
-        "KMS encrypt",
+        step,
         f"{KMS_BASE_URL}{key_name}:encrypt",
-        {"plaintext": base64.b64encode(dek).decode("ascii")},
+        {"plaintext": base64.b64encode(plaintext).decode("ascii")},
         access_token=access_token,
     )
-    ciphertext = _bytes_field(data, "ciphertext", "KMS encrypt")
+    ciphertext = _bytes_field(data, "ciphertext", step)
     version = data.get("name")
     if not isinstance(version, str) or not version:
-        raise KeyReleaseError("KMS encrypt returned no key version name")
+        raise KeyReleaseError(f"{step} returned no key version name")
     return ciphertext, version
 
 
@@ -188,13 +192,9 @@ def _decrypt(rest: _Rest, access_token: str, key_name: str, wrapped_dek: bytes) 
 
 
 def _primary_version(rest: _Rest, access_token: str, key_name: str) -> str:
-    """KMS の鍵の `primary.name`(いま encrypt に使われる版の名前)。"""
-    data = rest.get("KMS get key", f"{KMS_BASE_URL}{key_name}", access_token=access_token)
-    primary = data.get("primary")
-    name = primary.get("name") if isinstance(primary, dict) else None
-    if not isinstance(name, str) or not name:
-        raise KeyReleaseError("KMS get key returned no primary version")
-    return name
+    """鍵の primary の版の名前。1 バイトの探りを encrypt して、応答の `name` を使う(encrypt は常に primary の版を使う)。暗号文は捨てる。"""
+    _, version = _encrypt(rest, access_token, key_name, b"\x00", step="KMS encrypt (primary probe)")
+    return version
 
 
 def _unwrap(rest: _Rest, access_token: str, key_name: str, snapshot) -> bytes:

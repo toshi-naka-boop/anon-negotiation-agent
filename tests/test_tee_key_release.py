@@ -6,7 +6,8 @@ STS と Cloud KMS は偽物(httpx.MockTransport)、Firestore は conftest が起
   create() で書く(kek_version は encrypt の応答の name)。
   2 回目は書かずに、読んで decrypt する(同じ DEK)。STS の要求は契約どおり(audience は番号で組む)。KMS の鍵の名前は
   プロジェクト ID・リージョン・キーリング・鍵で組み、Bearer はアクセストークン。
-- 鍵の版の確認(批評 C-56): 保管された DEK は、包んだ版(kek_version)が KMS の鍵の primary と完全に一致するときだけ解く。
+- 鍵の版の確認(批評 C-56): 保管された DEK は、包んだ版(kek_version)が鍵の primary と完全に一致するときだけ解く。primary の版は、
+  1 バイトの探りを encrypt した応答の name(`GET <鍵の名前>` は cloudkms.cryptoKeys.get が要り、本番で 403 になるので使わない)。
   一致しない・kek_version がない文書は、解かずに失敗する(固定文と 2 つの版の名前をログに書き、DEK も暗号文も書かない)。
 - 失敗の扱い: STS・KMS の 4xx はやり直さずに失敗(ステータスだけをログに書く)。5xx・通信エラーは 2・4・8 秒空けて最大 3 回やり直す。
   先に別のインスタンスが `_tee/dek` を作っていたら、自分の DEK を捨てて、保管されている方を解く。
@@ -63,7 +64,10 @@ METADATA = InstanceMetadata(
     instance_name="vault-tee-1",
 )
 KEY_NAME = f"projects/{PROJECT_ID}/locations/{REGION}/keyRings/vault-tee/cryptoKeys/vault-kek"
-NON_PRIMARY = "DEK was wrapped by a non-primary key version; rotate the DEK"
+NON_PRIMARY = (
+    "DEK was wrapped by a non-primary key version; refusing to start. "
+    "If live data exists do NOT reset the DEK: re-enable and re-promote the stored version, or re-wrap the DEK."
+)
 DIGEST = "sha256:" + "ab" * 32
 ACCESS_TOKEN = "ya29.ACCESS-TOKEN-SECRET"
 SIGNATURE = "CLAIMS-SIGNATURE-SECRET"
@@ -72,7 +76,7 @@ PARAMS_TOML = Path(__file__).resolve().parents[1] / "config" / "params.toml"
 
 
 def version_name(number: int) -> str:
-    """KMS の鍵の版の名前(encrypt の応答の name・鍵の primary.name の形)。"""
+    """KMS の鍵の版の名前(encrypt の応答の name の形)。"""
     return f"{KEY_NAME}/cryptoKeyVersions/{number}"
 
 
@@ -103,7 +107,9 @@ def unwrap(ciphertext: bytes) -> bytes:
 class FakeGoogle:
     """STS と Cloud KMS の代わり。要求を記録し、応答を先頭から順に差し替えられる(尽きたら成功を返す)。
 
-    primary_version は、いま鍵の primary の版の番号(GET の primary.name と、encrypt の応答の name が使う)。
+    KMS の呼び出しは POST の encrypt・decrypt だけ(鍵の GET は、呼ばれたら落ちる。cloudkms.cryptoKeys.get は IAM に含まれない)。
+    primary_version は、いま鍵の primary の版の番号。encrypt は常に primary の版を使うので、encrypt の応答の name がこの版の名前に
+    なる(DEK を包む encrypt も、起動時に primary を調べる 1 バイトの探りの encrypt も)。
     """
 
     def __init__(self, primary_version: int = 1) -> None:
@@ -111,8 +117,8 @@ class FakeGoogle:
         self.sts_requests: list[httpx.Request] = []
         self.kms_requests: list[tuple[str, httpx.Request]] = []
         self.sts_script: list[httpx.Response | Exception] = []
-        self.kms_script: dict[str, list[httpx.Response | Exception]] = {"encrypt": [], "decrypt": [], "get": []}
-        self.on_encrypt = None  # encrypt の途中で呼ぶ(別のインスタンスが先に作った、という競合の再現)
+        self.kms_script: dict[str, list[httpx.Response | Exception]] = {"encrypt": [], "decrypt": []}
+        self.on_encrypt = None  # 最初の encrypt の途中で 1 回だけ呼ぶ(別のインスタンスが先に作った、という競合の再現)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -132,31 +138,19 @@ class FakeGoogle:
                     "expires_in": 3600,
                 },
             )
-        if url == f"{KMS_BASE_URL}{KEY_NAME}":
-            action = "get"  # 鍵そのものの GET(primary の版を調べる)
-        else:
-            assert url.startswith(f"{KMS_BASE_URL}{KEY_NAME}:"), url
-            action = url.rsplit(":", 1)[1]
+        assert request.method == "POST" and url.startswith(f"{KMS_BASE_URL}{KEY_NAME}:"), (request.method, url)
+        action = url.rsplit(":", 1)[1]
         self.kms_requests.append((action, request))
         scripted = self.kms_script[action].pop(0) if self.kms_script[action] else None
         if isinstance(scripted, Exception):
             raise scripted
         if scripted is not None:
             return scripted
-        if action == "get":
-            assert request.method == "GET"
-            return httpx.Response(
-                200,
-                json={
-                    "name": KEY_NAME,
-                    "purpose": "ENCRYPT_DECRYPT",
-                    "primary": {"name": version_name(self.primary_version), "state": "ENABLED"},
-                },
-            )
         body = json.loads(request.content)
         if action == "encrypt":
             if self.on_encrypt is not None:
-                self.on_encrypt()
+                hook, self.on_encrypt = self.on_encrypt, None
+                hook()
             ciphertext = wrap(base64.b64decode(body["plaintext"]))
             return httpx.Response(
                 200,
@@ -171,6 +165,11 @@ class FakeGoogle:
 
     def kms_calls(self, action: str) -> list[httpx.Request]:
         return [request for name, request in self.kms_requests if name == action]
+
+
+def encrypted_plaintext(request: httpx.Request) -> bytes:
+    """encrypt の要求で KMS に渡した平文(DEK か、1 バイトの探り)。"""
+    return base64.b64decode(json.loads(request.content)["plaintext"])
 
 
 @pytest.fixture
@@ -225,7 +224,7 @@ def test_the_first_start_creates_a_dek_wraps_it_with_kms_and_stores_it(release, 
 
     assert isinstance(dek, bytes) and len(dek) == 32
     [encrypt] = google.kms_calls("encrypt")
-    assert base64.b64decode(json.loads(encrypt.content)["plaintext"]) == dek  # KMS に渡したのは、作った DEK
+    assert encrypted_plaintext(encrypt) == dek  # KMS に渡したのは、作った DEK(作るときは primary の探りをしない)
     document = stored_dek_document(firestore_client)
     assert set(document) == {"wrapped_dek", "kek", "kek_version", "created_at", "image_digest"}
     assert document["wrapped_dek"] == wrap(dek) and dek not in document["wrapped_dek"]
@@ -244,8 +243,9 @@ def test_the_second_start_reads_the_stored_dek_and_decrypts_it_without_writing(r
     second = release(second_google)
 
     assert second == first
-    assert second_google.kms_calls("encrypt") == [] and len(second_google.kms_calls("decrypt")) == 1
-    assert len(second_google.kms_calls("get")) == 1  # 解く前に、鍵の primary を調べる
+    [probe] = second_google.kms_calls("encrypt")
+    assert len(encrypted_plaintext(probe)) == 1  # DEK を包み直してはいない。あるのは primary を調べる 1 バイトの探りだけ
+    assert len(second_google.kms_calls("decrypt")) == 1
     assert stored_dek_document(firestore_client) == before  # created_at も変わらない(書き直していない)
     [decrypt] = second_google.kms_calls("decrypt")
     assert json.loads(decrypt.content) == {"ciphertext": base64.b64encode(wrap(first)).decode()}
@@ -543,20 +543,22 @@ def test_the_version_that_encrypt_reports_is_stored_as_kek_version(release, goog
     release()
 
     assert stored_dek_document(firestore_client)["kek_version"] == version_name(7)
-    assert google.kms_calls("get") == []  # 作るときは primary を調べない(encrypt が使った版を、そのまま保存する)
+    assert len(google.kms_calls("encrypt")) == 1  # 作るときは探りをしない(DEK を包む encrypt が使った版を、そのまま保存する)
 
 
-def test_the_stored_dek_is_decrypted_only_after_the_primary_version_is_checked(release):
+def test_the_stored_dek_is_decrypted_only_after_the_primary_version_is_checked_with_a_one_byte_encrypt(release):
     first = release()
     second_google = FakeGoogle()
 
     second = release(second_google)
 
     assert second == first
-    assert [name for name, _ in second_google.kms_requests] == ["get", "decrypt"]  # 解く前に調べる
-    [get] = second_google.kms_calls("get")
-    assert get.method == "GET" and str(get.url) == f"https://cloudkms.googleapis.com/v1/{KEY_NAME}"
-    assert get.headers["authorization"] == f"Bearer {ACCESS_TOKEN}" and not get.content
+    assert [name for name, _ in second_google.kms_requests] == ["encrypt", "decrypt"]  # 解く前に、探りの encrypt で primary を調べる
+    [probe, decrypt] = [request for _, request in second_google.kms_requests]
+    assert probe.method == "POST" and str(probe.url) == f"https://cloudkms.googleapis.com/v1/{KEY_NAME}:encrypt"
+    assert probe.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
+    assert len(encrypted_plaintext(probe)) == 1
+    assert str(decrypt.url) == f"https://cloudkms.googleapis.com/v1/{KEY_NAME}:decrypt"  # 鍵の GET はしない(FakeGoogle が落ちる)
 
 
 def test_a_dek_wrapped_by_a_version_that_is_no_longer_primary_is_refused_without_decrypting(
@@ -575,9 +577,12 @@ def test_a_dek_wrapped_by_a_version_that_is_no_longer_primary_is_refused_without
     assert rotated.kms_calls("decrypt") == []  # 解いていない
     assert NON_PRIMARY in caplog.text
     assert version_name(1) in caplog.text and version_name(2) in caplog.text  # 2 つの版の名前
-    wrapped = wrap(dek)
-    leaked = [*secret_forms(dek), base64.b64encode(wrapped).decode(), wrapped.hex(), repr(wrapped)]
-    assert all(secret not in caplog.text + str(raised.value) for secret in leaked)  # DEK も暗号文も書かない
+    wrapped, probe_ciphertext = wrap(dek), wrap(b"\x00")
+    leaked = [
+        *secret_forms(dek),
+        *(form for ciphertext in (wrapped, probe_ciphertext) for form in (base64.b64encode(ciphertext).decode(), ciphertext.hex(), repr(ciphertext))),
+    ]
+    assert all(secret not in caplog.text + str(raised.value) for secret in leaked)  # DEK も暗号文(探りの分も)も書かない
     assert stored_dek_document(firestore_client) == before  # 文書は変えない(直すのは運営者の手順)
 
 
@@ -645,49 +650,48 @@ def test_the_race_path_also_refuses_a_dek_wrapped_by_a_non_primary_version(relea
     assert google.kms_calls("decrypt") == []
 
 
-def test_a_kms_4xx_while_looking_up_the_primary_fails_without_retrying(release, firestore_client, sleeps):
+def test_a_kms_4xx_on_the_primary_probe_fails_without_retrying_and_does_not_decrypt(release, firestore_client, sleeps):
     release()
     denied = FakeGoogle()
-    denied.kms_script["get"] = [httpx.Response(403, json={"error": {"message": "SECRET-DESCRIPTION"}})]
+    denied.kms_script["encrypt"] = [httpx.Response(403, json={"error": {"message": "SECRET-DESCRIPTION"}})]
 
-    with pytest.raises(KeyReleaseError):
+    with pytest.raises(KeyReleaseError, match="primary probe"):
         release(denied)
 
-    assert len(denied.kms_calls("get")) == 1 and denied.kms_calls("decrypt") == [] and sleeps == []
+    assert len(denied.kms_calls("encrypt")) == 1 and denied.kms_calls("decrypt") == [] and sleeps == []
 
 
-def test_a_kms_5xx_while_looking_up_the_primary_is_retried(release, firestore_client, sleeps):
+def test_a_kms_5xx_on_the_primary_probe_is_retried(release, firestore_client, sleeps):
     first = release()
     flaky = FakeGoogle()
-    flaky.kms_script["get"] = [httpx.Response(503)]
+    flaky.kms_script["encrypt"] = [httpx.Response(503)]
 
     assert release(flaky) == first
 
-    assert len(flaky.kms_calls("get")) == 2 and sleeps == [2.0]
+    assert len(flaky.kms_calls("encrypt")) == 2 and sleeps == [2.0]
 
 
 @pytest.mark.parametrize(
-    "key_response",
+    "probe_response",
     [
         pytest.param(httpx.Response(200, text="not json"), id="not-json"),
-        pytest.param(httpx.Response(200, json={}), id="no-primary"),
-        pytest.param(httpx.Response(200, json={"primary": "text"}), id="primary-is-text"),
-        pytest.param(httpx.Response(200, json={"primary": {}}), id="primary-without-name"),
-        pytest.param(httpx.Response(200, json={"primary": {"name": ""}}), id="primary-with-an-empty-name"),
-        pytest.param(httpx.Response(200, json={"primary": {"name": 1}}), id="primary-with-a-numeric-name"),
+        pytest.param(httpx.Response(200, json={"ciphertext": "AA=="}), id="no-name"),
+        pytest.param(httpx.Response(200, json={"name": "", "ciphertext": "AA=="}), id="empty-name"),
+        pytest.param(httpx.Response(200, json={"name": 1, "ciphertext": "AA=="}), id="numeric-name"),
+        pytest.param(httpx.Response(200, json={"name": [version_name(1)], "ciphertext": "AA=="}), id="name-in-a-list"),
+        pytest.param(httpx.Response(200, json={"name": version_name(1)}), id="no-ciphertext"),
     ],
 )
-def test_a_key_without_a_primary_version_is_not_used_for_decrypting(release, firestore_client, key_response):
+def test_a_probe_response_without_a_usable_version_name_is_not_a_reason_to_decrypt(release, firestore_client, probe_response):
     release()
     broken = FakeGoogle()
-    broken.kms_script["get"] = [key_response]
+    broken.kms_script["encrypt"] = [probe_response]
 
     with pytest.raises(KeyReleaseError) as raised:
         release(broken)
 
-    assert NON_PRIMARY not in str(raised.value)  # 版の不一致ではなく、primary を読めなかった失敗
-
     assert broken.kms_calls("decrypt") == []
+    assert NON_PRIMARY not in str(raised.value)  # 版の不一致ではなく、primary を調べられなかった失敗
 
 
 @pytest.mark.parametrize(
@@ -1178,7 +1182,7 @@ def test_a_refused_key_release_is_a_nonzero_exit(startup, monkeypatch):
     assert startup.served == {}
 
 
-def test_a_dek_wrapped_by_a_non_primary_version_stops_the_startup_until_the_dek_is_rotated(
+def test_a_dek_wrapped_by_a_non_primary_version_stops_the_startup_and_the_message_says_not_to_reset_the_dek(
     startup, monkeypatch, firestore_client, config, sleeps, caplog
 ):
     # 本物の release_dek と偽の KMS で、起動口を通す。v1 で作った DEK が保管されたあと、運営者が v2 を primary にした。
@@ -1193,12 +1197,34 @@ def test_a_dek_wrapped_by_a_non_primary_version_stops_the_startup_until_the_dek_
     assert startup.served == {}  # uvicorn は起動しない
     assert rotated.kms_calls("decrypt") == []
     assert NON_PRIMARY in caplog.text and "startup failed at the step 'key release' (KeyReleaseError)" in caplog.text
+    assert "do NOT reset the DEK" in caplog.text  # 実データがあるときは DEK を消さない(批評 C-60)
 
-    # 「DEK を作り直す」(_tee/dek と _tee/selftest を消す。scripts/tee_reset_dek.py)と、新しい版(v2)で DEK を作って起動する
+    # 実データのない試験の間だけ: DEK と自己試験の文書を消して作り直せば(scripts/tee_reset_dek.py)、新しい版(v2)で起動する
     firestore_client.document("_tee/dek").delete()
     firestore_client.document("_tee/selftest").delete()
     assert main_module.main() == 0
     assert stored_dek_document(firestore_client)["kek_version"] == version_name(2)
+
+
+def test_re_promoting_the_stored_version_lets_the_startup_continue_with_the_same_dek_and_data(
+    startup, monkeypatch, firestore_client, sleeps
+):
+    # 固定文が勧める直し方(DEK を消さずに、保管された版を再び primary に戻す)で、同じ DEK のまま起動できる
+    kms = FakeGoogle(primary_version=1)
+    monkeypatch.setattr(main_module, "release_dek", partial(release_dek, transport=kms.transport, sleep=sleeps.append))
+    assert main_module.main() == 0  # v1 で DEK と自己試験の文書ができる
+    dek_document, selftest_document = stored_dek_document(firestore_client), stored_selftest(firestore_client)
+
+    kms.primary_version = 2  # 運営者が v2 を primary にした
+    startup.served.clear()
+    assert main_module.main() == 1
+    assert startup.served == {}
+
+    kms.primary_version = 1  # 保管された版を再び有効にして、primary に戻した
+    assert main_module.main() == 0
+    assert startup.served  # 起動した
+    assert stored_dek_document(firestore_client) == dek_document  # DEK は作り直していない
+    assert stored_selftest(firestore_client) == selftest_document  # 既存の暗号文は、同じ DEK で開いた
 
 
 def test_running_the_module_as_main_exits_nonzero_when_a_step_fails(monkeypatch):
