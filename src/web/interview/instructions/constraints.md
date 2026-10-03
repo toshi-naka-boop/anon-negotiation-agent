@@ -39,6 +39,7 @@ JSON オブジェクトを 1 つだけ出力します。前後に説明・記号
 - training・side_job・start には、1 つの値しか書けません。複数の値に当てはまる発言は、値ごとに別の発言に分けます。
 - 数値は、利用者が言ったとおりの値にします(丸めません)。範囲の外の数値(例: 年収 2000 万円)を含む発言は、出力しません。
 - 言われていない条件を足しません。推測で項目を埋めません。どの項目にも触れない発言は、出力しません。
+- reason_for_leaving では、reject に書く値は「避けたい状態」そのものの値です(利用者が望む側の値ではありません)。「フルリモートが禁止になった」なら、避けたいのは出社だけの状態なので remote_days は 0 です(5 ではありません)。「夜勤が月 8 回」なら night_duty は 8 です。
 
 # 例
 
@@ -53,6 +54,10 @@ task が free_comment で、text が「当直が月 4 回以上なら行かな�
 task が reason_for_leaving で、text が「夜勤が月 8 回もあって、体がもたなかった」のとき:
 
 {"statements": [{"polarity": "reject", "salary": null, "remote_days": null, "night_duty": 8, "review_months": null, "training": null, "side_job": null, "start": null}]}
+
+task が reason_for_leaving で、text が「フルリモートが禁止になって、毎日出社になったのが理由です」のとき(避けたいのは出社だけの状態):
+
+{"statements": [{"polarity": "reject", "salary": null, "remote_days": 0, "night_duty": null, "review_months": null, "training": null, "side_job": null, "start": null}]}
 
 task が reason_for_leaving で、text が「上司と合わなかった」のとき:
 
