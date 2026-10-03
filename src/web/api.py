@@ -80,6 +80,7 @@ from web.api_models import (
     InterviewSubmitRequest,
     PrincipalAnswerBody,
 )
+from web.attack.router import build_attack_router
 from web.attested_transport import AttestationSource
 from web.client_ip import client_ip
 from web.deletion import DeletionOutcome
@@ -349,7 +350,10 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
 
     @router.post("/v1/principals/{pid}/negotiations")
     async def create_negotiation(
-        pid: str, body: CreateNegotiationBody, session: PrincipalSession = Depends(require_own_principal)
+        pid: str,
+        body: CreateNegotiationBody,
+        session: PrincipalSession = Depends(require_own_principal),
+        _limit: None = Depends(services.limiter.guard("live_negotiation_create")),
     ) -> dict[str, str]:
         """本物の候補者が、求人(フィクスチャのテンプレート)を 1 件選んで交渉を始める(§6.1)。"""
         require_registered(session)
@@ -442,7 +446,9 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
     # ------------------------------------------------------------------
 
     @router.post("/v1/demo/negotiations")
-    async def create_demo_negotiation(body: DemoCreateBody) -> dict[str, str]:
+    async def create_demo_negotiation(
+        body: DemoCreateBody, _limit: None = Depends(services.limiter.guard("demo_run"))
+    ) -> dict[str, str]:
         """デモの交渉を、架空人物のテンプレートから作る(§3.7)。モードは demo 固定、依頼者は関わらない。"""
         request_id = f"demo:{body.request_id}"
         known = await vault.get_negotiation_by_request(request_id)
@@ -480,6 +486,9 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
             return await vault.get_demo_events(nid, side, after_seq)
         except VaultNotFoundError:
             raise HTTPException(status_code=403, detail="forbidden") from None
+
+    # 攻撃モードと 3 枚の壁(/v1/demo/attack/...。web.attack.router)。入場の制限と、段の状態・レフェリーの起動は、上と共通のものを使う
+    router.include_router(build_attack_router(services, admit_new_negotiation, register_created_negotiation))
 
     # ------------------------------------------------------------------
     # TEE モード: 金庫の attestation の検証結果(セッションを見ない。公開情報だけ。契約 §8)

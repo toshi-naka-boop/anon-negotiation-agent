@@ -13,10 +13,12 @@ from google.cloud import firestore
 
 from vault.clock import Clock, SystemClock
 
+from web.attack import AttackServices, RawMessageSender, build_attack_services
 from web.config import DEFAULT_WEB_CONFIG, WebConfig
 from web.deletion import PrincipalDeletion
 from web.interview import InterviewService, build_interview_service
 from web.ledger import DisclosureLedger
+from web.limits import DEFAULT_RATE_LIMIT_CONFIG, RateLimitConfig, RateLimiter
 from web.llm_budget import LlmBudget
 from web.locks import PrincipalLocks
 from web.principal_sweeper import PrincipalSweeper
@@ -47,6 +49,8 @@ class WebServices:
     principal_sweeper: PrincipalSweeper
     default_db: firestore.Client
     interview: InterviewService
+    limiter: RateLimiter
+    attack: AttackServices
 
 
 def build_services(
@@ -59,6 +63,8 @@ def build_services(
     sleep: Sleep = asyncio.sleep,
     config: WebConfig = DEFAULT_WEB_CONFIG,
     answerer: FictionalAnswerer | None = None,
+    send_raw: RawMessageSender | None = None,
+    rate_limits: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
 ) -> WebServices:
     """部品を組み立てる。session_key が空なら MissingSessionKeyError(起動を拒否する)。"""
     clock = clock if clock is not None else SystemClock()
@@ -68,6 +74,8 @@ def build_services(
     stages = StageStore(default_db, clock, config.retention)
     ledger = DisclosureLedger(default_db)
     llm_budget = LlmBudget(default_db, clock, config.llm_budget)
+    limiter = RateLimiter(default_db, clock, rate_limits)
+    attack = build_attack_services(clock=clock, send_raw=send_raw)
     deletion = PrincipalDeletion(vault=vault, meta=meta, stages=stages, ledger=ledger, locks=locks)
     referees = RefereeManager(
         RefereeDeps(
@@ -80,6 +88,8 @@ def build_services(
             locks=locks,
             llm_budget=llm_budget,
             max_checks_per_plan=config.llm_budget.max_checks_per_plan,
+            attacker_instruction=attack.contexts.instruction_for,
+            turn_recorder=attack.llm_context.record,
         )
     )
     sweeper = Sweeper(
@@ -114,4 +124,6 @@ def build_services(
         principal_sweeper=principal_sweeper,
         default_db=default_db,
         interview=interview,
+        limiter=limiter,
+        attack=attack,
     )

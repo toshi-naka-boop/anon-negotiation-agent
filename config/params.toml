@@ -225,6 +225,20 @@ max_anchors_per_kind = 100
 # ブロック先の企業 ID の数と、1 件の長さ
 max_blocklist_entries = 200
 max_company_id_length = 100
+# --- 入口ごとのレート制限(design.md §8.2「レート制限」。台帳 L4-2・C-3・X-10・X-30)。暫定値 ---
+# LLM を呼ぶか交渉を作るすべての入口に、クライアントごと・入口ごとの回数の上限を掛け、全入口の合計にも上限を掛ける(web.limits)。
+# 回数は Firestore の時間窓カウンタに、トランザクションで数える(再起動や新しいリビジョンでも消えない)。窓は固定の区切り
+# (UNIX 時刻を窓の長さで割った商が同じ間)。クライアントは、Cloud Run が X-Forwarded-For に追記した IP(web.client_ip。調査事項 R-7)。
+# 超えたら 429(Retry-After は窓の終わりまでの秒数)。拒否した要求は、どの枠にも数えない。
+# 【発表の日の運用】発表者だけの別枠は作らない(秘密の URL が漏れたときに、全体の歯止めを迂回されるため。台帳 X-30)。
+# 代わりに、このファイルで下の値(per_client の各値と rate_overall_limit)を上げる。聴衆が全体の上限を使い切って
+# ライブ実演が 429 になったら、リプレイ(§8.4)に切り替える。上げたら元に戻す。LLM の呼び出し数の上限([web.llm_budget])は別の
+# 歯止めで、こちらを上げても外れない。
+rate_window_seconds = 600
+# 全入口の合計の上限(窓あたり)。クライアント IP の取り方が崩れても効く
+rate_overall_limit = 300
+# カウンタの文書の TTL(窓の終わりから。秒)。Firestore の TTL ポリシー(コレクション rate_limits のフィールド ttl_at)はデプロイの段で設定する
+rate_counter_ttl_seconds = 3600
 
 # --- 面談(design.md §5・§8.2。src/web/interview/)の暫定値 ---
 # モデル名と temperature は [agents] の値を使う(キーを持たない)。LLM の一時的なエラーの再試行の回数・待ち時間・1 呼び出しの上限は
@@ -253,6 +267,36 @@ max_statements_per_extraction = 10
 net_to_gross_ratio = 0.8
 # 経験年数の帯の境目(年。この値未満が前の帯。§2.6)。[attribute_bands.experience_band] のグリッドの数より 1 つ少ない
 experience_band_upper_bounds = [3, 5, 10]
+
+# クライアントごとの上限(窓あたり)。入口ごとに別の枠(台帳 L4-2): ある入口の枠を使い切っても、別の入口は使える。
+# 名前は web.limits.ENTRANCES と同じ(足りない・余る名前は、読み込みで拒否する)。
+[web.limits.per_client]
+# 面談の LLM 呼び出し(面談の実装が web.limits の guard を使う)
+interview_llm = 30
+# デモの実行(POST /v1/demo/negotiations)
+demo_run = 10
+# ライブ交渉の作成(POST /v1/principals/{pid}/negotiations)
+live_negotiation_create = 10
+# 攻撃モードの交渉の作成(POST /v1/demo/attack/negotiations。設計書の表にない行。1 件で LLM を 28 回ほど呼ぶので、デモの実行と同じにした)
+attack_create = 10
+# 攻撃モードの指示(攻撃の手。POST /v1/demo/attack/negotiations/{nid}/instruction)
+attack_instruction = 30
+# 壁 1 の生メッセージ(POST /v1/demo/attack/walls/1)
+raw_message = 20
+
+# --- 攻撃モード(design.md §8.2・§3.7。台帳 P-17) ---
+[web.attack]
+# 攻撃モードの交渉の相手(架空人物のテンプレートの ID。金庫の templates/{id})。攻撃画面から相手を選ばせない
+# (架空人物以外には攻撃できない。AC-13)。fixtures/case3.toml(攻撃用: 架空の候補者と「何でも受ける」求人)ができたら、
+# ここの 2 つの名前はそのファイルのテンプレート ID(攻撃用の求人は「何でも受ける」)。
+candidate_template_id = "demo-candidate-1"
+employer_template_id = "case3-employer"
+# 攻撃の指示を web のメモリに持つ時間(秒)。金庫のデモ・攻撃の交渉の TTL(96 時間)と同じ。永続化しない(台帳 P-17)
+context_ttl_seconds = 345600
+# 壁 2 のために、直近の LLM の入力を覚えておく交渉の数の上限(メモリ)。古いものから捨てる
+llm_context_max_negotiations = 100
+# 攻撃の API の本文の上限(バイト。壁 1 の生メッセージ・指示とも。§4.3 の受信本文の上限と同じ 32 KB)
+max_body_bytes = 32768
 
 # --- TEE(Confidential Space)版の金庫だけが使う(design.md §9、research/tee-spike.md、research/tee-spike-contract.md) ---
 # Cloud Run 版は読まない。プロジェクト ID・番号・ゾーンは書かない(金庫は実行時にメタデータサーバから取る)。

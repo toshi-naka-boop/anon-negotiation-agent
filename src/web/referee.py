@@ -44,7 +44,7 @@ from typing import Literal, Protocol
 
 from negotiation_core import AttackerTurnInput, CheckedPackage, Move, Package, Plan, Side, TurnInput, Usage, Verdict, parse_plan
 
-from vault.api_models import EventViewItem, MoveRequest, NegotiationViewResponse, PrincipalAnswerRequest
+from vault.api_models import ControlRequest, EventViewItem, MoveRequest, NegotiationViewResponse, PrincipalAnswerRequest
 from vault.clock import Clock, SystemClock
 from vault.models import NegotiationMode, PrincipalAnswerKind, RegisteredInvalidReason
 
@@ -145,8 +145,12 @@ class RefereeDeps:
     # 架空人物の途中確認に自動で答える口。None なら、架空人物の途中確認も回答が届くまで待つ。
     answerer: FictionalAnswerer | None = None
     # 攻撃モードの求人エージェントへ毎手番渡す指示文(§8.2)を、交渉 ID から引く口。None なら空文字。
-    # 指示の受け付け(攻撃画面・入口ごとのレート制限)は ③ の範囲で、ここは差し込み口だけ。
-    attacker_instruction: Callable[[str], str] | None = None
+    # 指示は web のメモリにだけ持つ(web.attack.memory。台帳 P-17)。この web が持っていない交渉(再起動で消えた)には None を返すと、
+    # 攻撃者の手番で、その交渉を取消(「なし」)にして終える。
+    attacker_instruction: Callable[[str], str | None] | None = None
+    # デモ・攻撃(live 以外)の交渉の、LLM に渡す入力を作るたびに呼ぶ口(壁 2。§8.1。web.attack.memory.LlmContextRecorder.record)。
+    # 本物の利用者の交渉(live)では呼ばない。
+    turn_recorder: Callable[[NegotiationContext, Side, TurnInput | AttackerTurnInput], None] | None = None
     # 依頼者ごとのロック(台帳 I-4)。渡すと、本物の候補者の交渉の金庫への操作を 1 回ごとにロックの下で行う。
     # 本人の削除・利用記録の更新・段の状態の作成と、同じ依頼者の操作を 1 つずつ順に処理するため。
     locks: PrincipalLocks | None = None
@@ -174,6 +178,10 @@ class _TurnEnded(Exception):
     def __init__(self, outcome: StepOutcome) -> None:
         super().__init__(outcome.value)
         self.outcome = outcome
+
+
+class _AttackContextLost(Exception):
+    """攻撃モードの交渉の文脈(攻撃の指示)を、この web が持っていない(再起動で消えた。台帳 P-17)。交渉を取消にして終える。"""
 
 
 class _CostLimitReached(Exception):
@@ -314,6 +322,8 @@ class Referee:
             return ended.outcome
         except _CostLimitReached as reached:
             return await self._stop_for_cost_limit(reached.limit)
+        except _AttackContextLost:
+            return await self._cancel_without_attack_context()
 
     async def _play_turn(self, side: Side, view: NegotiationViewResponse) -> StepOutcome:
         """計画 → 確かめ → 決定(§4.1 の 2〜5)。エージェントの呼び出しは、最大 2 回。"""
@@ -410,6 +420,15 @@ class Referee:
         response = await self._vault.stop_cost_limit(self._context.nid)
         return StepOutcome.FINISHED if response.status == "judged" else StepOutcome.WAITING
 
+    async def _cancel_without_attack_context(self) -> StepOutcome:
+        """攻撃の指示を web が持っていない(再起動で消えた。台帳 P-17)ので、攻撃者を呼ばずに、交渉を取消(「なし」)にして終える。冪等。
+
+        攻撃者の手番で気づく(候補者が先に打つので、手番の前に指示がなくなっていても、候補者の手番は進む)。
+        """
+        _log.warning("an attack negotiation lost its instruction; cancelling it")
+        response = await self._vault.control(self._context.nid, ControlRequest(side="employer", action="cancel"))
+        return StepOutcome.FINISHED if response.status == "judged" else StepOutcome.WAITING
+
     async def _log_call_count(self) -> None:
         """交渉の終了時に、この交渉の物理の呼び出し数をログに残す(§8.2。値は含まない数だけ)。数えられなければ、何もしない。"""
         budget = self._deps.llm_budget
@@ -449,7 +468,13 @@ class Referee:
         role = self._context.agent_role(side)
         if role == "attacker":
             source = self._deps.attacker_instruction
-            turn_input = to_attacker_turn_input(turn_input, source(nid) if source is not None else "")
+            instruction = source(nid) if source is not None else ""
+            if instruction is None:
+                raise _AttackContextLost
+            turn_input = to_attacker_turn_input(turn_input, instruction)
+        recorder = self._deps.turn_recorder
+        if recorder is not None and self._context.mode != "live":
+            recorder(self._context, side, turn_input)
         try:
             payload, usage = await self._call_agent(role, turn_input)
             self._log_usage(side, phase, "ok", usage)

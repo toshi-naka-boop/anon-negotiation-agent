@@ -195,12 +195,17 @@ def build_web_env(
     run_referees: bool = False,
     token_provider=None,
     startup_sweep_done: bool = True,
+    send_raw=None,
+    rate_limits=None,
 ) -> WebAppEnv:
     """web の app を組み立てる。vault には、金庫のクライアントを包んだもの(止める仕掛けなど)も渡せる。
 
     use_stub_agents=False にすると、send_turn を差し込まず、agents_base_url を束ねた本物の
     agents.client.send_turn を使う(結合のテスト)。run_referees の既定は False(モジュールの docstring を参照)。
     token_provider を渡すと、本物の send_turn は、agents の呼び出しにサービス間の ID トークンを付ける(台帳 X-37)。
+    send_raw は壁 1 の生メッセージを送る関数(渡さなければ、agents_base_url を束ねた本物の送信。通信路は web.attack.raw_message の
+    _open_http_client を差し替えて、agents の app につなぐ)。rate_limits は入口ごとのレート制限の設定(渡さなければ設定ファイルの値。
+    web.limits)。
     startup_sweep_done の既定は True: テストの app は lifespan(起動時の見回り)を動かさないので、起動時の見回りが終わるまで
     新規の作成を断る仕組み(§8.2・台帳 X-53)を、既定では済ませたことにする(その仕組みを確かめるテストだけ False にする)。
     """
@@ -213,6 +218,10 @@ def build_web_env(
         kwargs["send_turn"] = agents
     if token_provider is not None:
         kwargs["token_provider"] = token_provider
+    if send_raw is not None:
+        kwargs["send_raw"] = send_raw
+    if rate_limits is not None:
+        kwargs["rate_limits"] = rate_limits
     app = create_app(
         vault=vault,
         default_db=default_db,

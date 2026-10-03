@@ -42,8 +42,10 @@ from negotiation_core.tee_settings import load_tee_settings
 from vault.clock import Clock
 
 from web.api import DEMO_PATH_PREFIX, TEE_PATH_PREFIX, TeeAttestationConfig, build_router
+from web.attack import RawMessageSender, bind_raw_sender
 from web.attested_transport import AttestedVaultTransport
 from web.config import DEFAULT_WEB_CONFIG, WebConfig
+from web.limits import DEFAULT_RATE_LIMIT_CONFIG, RateLimitConfig
 from web.referee import FictionalAnswerer, SendTurn, Sleep
 from web.service_auth import IdTokenAuth, IdTokenProvider, id_token_provider_from_env
 from web.services import build_services
@@ -99,6 +101,8 @@ def create_app(
     answerer: FictionalAnswerer | None = None,
     token_provider: IdTokenProvider | None = None,
     tee: TeeAttestationConfig | None = None,
+    send_raw: RawMessageSender | None = None,
+    rate_limits: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
 ) -> FastAPI:
     """web の FastAPI アプリを作る。
 
@@ -117,6 +121,8 @@ def create_app(
         sleep=sleep,
         config=config,
         answerer=answerer,
+        send_raw=send_raw if send_raw is not None else bind_raw_sender(agents_base_url, token_provider),
+        rate_limits=rate_limits,
     )
 
     @asynccontextmanager

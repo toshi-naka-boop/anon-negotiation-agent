@@ -54,6 +54,16 @@
 - §3.7・§3.8・§8.4（`case<N>.toml` の命名と `template_id` のファイル間の一意性）・§9 の 1（`Dockerfile.vault` に `fixtures/` が入り、フィクスチャの中身がダイジェストを動かす）・§10・契約 §4・DV の追加（初回に全件・再起動で 0 回・変更で上書き・壊れで例外）を書く。
 - 運用の注意: `COPY fixtures ./fixtures` は `fixtures/replays/*.jsonl` と `interview_templates.toml` も入れるので、リプレイの録り直しでも金庫のダイジェストが動く（対応表への追記と principalSet の付け直しが要る）。狭めるなら `COPY fixtures/case*.toml ./fixtures/`（テストの COPY 元の検査を glob 対応に）。ローリング更新で古いイメージが再起動すると古いテンプレートで上書きする（§3.7 の前提の範囲）。Cloud Run 版の金庫は root logger が WARNING のままなので INFO（投入の件数）は出ない。
 
+### I-26（実装時の気づき / 文面・小さな積み残し / low。次の改訂（v20）で設計書に反映）攻撃モード・レート制限・3 枚の壁（F）と面談（K）で分かったこと
+
+- §8.2 の表に「攻撃モードの交渉の作成」（10 回／10 分。1 件で LLM を約 28 回呼ぶ）を足し、「攻撃モードの指示 30」は指示の置き換えの枠と明記。入口名（`interview_llm`・`demo_run`・`live_negotiation_create`・`attack_create`・`attack_instruction`・`raw_message`）と設定の場所（`[web.limits]` の `rate_*`・`per_client`）、固定窓（境目で最大 2 倍通る）、拒否は枠に数えない、429 の本文 `{"detail": {"code": "rate_limited", ...}}`（既存の `daily_limit_reached` は文字列。画面は両方を扱う）。攻撃の API の本文は 32 KB（413）、指示は 400 文字（422）。
+- §8.1: 壁 1 の止める順（回数 → 32 KB → JSON の形 → 当日の物理の数 → 送信）と応答の形。壁 2 の `inspection` と記録が web のメモリ（再起動で 404）。壁 3 は金庫の答えの列まで（区間は §8.3 のメーター API）。
+- §4.1・P-17: 再起動で消えた攻撃の指示は、攻撃者の手番で `control(cancel)` して「なし」。
+- §10: Firestore の TTL ポリシーに `rate_limits.ttl_at` を足す。R-7 の確認項目（`X-Forwarded-For` の末尾がクライアント IP）。`config/params.toml` は金庫のイメージに入るので、web の設定を変えても金庫のダイジェストが動く（設定ファイルを分けるかは後で判断）。
+- 面談（K）: §5 の 2・4・5 は JSON モード＋pydantic（応答スキーマは使わない。実機の計測は未）。軸は複数外せる（§2.4 の規則は複数版を `web/interview/statements.py` に置いた）。二択は雛形＋年収の土台で 6 組、確認に進むには 5 組（A・B 両方）。受けるアンカー 0 件の警告は外した軸が原因でないときも出る。地域は都道府県名、職種は大分類。途中の状態は普通の dict（ADK のセッションは呼び出しごと）。依頼者のロックは面談の LLM 呼び出し中も持つ（交渉はまだ無いので実害なし）。面談の枠は暫定で依頼者 ID ごと（メモリ）→ F の `limiter.guard("interview_llm")` に差し替える（小さな積み残し）。本人の削除で面談の途中状態も即時に消す（`web/deletion.py` に 1 行。小さな積み残し）。`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` は面談のモジュールが未設定なら false にする。
+- 古いコメントの直し（小さな積み残し）: `src/agents/instructions/__init__.py`（attacker は ③ で書く）、`src/web/__init__.py`（攻撃モード・レート制限は後の段）、`tests/test_llm_budget.py`（生メッセージの経路が無い）。
+- 本物の Gemini で未確認: `attacker.md`、面談の指示文 2 本（`salary.md`・`constraints.md`）。ユーザーの環境で 1 回ずつ流す（DV-15 と同じ位置付け）。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |
