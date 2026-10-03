@@ -784,8 +784,10 @@ gcloud iam workload-identity-pools create vault-tee-pool --location=global --dis
 Confidential Space 用の OIDC プロバイダを、テスト用の条件（debug を通す）で作る。
 
 ```
-gcloud iam workload-identity-pools providers create-oidc attestation-verifier --location=global --workload-identity-pool=vault-tee-pool --issuer-uri="https://confidentialcomputing.googleapis.com/" --allowed-audiences="https://sts.googleapis.com" --attribute-mapping='google.subject="gcpcs::"+assertion.submods.container.image_digest+"::"+assertion.submods.gce.project_number+"::"+assertion.submods.gce.instance_id,attribute.image_digest=assertion.submods.container.image_digest' --attribute-condition="assertion.swname == 'CONFIDENTIAL_SPACE'"
+gcloud iam workload-identity-pools providers create-oidc attestation-verifier --location=global --workload-identity-pool=vault-tee-pool --issuer-uri="https://confidentialcomputing.googleapis.com/" --allowed-audiences="https://sts.googleapis.com" --attribute-mapping='google.subject="gcpcs::"+assertion.submods.container.image_digest+"::"+assertion.submods.gce.project_number+"::"+assertion.submods.gce.instance_id,attribute.image_digest=assertion.submods.container.image_digest' --attribute-condition="assertion.swname == 'CONFIDENTIAL_SPACE' && assertion.submods.gce.project_id == '${PROJECT_ID}' && '${VAULT_SA}' in assertion.google_service_accounts"
 ```
+
+（テスト用の条件にも、プロジェクトと金庫の SA を入れる。debug の間も、別のプロジェクトや別の SA で動かした同じイメージには鍵が出ないように。批評 C-56）
 
 自分のユーザーに、web の SA の ID トークンを作る権限を付ける（点 4 の手元の試験用）。
 
@@ -922,7 +924,37 @@ gcloud compute instances create vault-tee --zone="$ZONE" --machine-type=n2d-stan
 gcloud logging read "logName=\"projects/${PROJECT_ID}/logs/confidential-space-launcher\"" --freshness=30m --order=asc --limit=200 --format=json
 ```
 
-注意: debug の間に金庫が作った DEK（`vault-db` の `_tee/dek`）は、本物のデータを入れる前に消して、本番イメージで作り直す（2-5）。消す操作は、金庫のコード側で用意する（手順は、そのときに出す）。
+本番イメージの金庫が起動したら、KEK の新しい版を作って primary にする（debug の間に作った DEK の包みを、運営者が本番に持ち込めないようにする。金庫は、`_tee/dek` を包んだ鍵の版が primary でなければ起動しない。批評 C-56）。
+
+```
+gcloud kms keys versions create --location="$REGION" --keyring=vault-tee --key=vault-kek --primary
+```
+
+古い版の番号を確かめる（`STATE` が `ENABLED` の、新しい primary 以外の版）。
+
+```
+gcloud kms keys versions list --location="$REGION" --keyring=vault-tee --key=vault-kek
+```
+
+古い版（例: 1）を無効化する。
+
+```
+gcloud kms keys versions disable 1 --location="$REGION" --keyring=vault-tee --key=vault-kek
+```
+
+debug の間に作った DEK と自己試験の文書を消す（手元の ADC。`--yes` が無ければ何もしない）。
+
+```
+uv run python scripts/tee_reset_dek.py --yes
+```
+
+本番の VM を再起動して、新しい版で DEK を作り直させる（起動後の launcher のログで `sealing self-test ok` を確かめる）。
+
+```
+gcloud compute instances reset vault-tee --zone="$ZONE"
+```
+
+負の試験（C-56）: 消す前に写しておいた古い `_tee/dek` を書き戻して VM を再起動すると、金庫は起動せずに `non-primary key version` のログを残す（確かめたら、もう一度 `tee_reset_dek.py --yes` と再起動）。
 
 ### E. Cloud Run から VPC 経由でつなぐ（Direct VPC egress）
 

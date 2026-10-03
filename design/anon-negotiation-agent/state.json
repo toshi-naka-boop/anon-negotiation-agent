@@ -1,14 +1,14 @@
 {
   "currentNode": "批評",
   "status": "in_progress",
-  "designVersion": "v15",
+  "designVersion": "v16",
   "approvedDesignVersion": null,
   "approvedDesignSha256": null,
   "approvedAt": null,
   "approvalEvidence": null,
-  "requiredApprovalFingerprint": "v15:4bbceeaa5cb2",
+  "requiredApprovalFingerprint": "v16:1814f1e28add",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
-  "criticRound": 14,
+  "criticRound": 16,
   "openIssueIds": [
     "P-8",
     "P-9",
@@ -21,10 +21,10 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v15 の下書きに TEE の決め方（§9 を研究報告と契約で書き直し）、I-7・I-9・I-10・I-20 の結論、P-8〜P-12 の推奨を足した（2026-10-03）。批評 16 巡目（design-critic/fable + codex xhigh。reviews/round-16*.md、ID は C-56〜・X-65〜）を回し、high を直してから承認 CP（新しい指紋）。並行で TEE スパイクの実装（契約 v1。A 金庫・B web・C イメージの 3 worktree、sonnet）が走っている。終わったら呼び出し側が全テストを回して取り込み、ユーザーに手順 A〜C を出す。ユーザーの確認待ち: P-8〜P-12（推奨を既定として進める。P-12 の pyproject の変更だけは承認まで保留）。承認済みは v14（4109a75c582c）のまま。",
+  "nextAction": "v16（批評 16 巡目の直し。X-65〜X-69、C-56・C-57、L16-1〜6）を起草した（2026-10-03）。17 巡目（reviews/round-17*.md、ID は C-58〜・X-70〜）を回し、high がなければ承認 CP（指紋 v16:1814f1e28add。ブリーフつき）。並行で TEE スパイクの実装 3 本（A 金庫・B web・C イメージ。契約 v1 ＋ 追記 §15 と C-56・C-57・L16-5・L16-6 の伝達）が走っている。終わったら呼び出し側が全テストを回して取り込む。ユーザーの確認待ち: P-8〜P-12（推奨を既定として進める。P-12 の pyproject の変更だけは承認まで保留）、手順 A の実行結果、design-critic のモデル（opus のまま／fable に直す）。承認済みは v14（4109a75c582c）のまま。",
   "lastUpdated": "2026-10-03",
   "delegation": {
-    "批評": "claude/design-critic（model: fable。ユーザーの指示 2026-10-02。11 巡目までは opus）+ codex exec (gpt-5.6-sol, xhigh)",
+    "批評": "claude/design-critic（frontmatter は `model: opus`。16 巡目の実際のモデルは claude-opus-5-5。2026-10-02 の『fable』の指示と食い違うので、直すかはユーザーに確認）+ codex exec (gpt-5.6-sol, xhigh)",
     "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）",
     "反証": "claude/design-critic(opus)（正しさ）+ codex exec xhigh（安全性。実際のモデルはログで確かめて記録する）。ユーザーの指示で 2 レンズ（2026-09-30）",
     "TEE スパイクの実装": "claude/general-purpose (model: sonnet) ×3 worktree（A 金庫の TEE 版・B web と共有の検証部品・C イメージと手順）2026-10-03"
