@@ -89,6 +89,8 @@ from web.client_ip import client_ip
 from web.deletion import DeletionOutcome
 from web.interview.api import build_interview_router
 from web.llm_budget import LlmBudgetUnavailable
+from web.meter_api import build_meter_router
+from web.panels_api import build_panels_router
 from web.referee import NegotiationContext
 from web.services import WebServices
 from web.session import PrincipalSession
@@ -528,4 +530,6 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
             return await endpoint.respond(nonce, client_ip(request))
 
     router.include_router(build_activity_router(services, require_own_negotiation))  # 活動ログ・並べて見る画面(§7)
+    router.include_router(build_meter_router(services))  # 推定区間メーター(§8.3)
+    router.include_router(build_panels_router(services, require_session))  # 本人の 2 つのパネル(FR-39。§7)
     return router
