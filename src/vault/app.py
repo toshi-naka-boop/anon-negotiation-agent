@@ -6,13 +6,18 @@
 サービス間の認証は、Cloud Run の IAM(認証を必須にし、呼べるのは web のサービスアカウントだけ。§1.1)に任せ、
 アプリの中ではトークンを検証しない(台帳 X-37)。呼ぶ側(web)が、金庫の URL を audience にした ID トークンを付ける
 (web.service_auth)。
+TEE(Confidential Space)版では Cloud Run の IAM が効かないので、create_app に caller_verifier(vault.tee.caller_auth の依存)を渡し、
+アプリの中で ID トークンを検証する。attestation(vault.tee.attestation_api)を渡すと、認証なしの `GET /v1/attestation` を付ける(§9)。
 
 本番の起動口は create_app_from_env(`uvicorn vault.app:create_app_from_env --factory`)。起動時に、uvicorn のアクセスログの
 URL から ID(依頼者 ID・交渉 ID)を伏せる(§3.8。台帳 X-40)。伏せる処理は web の起動口と共通で、negotiation_core にある
 (vault は web に依存しない)。
 """
 
-from fastapi import FastAPI, Query, Request
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from google.cloud import firestore
 
@@ -50,12 +55,37 @@ from vault.errors import (
 from vault.firestore_client import create_client
 from vault.store import VaultStore
 
+if TYPE_CHECKING:
+    from vault.tee.attestation_api import AttestationService
 
-def create_app(store: VaultStore) -> FastAPI:
+
+def create_app(
+    store: VaultStore,
+    *,
+    caller_verifier: Callable[..., object] | None = None,
+    attestation: "AttestationService | None" = None,
+) -> FastAPI:
     """VaultStore を注入した FastAPI アプリを作る(1b-1 は uvicorn を起動しない。
     テストは TestClient から直接叩く)。
+
+    caller_verifier と attestation は TEE 版だけが渡す(どちらも省けば、Cloud Run 版と同じ。契約 §9・§3)。
+    - caller_verifier: FastAPI の依存。アプリ全体に掛けるので、このあとの `@app.get` などで足す経路にも掛かる(足し忘れで認証が
+      抜けない)。呼び出し元の ID トークンの検証を通らなければ 401・403。FastAPI の依存の外にある /docs・/openapi.json は出さない。
+    - attestation: `GET /v1/attestation` を付ける。素の Starlette の経路なので、caller_verifier の依存は掛からない
+      (web は、この口の応答を確かめるまで金庫を信用しないので、ID トークンをまだ送らない)。
     """
-    app = FastAPI(title="vault")
+    if caller_verifier is None:
+        app = FastAPI(title="vault")
+    else:
+        app = FastAPI(
+            title="vault",
+            dependencies=[Depends(caller_verifier)],
+            docs_url=None,
+            redoc_url=None,
+            openapi_url=None,
+        )
+    if attestation is not None:
+        app.add_route("/v1/attestation", attestation.endpoint, methods=["GET"])
 
     @app.exception_handler(NotFoundError)
     async def _not_found(request: Request, exc: NotFoundError) -> JSONResponse:

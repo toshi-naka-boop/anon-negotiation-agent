@@ -41,6 +41,33 @@ class VaultConfig:
     fictional_negotiation_ttl_seconds: int
 
 
+@dataclass(frozen=True)
+class VaultTeeConfig:
+    """TEE(Confidential Space)版の金庫だけが使う設定([vault.tee]。design.md §9、research/tee-spike-contract.md §1)。
+
+    プロジェクト ID・番号・ゾーンは持たない(金庫は実行時にメタデータサーバから取る)。allowed_hwmodels・attestation_issuer・
+    attestation_signer_certs_url は web とスクリプトの検証が使う値だが、同じ節を二重に読む契約なので、ここにも持つ。
+    """
+
+    port: int
+    attestation_audience: str
+    caller_audience: str
+    caller_service_account: str
+    workload_identity_pool: str
+    workload_identity_provider: str
+    kms_key_ring: str
+    kms_key: str
+    launcher_socket: str
+    claims_token_file: str
+    min_attestation_interval_seconds: float
+    tls_certificate_days: int
+    tls_dir: str
+    allowed_hwmodels: tuple[str, ...]
+    attestation_issuer: str
+    attestation_signer_certs_url: str
+    caller_certs_url: str
+
+
 def _load_raw_config(path: Path) -> dict:
     with path.open("rb") as f:
         return tomllib.load(f)
@@ -65,6 +92,22 @@ def load_vault_config(path: Path = _CONFIG_PATH) -> VaultConfig:
         t_high=t_high,
         fictional_negotiation_ttl_seconds=ttl,
     )
+
+
+def load_vault_tee_config(path: Path = _CONFIG_PATH) -> VaultTeeConfig:
+    """config/params.toml から [vault.tee] を読み込む。
+
+    TEE 版の起動口(vault.tee.main)だけが呼ぶ。Cloud Run 版は読まない: import 時には読まないので、この節が
+    なくても Cloud Run 版は動く(DEFAULT_VAULT_CONFIG のような既定値は作らない)。
+    """
+    raw = _load_raw_config(path)
+    tee_raw = raw.get("vault", {}).get("tee")
+    if tee_raw is None:
+        raise ValueError(f"{path} is missing the [vault.tee] section")
+    try:
+        return VaultTeeConfig(**{**tee_raw, "allowed_hwmodels": tuple(tee_raw["allowed_hwmodels"])})
+    except (KeyError, TypeError) as exc:  # 足りないキー・知らないキー
+        raise ValueError(f"{path} has a missing or unknown key in [vault.tee]: {exc}") from exc
 
 
 DEFAULT_VAULT_CONFIG: VaultConfig = load_vault_config()
