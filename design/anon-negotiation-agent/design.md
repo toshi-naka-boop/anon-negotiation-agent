@@ -104,12 +104,12 @@
 | `agents` | Cloud Run | 交渉エージェント（候補者側・求人側）と、攻撃モード用の求人エージェントを A2A で公開（側ごとに計画・決定の 2 つの LlmAgent。§4.2） | あり |
 | `vault` | Cloud Run（TEE 実施時は Confidential Space） | 丸め済みポリシーと架空人物のテンプレートの保持、交渉の状態機械、回数・予算・期限、イベント列、途中確認の追記、最終判定 | なし |
 
-- 3 サービスは同じコンテナイメージから作り、起動コマンドだけを変える。
+- 3 サービスは同じコンテナイメージから作り、起動コマンドだけを変える。TEE 版の金庫だけは専用のイメージ（`Dockerfile.vault`。金庫と `negotiation_core` と設定だけ）にする（§9。`web`・`agents` の変更でダイジェストが動かないように）。
 - **呼び出し権限**（Cloud Run IAM）
   - `vault` を呼べるのは `web` のサービスアカウントだけ。`agents` は `vault` を呼べないので、FR-15 はインフラ側で担保される。
   - `agents` を呼べるのも `web` だけ。
   - `web` は `agents`・`vault` を呼ぶとき、メタデータサーバから取った Cloud Run の ID トークン（aud は宛先のサービス）を付ける。宛先と期限を確かめてからキャッシュし、401・403 が返ったらそのトークンを捨てて取り直し、1 回だけ送り直す（X-37・X-42・X-44）。設定 `SERVICE_AUTH_ENABLED` は既定で有効（ローカルのテストでだけ切る）。
-  - TEE を実施する場合、Cloud Run の IAM は効かなくなる。代わりの仕組みは §9 に書く。
+  - TEE を実施する場合、Cloud Run の IAM は効かなくなる。代わりに、金庫が `web` のサービスアカウントの Google ID トークン（audience は固定の文字列）を自分で検証する（§9 の 4）。
 - **ストレージ**（Firestore、データベースを分ける）
   - `vault` 専用のデータベース `vault-db` には、`vault` のサービスアカウントだけが IAM 条件でアクセスできる（調査事項 R-4）。
   - `web` は `(default)` を使う（セッション、依頼者の利用記録 `principals_meta`、段階開示の状態、開示台帳、レート制限のカウンタ）。
@@ -402,7 +402,7 @@ flowchart LR
 | POST | `/v1/negotiations/{nid}/principal-answer` | `{expected_version, side, package, answer}`。`pending_question` と一致するときだけ受け付ける（§4.4） |
 | POST | `/v1/negotiations/{nid}/control` | `{side, action: pause\|resume\|cancel\|stop_cost_limit}`（§3.4）。`stop_cost_limit` は `web` の費用の歯止め（§8.2）だけが使い、画面からは呼べない |
 | POST | `/v1/negotiations/{nid}/expire` | 期限（`deadline`・`expires_at`・最長の停止時間）を過ぎていれば、終了処理（`timeout`）を行う。過ぎていなければ何もしない |
-| GET | `/v1/attestation?nonce=` | TEE 実施時だけ使う |
+| GET | `/v1/attestation?nonce=` | TEE 実施時だけ（Cloud Run 版にはない）。認証なし（`web` は、この応答を確かめるまで金庫を信用しないので、ID トークンをまだ送らない）。`nonce` は base64url の 16〜74 文字。金庫は launcher に、固定の audience と nonce 2 つ（呼び手の nonce と、自分の TLS 証明書の DER の SHA-256）で attestation トークンを求め、`{token, certificate_sha256}` を返す。形違いは 400、1 秒に 1 回を超えると 429、launcher に届かなければ 503（§9 の 3。契約 §3） |
 
 - 任意の組み合わせを評価するだけの口は作らない。評価は必ず手（`check`・`propose`・`accept`・`ask_principal`）の一部として、状態機械の中で行う。
 
@@ -588,7 +588,7 @@ sequenceDiagram
 
 - ADK の LlmAgent を、側（候補者側・求人側・攻撃モードの求人側）× 呼び出しの種類（計画・決定）で置く。出力の型が違うため（計画は `Plan`、決定は `Move`。どちらも JSON モードで、応答スキーマは渡さない。§2.7・I-19）。指示文は側ごとに 1 つで、計画と決定で共有する。
   - モデルは Gemini の Flash 系で、実装時点の安定版を設定ファイルで指定する（② の時点で `gemini-3.5-flash`、場所は global。I-10）。安いモデル（Flash-Lite）には替えない（ユーザーの判断、2026-10-02）。
-  - temperature は 0（Gemini 3 系の公式は 1.0 未満を勧めていない。I-13。変えるかはユーザーの判断待ち）。
+  - temperature は 0（Gemini 3 系の公式は 1.0 未満を勧めていない。I-13）。③-0 の DV-15 では 0 で無効手 0 件・2 回連続合格だったので、デモの再現性を優先して 0 のままにする（I-20。ユーザーの委任による判断）。繰り返し・出力切れが出たら見直す。
   - **思考の量**は、呼び出しの種類ごとに設定ファイルで指定する（`thinking_level`。3.5 Flash は MINIMAL／LOW／MEDIUM／HIGH を持ち、既定は MEDIUM。R-9）。暫定: 計画 LOW、決定 MINIMAL（決定は、確かめの結果から手を 1 つ選ぶだけ）。DV-15 の再実行で合意できなければ、決定 → 計画の順に 1 段ずつ上げる。② の実測では、思考が費用の約 63% だった（I-15）。ADK には `generate_content_config.thinking_config` で渡す。
   - ツールは持たない。確かめは、エージェントの中のツール呼び出しではなく、計画の出力をレフェリーが金庫で実行する形にする（§4.1。理由は §14）。
   - **1 呼び出しの上限**（X-50・X-55・X-63）: `max_output_tokens`（暫定 2,048。出力の JSON は 200 トークン程度で、残りが思考の上限。思考を含めて効くことは公式の文書と一致する。設定で許す範囲は 256〜4,096 で、起動時に検証する。上限を変えるなら §8.2 の最悪の金額も直す）を置き、思考が止まらない呼び出しを打ち切る。google-genai のクライアント側の自動再試行（既定は 5 回）は、ADK の `Gemini` モデルに `retry_options=HttpRetryOptions(attempts=1)` を渡して切り、起動時に設定の値を検証する（再試行はレフェリーだけが行い、§4.1 の計上と 1 対 1 にする）。切れた・再試行した要求は、どちらも Vertex AI の要求 1 回として数える。DV-15 で `thoughts_token_count` が上限を超えないことを確かめ、DV-17 で HTTP の要求が計上と 1 対 1 であることを偽の HTTP 層で確かめる。
@@ -691,7 +691,7 @@ sequenceDiagram
    - 画面のフォームの状態も消す。
 
 - LLM の呼び出しには Vertex AI を使う。面談エージェントのトレースでは、メッセージ内容のキャプチャを切る。面談の呼び出しは、コンテキストキャッシュを使わない（§1.2）。面談の構造化出力（`SalaryBasis`・`ConstraintList`）は列挙が小さいので応答スキーマで出させる予定だが、交渉エージェントと同じく遅くなるなら JSON モードにして検証で守る（I-19。実装時に 1 回測る）。
-- 面談の入口に、Vertex AI 側の記録と、30 日使わなければデータが自動で消えることについて、短い注記を出す（§1.2・§6.3。P-4・P-6 の回答）。
+- 面談の入口に、Vertex AI 側の記録、AI の処理は Google Cloud の global エンドポイントで行われ処理される国が決まらないこと（I-10）、30 日使わなければデータが自動で消えること、について短い注記を出す（§1.2・§6.3。P-4・P-6 の回答）。
 - 面談の LLM 呼び出しにも、§8.2 のレート制限と 1 日の物理の数を掛ける。Vertex AI の一時的なエラーは、§4.1 と同じく再試行する。
 - 面談の LLM に向かう入力（自由記述の 3 問、自由コメント、辞めた理由）は、リクエスト本文 32 KB までに制限し、面談エージェントにも `max_output_tokens`（暫定 2,048）を置く（C-49。1 日の最悪の金額を面談を含めて決めるため。§8.2）。
 - デモはプリセットの人物で進め、生の面談は 1 項目だけ見せる。
@@ -874,29 +874,33 @@ sequenceDiagram
 
 ---
 
-## 9. TEE（条件付き、FR-50・U-11）
+## 9. TEE（FR-50・U-11。スパイクの結果で確定する）
 
-ユーザーの判断（2026-10-02、I-14）で TEE を実施する（U-11）。金庫のコードを GitHub で公開し、機密 VM・Cloud KMS・VPC の費用を受け入れる。まず 10/3〜4 のスパイク（予備 10/5〜6）で、次の 6 点を確かめる。6 点とも通れば実施し、通らなければ Cloud Run 版で出す。GCP のコマンドは呼び出し側が手順を出し、ユーザーがターミナルで実行する。
+ユーザーの判断（2026-10-02、I-14）で TEE（Confidential Space）を実施する（U-11）。金庫のコードを GitHub で公開し、機密 VM・Cloud KMS・VPC の費用を受け入れる。10/3〜4 のスパイク（予備 10/5〜6）で、次の 6 点を確かめる。GCP のコマンドは呼び出し側が手順を出し（`research/tee-spike.md` の「コマンドの手順」）、ユーザーがターミナルで実行する。部品どうしの取り決めは `research/tee-spike-contract.md`（契約 v1、2026-10-03）に置き、確かめた結果をこの節に写す。
 
-1. `vault` のイメージを Confidential Space で動かす。
-2. 保存データの暗号鍵（Cloud KMS）を、Workload Identity Pool の attestation 条件（イメージダイジェストなど）で、検証済みのワークロードにだけ渡す。
-3. `web` から `vault` へ、ワークロード内で終端する TLS でつなぐ。
-4. `vault` が呼び出し元を自分で確かめる。
-   - Confidential Space は Compute Engine の VM なので、Cloud Run の起動元 IAM は効かない。
-   - `web` のサービスアカウントの ID トークン（Google 署名、audience は `vault`）を検証する。
-5. VM を VPC の内側だけに置き、外部 IP を持たせない。`web` からは VPC 経由でつなぐ。
-6. 画面に attestation の内容（イメージダイジェスト）と、GitHub のコミットへのリンクを出す。金庫のコンテナのコードは公開リポジトリに置く。
+| # | 確かめること | やり方（決めたこと） |
+|---|---|---|
+| 1 | `vault` のイメージを Confidential Space で動かす | 金庫専用のイメージ（`Dockerfile.vault`。`ENTRYPOINT` 固定・`CMD []`、`EXPOSE 8443`、launch policy は `log_redirect=always` だけ許し、環境変数・コマンドの上書きとメモリ監視は許さない）。機密 VM は N2D + AMD SEV（`n2d-standard-2`、東京 `asia-northeast1-b`。P-8）。本番イメージは SSH もログも既定で無いので、先に debug イメージで通す。TEE 版の金庫は環境変数を使わず、プロジェクト ID・番号・ゾーンは実行時にメタデータサーバから取る（公開リポジトリに書かない） |
+| 2 | 保存データの鍵を、検証済みのワークロードにだけ渡す | Cloud KMS の鍵 1 本（KEK）。権限は Workload Identity Pool の principalSet（イメージダイジェスト）にだけ付け、VM のサービスアカウントには付けない（付けると、運営者が同じ SA で別の VM を作って復号できる）。プロバイダの条件は `swname`・`STABLE`・`dbgstat`・`hwmodel`・プロジェクト・SA。金庫は起動時に、launcher が置く既定の attestation トークンを STS で交換し、KMS で DEK（AES-256-GCM）を包む・開く（どちらも httpx で REST を直接呼ぶ）。DEK はメモリにだけ置く。**何を暗号化するか（I-14 の 2 番）**: 本物の依頼者の機微な項目だけ（`principals/{pid}` の policy・blocklist・removed_axes・attribute_bands、`negotiations/{nid}`（live）の snapshots・pending_offer・last_check・pending_question・result、`events/{version}` の `views.*.payload`）。索引・制御に使う項目（ID・status・期限・seq・mode・TTL・カウンタ）は平文。デモ・攻撃・テンプレートは公開フィクスチャなので暗号化しない。AAD は「文書のパス + 項目名」（暗号文の差し替えを防ぐ）。Firestore の CMEK は使わない（Firestore 自身が復号する仕組みで、attestation の条件が入らない）。`store.py` への組み込み（約 40 か所）はスパイクの後（10/5 以降） |
+| 3 | `web` から `vault` へ、ワークロード内で終端する TLS でつなぐ | **「検証してからピン留め」（I-14 の 3 番）**: 金庫は起動のたびに P-256 の鍵と自己署名の証明書を作る。`web` は、(1) 証明書を検証なしで控えて DER の SHA-256 を計算し、(2) その 1 枚だけを信用する接続で `GET /v1/attestation?nonce=` を呼び、(3) 返った JWT を Google の鍵で検証し、`eat_nonce` に自分の nonce と証明書ハッシュの両方があること、`swname`・`dbgstat`・`STABLE`・`hwmodel`・ダイジェスト（`deploy/vault-releases.json` の許可リスト）・プロジェクト・SA を確かめ、(4) 通ったときだけその証明書をピン留めし、以後の API に ID トークンを付けて呼ぶ。中継者は本物の証明書の秘密鍵を持たないので TLS を張れず、自分の証明書を出せばハッシュが合わない。金庫の再起動（証明書が変わる）は、接続エラーのたびに再検証して付け替える（間隔の下限 2 秒。Google Cloud Attestation は 1 プロジェクト・1 リージョンで毎秒 5 件まで）。公式に TLS と attestation を結ぶ手順はないので自前の設計（最も危ない点）。EKM 方式は Python の標準 `ssl` に API がなく採らない |
+| 4 | `vault` が呼び出し元を自分で確かめる | Cloud Run の起動元 IAM は効かない（Compute Engine の VM）。金庫は `Authorization: Bearer` の Google ID トークンを、Google の OAuth2 の証明書（1 時間キャッシュ。未知の `kid` のときだけ取り直す）で検証する。`aud` は固定の文字列（`caller_audience`。URL から作らない）、`iss` は Google、`email` は `web` の SA と一致し `email_verified`。それ以外は 401・403（固定文）。`/v1/attestation` だけは認証なし。手元の試験は IAP のトンネル経由で、SA の impersonation のトークンで行う |
+| 5 | VM を VPC の内側だけに置き、`web` からは VPC 経由でつなぐ | VM は外部 IP なし、固定の内部 IP（10.10.0.10）。限定公開の Google アクセスで Google API（Artifact Registry・attestation・STS・KMS・Firestore・Logging）に出る。`web`（Cloud Run）は Direct VPC egress（追加費用なし。`private-ranges-only`）で 8443 だけに届く。ファイアウォールは Cloud Run のサブネットの CIDR から 8443 のみ（タグやサービス ID は ingress 規則で使えない）。検証中だけ IAP の範囲からのトンネルを許し、終わったら消す。起動時の接続の遅れ（1 分以上あり得る）は、レフェリーの待ちと再試行で受ける |
+| 6 | 画面に attestation の内容と GitHub のコミットへのリンクを出す／AC-23 | `web` が検証した結果を `GET /api/tee/attestation` で返す（5 分キャッシュ。`nonce` を渡せば転送する。スパイクでは JSON まで、画面は後）。ダイジェストとコミットの対応は、リリースごとに `deploy/vault-releases.json` に記録する（L0。「運営者がこのコミットから作ったと記録した」まで。GitHub の証明つきビルド（L1）と再現ビルド（L2）は 10/7 以降の任意）。第三者は `scripts/verify_attestation.py --web <web の URL>` で JWT を自分で検証する |
 
-- スパイクの中で決めること（I-14）: 2 番で何を暗号化するか（案: 丸め済みポリシーと交渉用コピーを、アプリの側で暗号化してから Firestore に書く）。3 番で、`web` が本物の金庫の VM と話していることをどう確かめるか。
-- API の形は Cloud Run 版と同じ。4 と 5 の分だけ、呼び出し元の確かめ方と経路が変わる。
-- **TEE で言えること**: 金庫の判定は、公開されたコード（3 値で答え、丸め済みの値しか使わない）で動く。保存データの暗号鍵は、そのコードを動かすワークロードにしか渡らない。
+- **合否のルール**（P-9。推奨: 1・2・4・5 は必須。3 と 6 は縮退版でも可。3 の縮退は「TLS はつなぐが attestation との結び付けはスクリプトだけ」、6 の縮退は「コミットのリンクが手動の対応表だけ」。縮退を使うときは、画面と説明文に弱い版だと書く）。必須の点が通らなければ Cloud Run 版で出す（spec の縮退順）。点ごとの合否の基準は `research/tee-spike.md` と `tests/manual/tee-spike.md`。
+- **TEE で言えること**: 金庫の判定は、公開されたコード（3 値で答え、丸め済みの値しか使わない）で動く。保存データの暗号鍵は、このダイジェスト・本番イメージ・このプロジェクト・この SA のワークロードにしか渡らない。**ただし、鍵の IAM を変えない限り**（運営者＝プロジェクトのオーナーは鍵の IAM を書き換えられる。書き換えは Admin Activity の監査ログに必ず残る。説明文に書く）。
 - **TEE でも言えないこと**
-  - 運営側のコードは、本人向けの読み出し口とイベント列の読み出し口を通せば、丸め済みポリシーと交渉の記録を読める。
+  - 運営側のコードは、本人向けの読み出し口とイベント列の読み出し口を通せば、丸め済みポリシーと交渉の記録を読める（封印が守るのは、運営者が Firestore を直接読む・エクスポートする・バックアップから読む場合。古い版への巻き戻しと削除は防げない）。
   - 段階開示の状態と開示台帳は TEE の外（`web` 側）にある。
   - 予算の強制は、運営者に対する歯止めにならない。保存データを古い版に戻したり、依頼者を作り直したりできるため（§1.2）。
   - 運営側のコードは、手を登録できる。
   - 面談中の生の値は TEE の外にあり、Vertex AI 側の記録（§1.2）も TEE とは関係がない。
+  - 画面とスクリプトで確かめられるのは「このダイジェストの TEE が存在し、与えた nonce に応答した」ことまで。「`web` がその TEE にだけデータを送っている」ことの証明にはならない。
+  - debug イメージで動かした間に作った DEK は、運営者（SSH で root）が見られた鍵として扱う。本物の依頼者のデータを入れる前に `_tee/dek` を消し（`scripts/tee_reset_dek.py`）、本番イメージで作り直す。
 - 漏洩の上限（グリッド 1 マス）は丸めで成り立つので、TEE の有無に関係なく変わらない。信頼境界図と説明文にもこのとおりに書く。
+- 費用（1 ドル 150 円の仮定）: SEV は 1 日 約 450 円、検証〜審査終了（約 450 時間）で 約 9,000 円。TDX は 2.2 倍。夜間は VM を止める（審査期間は常時）。予算アラートの引き上げは P-11。
+- 公開の範囲（P-10）: リポジトリ全体を公開する（ダイジェスト↔コミットが単純）。GCP のプロジェクト ID は、attestation トークン（画面に出す）の `gce.project_id` に含まれるので、伏せない。
+- 依存（P-12）: `cryptography`（AES-GCM・X.509）と `google-auth`（`google.auth.jwt`）を直接 import するので `pyproject.toml` に明示する。どちらも uv.lock にすでにある。`requests`・`google-cloud-kms`・`pyOpenSSL`・Tink・aiohttp は使わない。
 
 ---
 
@@ -913,7 +917,8 @@ sequenceDiagram
 | pydantic | スキーマ | MIT | FastAPI・ADK が推移的に依存しているので追加コストなし |
 | google-cloud-firestore | 保存（トランザクション、TTL） | Apache-2.0 | Cloud SQL は運用が重い |
 | itsdangerous | セッションクッキーの署名 | BSD-3-Clause | 標準の hmac でも書ける。Starlette の SessionMiddleware が推移的に使う |
-| google-auth | ID トークンの発行と検証（サービス間、TEE 時） | Apache-2.0 | 自前の JWT 検証は危ない。Firestore のクライアントが推移的に使う |
+| google-auth | ID トークンと attestation トークンの検証（`google.auth.jwt`。TEE 時。発行はメタデータサーバから httpx で） | Apache-2.0 | 自前の JWT 検証は危ない。Firestore のクライアントが推移的に使う。直接 import するので明示する（P-12） |
+| cryptography | 金庫の封印（AES-256-GCM）と TLS の自己署名の証明書（TEE 時） | Apache-2.0 または BSD-3-Clause | 標準ライブラリには AES-GCM も X.509 の生成もない。pyOpenSSL・Tink は新しい依存になる。google-auth が推移的に使う。直接 import するので明示する（P-12） |
 | sse-starlette | 画面への配信（SSE） | BSD-3-Clause | 自前の実装は接続の後始末が増える（ユーザーの承認、2026-09-29） |
 | httpx（開発用） | テストの HTTP クライアント | BSD-3-Clause | a2a-sdk が推移的に使う。テストでだけ直接使う |
 | pytest | テスト（開発用） | MIT | 標準の unittest でも可。記述量で pytest を選ぶ |
@@ -925,6 +930,7 @@ sequenceDiagram
   - Vertex AI（`gemini-3.5-flash`、場所は global。I-10。不正利用監視とキャッシュの扱いは R-3・R-9）
   - Cloud Trace、Artifact Registry、Secret Manager（クッキー署名鍵）、予算アラート（通知だけ。止めるのは §8.2 の枠）
   - サービスアカウントは `web`・`agents`・`vault` ごとに最小権限で分ける
+  - TEE 実施時（§9）: VPC `vault-vpc`（サブネット 2 つ）、Compute Engine の機密 VM（N2D + SEV、外部 IP なし）、Cloud KMS（鍵 1 本）、Workload Identity Pool（プロバイダ 1 つ）、Artifact Registry（金庫とアプリのイメージ。Cloud Build で作る）、IAP（検証中のトンネルだけ）。Cloud Run は `web`・`agents` の 2 つになる
 - **本番の必須設定**（I-7。`scripts/deploy_check.sh` の確認項目）
   - `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`（面談・交渉エージェントの両方。既定では、トレースにメッセージの内容が入る）
   - ログは INFO 以上（a2a-sdk と ADK は、DEBUG でリクエストの本文を出す）
@@ -933,20 +939,24 @@ sequenceDiagram
   - 環境変数: `SESSION_SIGNING_KEY`（Secret Manager から）、`VAULT_BASE_URL`、`agents` の URL、`SERVICE_AUTH_ENABLED`（既定で有効）、`GOOGLE_GENAI_USE_VERTEXAI=TRUE`、`GOOGLE_CLOUD_PROJECT`、`GOOGLE_CLOUD_LOCATION=global`
   - Cloud Run IAM: `vault` と `agents` の起動元を `web` のサービスアカウントだけにする（§1.1）
   - 金庫の本番の起動は `uvicorn vault.app:create_app_from_env --factory`
-  - Vertex AI の利用枠: ② の DV-15 で、新しいプロジェクトでは交渉 1 回に 429 が 3 回出た（再試行で回復）。デモの当日に備えて利用枠の引き上げを申請するかは、ユーザーの判断
+  - Vertex AI の利用枠: ② の DV-15 で、新しいプロジェクトでは交渉 1 回に 429 が 3 回出た（再試行で回復）。Gemini 2.0 以降のモデルは動的共有クォータ（DSQ）で、プロジェクトごとの枠を申請する仕組みがないので、申請はしない（I-20。確かめ方: コンソールの「割り当て」に `gemini-3.5-flash` の行がないこと）。429 は §4.1 の再試行と §8.2 の計上のまま受ける
   - プロジェクトの `cacheConfig.disableCache=true`（spec〔29〕・§1.2。`roles/aiplatform.admin` で PATCH し、GET で確かめる。R-9）
   - 思考の量の設定（§4.2）が効いていることを、起動後の 1 回の呼び出しの `usage_metadata`（思考トークン数）で確かめる
   - `google-genai[aiohttp]`（aiohttp）を入れない。入れると google-genai が接続エラーを内部で 1 回再試行し、「1 計上 = 要求 1 回」（§4.1）が崩れる（③-0 の実装で分かった）。`uv pip show aiohttp` が未インストールであることを確認項目にする
   - Firestore の TTL ポリシーに、`web` の `llm_call_counters` の `ttl_at`（§8.2）も足す
   - 応答の `usage` の `prompt_tokens` の上限（暫定 20,000。本文 32 KB の見積もり）は `agents.client.MAX_PROMPT_TOKENS` にある（③ で config に移す）
-  - レフェリーがトークンを使えないとき（宛先違い・取得の失敗）にログを残すかは、ユーザーの判断（I-7）
+  - レフェリーが金庫に届かないとき（ID トークンを取れない・宛先違いを含む）、理由（ステータス・通信エラーの型名）を 1 回だけ WARNING で書く（I-7・I-20。`1c2ad6d`）。運用はこのログで気づく
+  - Cloud Run の基盤のリクエストログ（`run.googleapis.com/requests`）には、依頼者 ID・交渉 ID の入った URL がそのまま残り、アプリからは変えられない（I-9）。`web`・`agents`（金庫を Cloud Run で出す場合はそれも）のリクエストログを、Log Router の `_Default` シンクの除外フィルタで外す（例: `logName:"run.googleapis.com%2Frequests" AND resource.type="cloud_run_revision"`。コマンドはデプロイの段で確かめる）。エラーの調べはアプリのログ（ID を伏せてある）で行う。説明文には「Google の基盤側のログは除外設定に頼る」と書く
+  - TEE 実施時の `web` の環境変数: `VAULT_TEE=true`、`VAULT_BASE_URL=https://10.10.0.10:8443`、`VAULT_SERVICE_ACCOUNT`（金庫の SA のメール）、`GOOGLE_CLOUD_PROJECT`、`VAULT_RELEASES_FILE`（契約 §7）。金庫の TEE 版は環境変数を使わない（launch policy で `tee-env-*` を許さないため）
 - **リポジトリ**: 実装着手時に `git init` し、`~/.claude/templates/gitignore` を `.gitignore` にする。
-  - GitHub の公開・非公開は TEE の判断に合わせる。TEE を実施するなら、金庫部分は公開にする。
+  - GitHub はリポジトリ全体を公開する（P-10 の推奨。§9）。公開前に、履歴に秘密（鍵・トークン・`.env`）が混ざっていないことを確かめる（GCP のプロジェクト ID は秘密ではない）。
 
 ```
 tenshokuagent/
 ├── pyproject.toml
-├── config/params.toml       # 暫定値（グリッド、上限、閾値、期限、寿命、レート制限など）
+├── config/params.toml       # 暫定値（グリッド、上限、閾値、期限、寿命、レート制限など）。[vault.tee] は TEE 版の金庫だけが読む
+├── Dockerfile / Dockerfile.vault / cloudbuild.vault.yaml   # web・agents 用と、金庫の TEE 用のイメージ（§9 の 1）
+├── deploy/vault-releases.json   # イメージダイジェスト↔コミットの対応表（§9 の 6）
 ├── src/
 │   ├── negotiation_core/    # 語彙・グリッド・丸め・ポリシー評価・変換規則・スキーマ
 │   ├── vault/               # 金庫（LLM なし、状態機械、イベント列、テンプレート、削除）
@@ -1021,7 +1031,7 @@ tenshokuagent/
 | AC-20 | `uv run pytest tests/test_employer_view.py` | 「市場全体に知られ得る」が表示される。粒度の差は U-12 の決定待ち（保留） |
 | AC-21 | `uv run python scripts/replay_check.py` | 3 回再生して、イベント列のハッシュが一致する |
 | AC-22 | `scripts/deploy_check.sh` | 3 サービスの `/healthz` が 200、デモ URL が開ける、提出物 6 点のチェックリストが埋まっている |
-| AC-23 | `uv run python scripts/verify_attestation.py <vault-url>`（TEE 実施時） | JWT が Google の鍵で検証でき、イメージダイジェストが記録したコミットのものと一致する。ID トークンのない呼び出しは拒否される |
+| AC-23 | `uv run python scripts/verify_attestation.py --web <web の URL>`（TEE 実施時。開発者は IAP トンネルの出口に `--direct https://localhost:8443`） | 終了コード 0: JWT が Google の鍵で検証でき、`eat_nonce` に渡した nonce があり、`swname`・`dbgstat`・`STABLE`・`hwmodel` が本番の条件で、イメージダイジェストが `deploy/vault-releases.json` のコミットと一致する。異常系（署名の破損・nonce 違い・表にないダイジェスト・debug・期限切れ）は pytest で終了コード 1。「ID トークンのない呼び出しは拒否される」は、金庫の認可の判定を pytest で、IAP 経由の `curl` の 401 を `tests/manual/tee-spike.md` で確かめる |
 
 ### 12.2 設計から来る追加の検証
 
@@ -1078,7 +1088,13 @@ tenshokuagent/
   - P-6: 30 日以上使わなかった人のデータ → 最後に使ってから 30 日で自動削除（FR-14 の読み替え）
 - v11 で置き、v12 で条件付きにした前提（明示のキャッシュを使うことになったときだけ、ユーザーに聞く。C-44）
   - P-7: spec の制約〔29〕は「キャッシュを無効にする」で、面談に限っていない。既定（案 2）はこれに従い、交渉エージェントもキャッシュを使わない（§4.2）。呼び出し数・思考の量・前文の長さで費用の目標（DV-15）に届かず、明示のキャッシュ（秘密を含まない前文だけを、TTL の間 Google 側に保管する）を使いたくなったときは、〔29〕の読み替えになるので、ユーザーに聞く。案 1: 前文だけの明示のキャッシュを認める（面談の生の値は引き続きキャッシュしない。`cacheConfig.disableCache` と両立するかは実機で確かめる）。案 2（既定）: 使わない。案 3: 面談だけ別のプロジェクトで呼び、交渉のプロジェクトではキャッシュを許す
-- モデルの選択（ユーザーの判断待ち。設計は変えない）: 3.6〜3.8 Flash は 2026-12-31 まで導入価格（入力 $0.75・出力 $3.75）で 3.5 Flash の半額（R-9）。切り替えるなら、手順の遵守（DV-15）を確かめ直す。3.7・3.8 Flash は MINIMAL を持たない
+- モデルの選択（I-20。ユーザーの委任による判断）: ハッカソンは `gemini-3.5-flash` のまま（DV-15 で 2 回連続合格・無効手 0 件。費用は 1 交渉 $0.10〜0.15 で目標の中）。3.6〜3.8 Flash は 2026-12-31 まで導入価格（入力 $0.75・出力 $3.75）で半額（R-9）だが、JSON モード・思考の量での振る舞いは未計測。TEE スパイクの後（10/5 以降）に、設定だけ `gemini-3.8-flash` に替えて DV-15 を 2 回流し、2 回とも合格して無効手が増えず、呼び出しの時間が同等なら切り替える。3.7・3.8 Flash は MINIMAL を持たない（決定の思考量は LOW なので影響しない）
+- TEE のスパイクで置いた前提（P-8〜P-12。ユーザーの確認待ち。推奨を既定として進める。全文は台帳）
+  - P-8: 機密 VM の種類 → 推奨 N2D + AMD SEV（公式例・安い・ライブマイグレーション）。TDX は 2.2 倍の費用
+  - P-9: 合否のルール → 推奨 1・2・4・5 は必須、3・6 は縮退版でも可（弱い版だと明記）
+  - P-10: 公開の範囲 → 推奨 リポジトリ全体を公開。プロジェクト ID は伏せない（attestation の表示に含まれる）
+  - P-11: 予算アラート → 推奨 20,000 円（50%・90%・100% で通知）。TDX なら 30,000 円
+  - P-12: 依存の明示 → 推奨 `cryptography`・`google-auth` を `pyproject.toml` に明示（`requests` は不要）
 
 ---
 
@@ -1151,7 +1167,7 @@ tenshokuagent/
 
 - **R-1**（結果、I-7）: ADK の `to_a2a` は使わず、受信口ごとに自前の AgentExecutor を書いた。`to_a2a` では、検証違反が A2A のエラーにならず、セッションが手番をまたいで残り、TextPart も LLM に渡り、`Move` が DataPart で返らない。
 - **R-2**（結果、I-7）: ADK は既定でトレースにメッセージの内容を取り込む（`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false` が本番で必須）。a2a-sdk と ADK は、DEBUG のログにリクエストの本文を出す（本番は INFO 以上）。
-- **R-3**（結果、I-10・I-13）: モデルは `gemini-3.5-flash`、場所は global（3.x の Flash は東京にない。処理される国は決まらない）。構造化出力の列挙の制約は効く（STRING の enum に限る）。429 は、新しいプロジェクトで交渉 1 回に 3 回出て、再試行で回復した。不正利用監視の対象条件・期間と、キャッシュの無効化の単位は、R-9 とあわせて確かめる。
+- **R-3**（結果、I-10・I-13）: モデルは `gemini-3.5-flash`、場所は global（3.x の Flash は東京にない。処理される国は決まらない）。構造化出力の列挙の制約は効く（STRING の enum に限る）。429 は、新しいプロジェクトで交渉 1 回に 3 回出て、再試行で回復した。不正利用監視の対象条件・期間と、キャッシュの無効化の単位は、R-9 とあわせて確かめる。残りの確認（不正利用監視の条件・`cacheConfig` の単位・429 と 5xx の返り方）は §10 の確認項目に移した（I-10）。列挙値の制約は JSON モードに替えたので関係なくなった（I-19）。
 - **R-9**（v11。キャッシュと思考の量。結果は `research/vertex-cost-levers.md`、2026-10-02。台帳 I-17）
   - 結果: 3.5 Flash のキャッシュの最小トークン数は暗黙・明示とも 4,096。system_instruction だけでもキャッシュできる。単価は入力 $1.50・キャッシュ済み $0.15・出力（思考込み）$9.00、明示の保管料 $1.00／100 万トークン・時。命中は `usage_metadata.cached_content_token_count`。思考は `thinking_level`（3.5 Flash は MINIMAL／LOW／MEDIUM／HIGH、既定 MEDIUM）で、`thoughts_token_count` に出る。ADK は `generate_content_config.thinking_config` で渡せる。公式は、暗黙のキャッシュを止める手段としてプロジェクトの `cacheConfig.disableCache` を指している。構造化出力は anyOf と nullable に対応、enum は文字列のみ。
   - 残り（明示のキャッシュを検討するときだけ）: `disableCache: true` のプロジェクトで明示のキャッシュが作れて使えるか（実機）。
@@ -1161,6 +1177,6 @@ tenshokuagent/
   - TTL ポリシーをサブコレクション（コレクショングループ）に掛けられるか。
   - サブコレクションの一括削除の手順と、1 回のトランザクション・バッチの上限。
 - **R-5**: Cloud Run の SSE の制約。`web` を 1 インスタンスにしたときの同時接続数。
-- **R-6**: Confidential Space のスパイク項目（§9 の 6 点）。
+- **R-6**: Confidential Space のスパイク項目（§9 の 6 点）。研究報告 `research/tee-spike.md`（2026-10-02）と契約 `research/tee-spike-contract.md`（2026-10-03）。結果はスパイクの後に §9 へ写す。
 - **R-7**: Cloud Run が `X-Forwarded-For` にクライアント IP をどの位置で追記するか（利用者が書ける部分との境目）。
 - **R-8**: Cloud Run の CPU 常時割り当て（インスタンス課金）と min-instances=1 で、リクエスト外の非同期タスクと見回りが止まらないこと。そのときの費用。
