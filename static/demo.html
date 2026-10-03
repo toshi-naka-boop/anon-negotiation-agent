@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>デモ - 匿名交渉エージェント</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/demo.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="/">匿名交渉エージェント</a>
+      <nav class="site-nav" aria-label="主なページ">
+        <a href="/interview">面談</a>
+        <a href="/me">自分の交渉</a>
+        <a href="/demo" aria-current="page">デモ</a>
+        <a href="/attack">攻撃の実演</a>
+        <span class="soon" data-slot="nav-stages">段階開示・開示台帳(準備中)</span>
+        <span class="soon" data-slot="nav-meter">推定区間メーター(準備中)</span>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <h1>デモ</h1>
+    <p class="lead">
+      架空人物どうしの交渉を、候補者側と求人側に分けて並べて見られます。それぞれのパネルには、その側から見えた記録だけが出ます
+      (相手の評価は、どちらにも出ません)。
+    </p>
+
+    <section class="card" aria-labelledby="cases-title">
+      <h2 id="cases-title">ケース</h2>
+      <p class="small muted">
+        ライブ実行は、AI(Gemini)を呼ぶので、回数に上限があります。上限に達したときは、リプレイで同じ交渉を見られます。
+      </p>
+      <div id="cases-error" aria-live="polite"></div>
+      <div id="cases" class="grid cols-3"><p class="muted">読み込み中…</p></div>
+      <label class="field">
+        <span class="label">リプレイの再生の倍率</span>
+        <select id="speed" aria-describedby="speed-hint"></select>
+        <span class="hint" id="speed-hint">記録した間隔を、この倍率で縮めて流します。台本の記録は間隔が短いので、倍率を小さくすると追いかけやすくなります。</span>
+      </label>
+    </section>
+
+    <section id="run" class="hidden" aria-live="polite">
+      <div id="banner" class="banner" role="status"></div>
+      <div class="row between">
+        <h2 id="run-title"></h2>
+        <button id="stop-button" class="btn btn-small" type="button">止める</button>
+      </div>
+      <div id="run-error" aria-live="polite"></div>
+      <p id="run-status" class="small muted"></p>
+      <div id="run-result"></div>
+      <div class="panels">
+        <section class="card" aria-labelledby="candidate-title">
+          <h3 id="candidate-title">候補者側のパネル(架空人物)</h3>
+          <p class="small muted">候補者側から見えた記録だけです。</p>
+          <p id="candidate-empty" class="empty-note">まだ記録がありません。</p>
+          <ol id="candidate-log" class="activity"></ol>
+        </section>
+        <section class="card" aria-labelledby="employer-title">
+          <h3 id="employer-title">求人側のパネル(架空の求人)</h3>
+          <p class="small muted">求人側から見えた記録だけです。</p>
+          <p id="employer-empty" class="empty-note">まだ記録がありません。</p>
+          <ol id="employer-log" class="activity"></ol>
+        </section>
+      </div>
+    </section>
+
+    <section class="slot" id="slot-fr39" data-status="pending">
+      <h2>最悪漏れてもここまで / まだ隠しているもの</h2>
+      <p class="slot-note">架空人物の条件(フィクスチャの生の値)と、丸めた後のマスを並べる 2 つのパネルは、ここに入ります。</p>
+    </section>
+    <section class="slot" id="slot-stages" data-status="pending">
+      <h2>段階開示</h2>
+      <p class="slot-note">架空の求人(自動応答)との「会う」「承認」の様子は、ここに入ります。</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>人物と求人はすべて架空です。</p>
+  </footer>
+</body>
+</html>

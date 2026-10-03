@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>攻撃の実演 - 匿名交渉エージェント</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/attack.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="/">匿名交渉エージェント</a>
+      <nav class="site-nav" aria-label="主なページ">
+        <a href="/interview">面談</a>
+        <a href="/me">自分の交渉</a>
+        <a href="/demo">デモ</a>
+        <a href="/attack" aria-current="page">攻撃の実演</a>
+        <span class="soon" data-slot="nav-stages">段階開示・開示台帳(準備中)</span>
+        <span class="soon" data-slot="nav-meter">推定区間メーター(準備中)</span>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <h1>攻撃の実演</h1>
+    <p class="lead">
+      あなたは求人担当の立場です。架空の候補者に、自然文で攻撃の指示を出して、金庫から条件を探ってみてください。
+      金庫は丸めた値でしか答えないので、探っても、境目はグリッド 1 マスより狭くなりません。3 枚の壁を、下で確かめられます。
+    </p>
+
+    <section class="card" id="create-card" aria-labelledby="create-title">
+      <h2 id="create-title">1. 攻撃の交渉を作る</h2>
+      <p class="small muted">
+        相手は、架空の候補者のコピーに決まっています(選べません)。攻撃者の求人エージェントは、あなたの指示に従って提案を出しますが、
+        候補者側に届くのは、金庫の状態機械を通った手だけです。
+      </p>
+      <div id="create-error" aria-live="polite"></div>
+      <label class="field">
+        <span class="label">攻撃の指示(400 文字まで)</span>
+        <textarea id="instruction" rows="4" maxlength="400" autocomplete="off"></textarea>
+      </label>
+      <div class="row">
+        <button id="create-button" class="btn btn-primary" type="button">攻撃の交渉を作る</button>
+        <span class="small muted">ライブ交渉の作成と同じく、AI を呼ぶので、回数に上限があります。</span>
+      </div>
+    </section>
+
+    <section class="hidden" id="run-card" aria-labelledby="run-title">
+      <div class="card">
+        <h2 id="run-title">2. 攻撃の交渉</h2>
+        <div class="row">
+          <label for="attack-select">この画面で作った交渉</label>
+          <select id="attack-select"></select>
+          <span id="attack-status" class="small muted" role="status"></span>
+        </div>
+        <p class="small muted">この画面で作った交渉の ID は、このページのメモリにだけ置きます。ページを読み込み直すと、一覧から消えます。</p>
+        <div id="attack-result"></div>
+        <h3>指示を置き換える(攻撃の手)</h3>
+        <div id="replace-message" aria-live="polite"></div>
+        <label class="field">
+          <span class="label">新しい指示(400 文字まで)。次の手番から効きます</span>
+          <textarea id="new-instruction" rows="3" maxlength="400" autocomplete="off"></textarea>
+        </label>
+        <div class="row"><button id="replace-button" class="btn" type="button">指示を置き換える</button></div>
+      </div>
+      <div id="run-error" aria-live="polite"></div>
+      <div class="panels">
+        <section class="card" aria-labelledby="employer-title">
+          <h3 id="employer-title">攻撃側のパネル(あなたの求人側)</h3>
+          <p class="small muted">求人側から見えた記録です。</p>
+          <p id="employer-empty" class="empty-note">まだ記録がありません。</p>
+          <ol id="employer-log" class="activity"></ol>
+        </section>
+        <section class="card" aria-labelledby="candidate-title">
+          <h3 id="candidate-title">候補者側のパネル(架空人物)</h3>
+          <p class="small muted">候補者側から見えた記録です。金庫の答え(自分側の評価)が、ここに出ます。</p>
+          <p id="candidate-empty" class="empty-note">まだ記録がありません。</p>
+          <ol id="candidate-log" class="activity"></ol>
+        </section>
+      </div>
+    </section>
+
+    <section class="card" id="wall-1" aria-labelledby="wall1-title">
+      <h2 id="wall1-title">壁 1: 生のメッセージを送る</h2>
+      <p>
+        A2A のメッセージ(JSON)を自由に書き換えて、候補者側のエージェントの受信口へ、そのまま送れます。
+        受信口は、LLM を動かす前に、形を検査して拒否します。金庫には登録されないので、どの交渉にも影響しません。
+      </p>
+      <div class="row">
+        <button id="wall1-example" class="btn" type="button">例に戻す</button>
+        <button id="wall1-send" class="btn btn-primary" type="button">このまま送る</button>
+      </div>
+      <label class="field">
+        <span class="label">送るメッセージ(JSON)</span>
+        <textarea id="wall1-text" class="mono" spellcheck="false" autocomplete="off"></textarea>
+        <span class="hint" id="wall1-size"></span>
+        <span class="hint">
+          初期値には、TextPart(自由文)と、principal_instruction という余計な項目が入っています。そのまま送ると拒否されます。
+          TextPart と principal_instruction を消すと、有効な入力として LLM が動きます。
+        </span>
+      </label>
+      <div id="wall1-error" aria-live="polite"></div>
+      <div id="wall1-result" aria-live="polite"></div>
+    </section>
+
+    <section class="card" id="wall-2" aria-labelledby="wall2-title">
+      <h2 id="wall2-title">壁 2: LLM に渡った入力</h2>
+      <p>
+        候補者側のエージェントの直近の手番で、LLM が見た文脈の全文です(固定の前文と、計画・決定の入力)。
+        生の数値も、ID も、自由文も入っていないことを、機械で検査した結果と一緒に見られます。
+      </p>
+      <div class="row"><button id="wall2-button" class="btn" type="button" disabled>候補者側の直近の入力を見る</button></div>
+      <div id="wall2-error" aria-live="polite"></div>
+      <div id="wall2-result"></div>
+    </section>
+
+    <section class="card" id="wall-3" aria-labelledby="wall3-title">
+      <h2 id="wall3-title">壁 3: 金庫の答え</h2>
+      <p>
+        金庫は、丸めた値でしか答えません。攻撃者の提案ごとに、候補者側の金庫が返した答えを並べます。
+        答えは「受けられる」「受けられない」「本人確認が必要」の 3 つだけで、境目の値そのものは返りません。
+      </p>
+      <div class="row"><button id="wall3-button" class="btn" type="button" disabled>金庫の答えを更新する</button></div>
+      <div id="wall3-error" aria-live="polite"></div>
+      <div id="wall3-result"></div>
+    </section>
+
+    <section class="slot" id="slot-meter" data-status="pending">
+      <h2>推定区間メーター(防御あり)</h2>
+      <p class="slot-note">金庫の答えから計算した、候補者の条件の推定区間は、ここに入ります。</p>
+    </section>
+    <section class="slot" id="slot-simulation" data-status="pending">
+      <h2>防御なしのシミュレーション</h2>
+      <p class="slot-note">防御のない場合に、二分探索で条件が特定される様子(「シミュレーション」と明示します)は、ここに入ります。</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>人物と求人はすべて架空です。</p>
+  </footer>
+</body>
+</html>

@@ -15,6 +15,10 @@
   (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
   乱数でない鍵)でも拒否する。create_app_from_env・create_app のどちらでも同じ。
 - GET /healthz(死活確認。AC-22): 認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(利用記録の Firestore にも触れない)。
+- 画面(static/。静的な HTML と素の JS・CSS。ビルド工程なし。§10): /static で静的ファイルを、ページの経路(/・/interview・/me・/demo・/attack)で対応する
+  HTML を返す。どれも依頼者 ID を発行しない(発行は開始ページの GET /start だけ。画面の JS が呼ぶ。§6.3)。/static はセッションを見ない。
+  SSE(/v1/stream/。web.ui_api)もセッションを見ない: 依頼者ごとのロックを、応答を送り終えるまで持つミドルウェアを通すと、つながっている間
+  同じ依頼者の操作が止まるため。権限の確認は web.ui_api が行う。
 - ログに ID を残さない(§3.8。台帳 X-40)。本番の起動口(create_app_from_env)が、uvicorn のアクセスログの URL の ID を
   伏せる(mask_ids_in_logs。vault の起動口と共通の処理で、negotiation_core.log_privacy にある)。
 - TEE モード(環境変数 VAULT_TEE=true。design.md §9、research/tee-spike-contract.md §7): 金庫は Confidential Space の VM で動く。
@@ -33,8 +37,10 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from google.cloud import firestore
+from starlette.types import Scope
 
 from agents.client import send_turn as agents_send_turn
 from agents.config import DEFAULT_AGENTS_CONFIG, AgentsConfig
@@ -54,6 +60,7 @@ from web.service_auth import IdTokenAuth, IdTokenProvider, id_token_provider_fro
 from web.services import build_services
 from web.session import load_session_key
 from web.session_middleware import PrincipalSessionMiddleware
+from web.ui_api import STREAM_PATH_PREFIX
 from web.vault_client import (
     VaultClient,
     VaultClientError,
@@ -75,8 +82,53 @@ VAULT_RELEASES_FILE_ENV = "VAULT_RELEASES_FILE"
 VAULT_EXPECTED_ZONE_ENV = "VAULT_EXPECTED_ZONE"
 VAULT_EXPECTED_INSTANCE_ENV = "VAULT_EXPECTED_INSTANCE"
 GITHUB_REPO_URL_ENV = "GITHUB_REPO_URL"
+# 画面(static/)。プロジェクト直下の static/ を、/static で配る。
+STATIC_DIRECTORY = Path(__file__).resolve().parents[2] / "static"
+STATIC_PATH_PREFIX = "/static/"
+PAGE_FILES = {
+    "/": "index.html",
+    "/interview": "interview.html",
+    "/me": "me.html",
+    "/demo": "demo.html",
+    "/attack": "attack.html",
+}
+# ページに付けるヘッダ。画面は同じ配信元の静的な JS・CSS だけを使う(外部の読み込みも、インラインのスクリプトも許さない)。
+PAGE_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-cache",  # 毎回確かめ直す(HTML と JS の版がずれないように)。変わっていなければ 304
+}
 # digest の許可リストの既定の場所(src/web/app.py から見て、プロジェクト直下の deploy/vault-releases.json)
 DEFAULT_RELEASES_PATH = Path(__file__).resolve().parents[2] / "deploy" / "vault-releases.json"
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """毎回確かめ直させる StaticFiles(再デプロイの後に、古い JS が残らないように。変わっていなければ 304)。"""
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _page_handler(filename: str):
+    path = STATIC_DIRECTORY / filename
+
+    async def page() -> FileResponse:
+        return FileResponse(path, media_type="text/html", headers=PAGE_HEADERS)
+
+    return page
+
+
+def add_pages(app: FastAPI) -> None:
+    """画面(static/)を配る: /static と、ページの経路。static/ がなければ、起動を拒否する(StaticFiles が RuntimeError)。"""
+    app.mount(STATIC_PATH_PREFIX.rstrip("/"), RevalidatedStaticFiles(directory=STATIC_DIRECTORY), name="static")
+    for route, filename in PAGE_FILES.items():
+        app.add_api_route(route, _page_handler(filename), methods=["GET"], include_in_schema=False)
 
 
 def bind_agents_client(
@@ -147,6 +199,7 @@ def create_app(
     app = FastAPI(title="web", lifespan=lifespan)
     app.state.services = services
     app.include_router(build_router(services, tee))
+    add_pages(app)
 
     @app.get(HEALTHZ_PATH)
     async def _healthz() -> dict[str, str]:
@@ -158,7 +211,7 @@ def create_app(
         meta=services.meta,
         locks=services.locks,
         clock=services.clock,
-        session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTHZ_PATH),
+        session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTHZ_PATH, STATIC_PATH_PREFIX, STREAM_PATH_PREFIX),
     )
 
     @app.exception_handler(RequestValidationError)

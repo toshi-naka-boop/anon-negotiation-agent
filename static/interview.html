@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>面談 - 匿名交渉エージェント</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/interview.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="/">匿名交渉エージェント</a>
+      <nav class="site-nav" aria-label="主なページ">
+        <a href="/interview" aria-current="page">面談</a>
+        <a href="/me">自分の交渉</a>
+        <a href="/demo">デモ</a>
+        <a href="/attack">攻撃の実演</a>
+        <span class="soon" data-slot="nav-stages">段階開示・開示台帳(準備中)</span>
+        <span class="soon" data-slot="nav-meter">推定区間メーター(準備中)</span>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <h1>面談</h1>
+    <p class="lead">
+      9 つの手順で、あなたの条件を聞き取ります。答えは、サーバーのメモリの上にだけ置き、送信すると、グリッドの一番近いマスに丸めた形だけが保存されます。
+      送信したあと、このページのフォームの内容は消えます。
+    </p>
+
+    <section class="card" id="intro" aria-labelledby="notice-title">
+      <h2 id="notice-title">はじめに(必ずお読みください)</h2>
+      <div id="notice-body"><p class="muted">読み込み中…</p></div>
+      <div id="intro-error" aria-live="polite"></div>
+      <div class="row">
+        <button id="start-button" class="btn btn-primary" type="button">注記を読みました。面談を始める(続ける)</button>
+      </div>
+    </section>
+
+    <section id="wizard" class="hidden" aria-label="面談の手順">
+      <ol class="steps" id="steps" aria-label="面談の進み具合"></ol>
+      <div id="step-error" aria-live="polite"></div>
+      <div class="card" id="step"></div>
+      <div class="row">
+        <button id="restart-button" class="btn btn-quiet btn-small" type="button">最初からやり直す</button>
+        <button id="discard-button" class="btn btn-quiet btn-small" type="button">面談を破棄する</button>
+      </div>
+      <p class="small muted" id="provisional-note" hidden>設問の文面は暫定です。</p>
+    </section>
+
+    <section class="card hidden" id="done" aria-live="polite">
+      <h2>面談を送信しました</h2>
+      <p>丸めた条件を保存しました。このページに入力した内容は、画面から消しました。</p>
+      <p>次は、求人を選んで交渉を始めます。</p>
+      <div class="row">
+        <a class="btn btn-primary" href="/me">自分の交渉へ</a>
+        <a class="btn" href="/">入口へ戻る</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>求人はすべて架空のフィクスチャです。</p>
+  </footer>
+</body>
+</html>

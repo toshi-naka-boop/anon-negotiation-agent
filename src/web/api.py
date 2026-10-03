@@ -95,6 +95,7 @@ from web.referee import NegotiationContext
 from web.services import WebServices
 from web.session import PrincipalSession
 from web.stages_api import build_stages_router
+from web.ui_api import build_ui_router
 from web.vault_client import VaultNotFoundError
 
 _log = logging.getLogger(__name__)
@@ -532,4 +533,5 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
     router.include_router(build_activity_router(services, require_own_negotiation))  # 活動ログ・並べて見る画面(§7)
     router.include_router(build_meter_router(services))  # 推定区間メーター(§8.3)
     router.include_router(build_panels_router(services, require_session))  # 本人の 2 つのパネル(FR-39。§7)
+    router.include_router(build_ui_router(services))  # 画面に要る小さな口(セッション・求人・デモのケース・リプレイ・SSE。web/ui_api.py)
     return router

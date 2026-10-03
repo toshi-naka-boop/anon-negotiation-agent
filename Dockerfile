@@ -23,12 +23,13 @@ RUN uv sync --frozen --no-dev
 
 # アプリのコードと設定。deploy/ の vault-releases.json は、web とスクリプトが「許可する digest」として読む
 # (金庫のイメージを作り直して表に追記したら、このイメージも作り直す)。
-# 画面(static/)は、まだ無い。できたら、その行を足す(static/ があるのに足していないと、tests/test_tee_image_files.py が失敗する)。
+# 画面(static/。静的な HTML と素の JS・CSS)は、web が /static とページの経路で配る(src/web/app.py)。
 COPY src ./src
 COPY config ./config
 COPY scripts ./scripts
 COPY deploy ./deploy
 COPY fixtures ./fixtures
+COPY static ./static
 
 ENV PATH=/opt/venv/bin:$PATH \
     PORT=8080

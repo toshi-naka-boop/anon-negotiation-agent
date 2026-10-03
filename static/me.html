@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自分の交渉 - 匿名交渉エージェント</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/me.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="/">匿名交渉エージェント</a>
+      <nav class="site-nav" aria-label="主なページ">
+        <a href="/interview">面談</a>
+        <a href="/me" aria-current="page">自分の交渉</a>
+        <a href="/demo">デモ</a>
+        <a href="/attack">攻撃の実演</a>
+        <span class="soon" data-slot="nav-stages">段階開示・開示台帳(準備中)</span>
+        <span class="soon" data-slot="nav-meter">推定区間メーター(準備中)</span>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <h1>自分の交渉</h1>
+
+    <div id="gate" aria-live="polite"><p class="muted">読み込み中…</p></div>
+
+    <div id="content" class="hidden">
+      <div class="me-layout">
+        <div>
+          <section class="card" id="start-card" aria-labelledby="start-title">
+            <h2 id="start-title">交渉を始める</h2>
+            <p class="small muted">
+              求人を 1 件選んで始めます。進行中の交渉は、同時に 1 件までです。
+              面談の手順 8 で選んだブロック先の企業の求人とは、交渉が始まりません。
+            </p>
+            <div id="start-error" aria-live="polite"></div>
+            <div id="jobs"></div>
+            <div class="row">
+              <button id="start-button" class="btn btn-primary" type="button" disabled>この求人で交渉を始める</button>
+            </div>
+            <p id="start-note" class="small muted" hidden></p>
+          </section>
+
+          <section class="card" id="list-card" aria-labelledby="list-title">
+            <h2 id="list-title">交渉の一覧</h2>
+            <div id="list-error" aria-live="polite"></div>
+            <p id="list-empty" class="empty-note">まだ交渉はありません。</p>
+            <ul id="negotiations" class="neg-list"></ul>
+          </section>
+        </div>
+
+        <div>
+          <section class="card" id="detail" aria-labelledby="detail-title">
+            <p id="detail-empty" class="muted">左の一覧から、交渉を選んでください。</p>
+            <div id="detail-body" class="hidden">
+              <div class="row between">
+                <h2 id="detail-title"></h2>
+                <span id="detail-state" class="badge"></span>
+              </div>
+              <p id="detail-summary" class="small muted"></p>
+              <div id="detail-result"></div>
+              <div id="question" aria-live="polite"></div>
+              <div class="row" id="controls">
+                <button id="pause-button" class="btn" type="button">一時停止</button>
+                <button id="resume-button" class="btn" type="button">再開</button>
+                <button id="cancel-button" class="btn btn-danger" type="button">取消</button>
+              </div>
+              <p class="small muted">一時停止中は、手番の期限が進みません。取消すると、結果は「なし」になります。</p>
+              <div id="detail-error" aria-live="polite"></div>
+              <h3>活動ログ</h3>
+              <p class="small muted">あなたの側から見えた記録だけを、記録された順に並べています。</p>
+              <p id="activity-empty" class="empty-note">まだ記録がありません。</p>
+              <ol id="activity" class="activity"></ol>
+            </div>
+          </section>
+
+          <section class="slot" id="slot-stages" data-status="pending">
+            <h2>段階開示</h2>
+            <p class="slot-note">匿名の職務要約・氏名と連絡先の開示(「会う」「承認」)の操作は、ここに入ります。</p>
+          </section>
+          <section class="slot" id="slot-ledger" data-status="pending">
+            <h2>開示台帳</h2>
+            <p class="slot-note">段の遷移と、途中確認の回答の記録は、ここに並びます。</p>
+          </section>
+          <section class="slot" id="slot-fr39" data-status="pending">
+            <h2>並べて見る画面</h2>
+            <p class="slot-note">「最悪漏れてもここまで」と「まだ隠しているもの」の 2 つのパネルは、ここに入ります。</p>
+          </section>
+        </div>
+      </div>
+
+      <section class="card" id="delete-card" aria-labelledby="delete-title">
+        <h2 id="delete-title">データを消す</h2>
+        <p class="small muted">
+          保存した条件・交渉・ブロック先・開示の記録を、すべて消します。進行中の交渉は取消になります。元には戻せません。
+          最後に使ってから一定の期間(面談の注記にある日数)がたつと、自動でも消えます。
+        </p>
+        <div id="delete-message" aria-live="polite"></div>
+        <label class="check"><input id="delete-ack" type="checkbox">消してよいことを理解しました</label>
+        <button id="delete-button" class="btn btn-danger" type="button" disabled>データを消す</button>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <p>求人はすべて架空のフィクスチャです。</p>
+  </footer>
+</body>
+</html>
