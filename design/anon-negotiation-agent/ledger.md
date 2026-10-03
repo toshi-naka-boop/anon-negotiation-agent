@@ -80,6 +80,12 @@
 - 残る小さな掃除（画面 L の後にまとめて）: `src/web/interview/service.py` の未使用（`RATE_LIMITED` の対応表、`owner` 引数）、古いコメント（`src/web/api.py` の `delete_data` の docstring、`src/web/interview/state.py`、`src/web/llm_budget.py:12`、`tests/test_attack_mode.py:164`、`tests/test_deletion.py:1`）、アイドルの面談の状態の能動的な掃除。
 - 画面（L・L2）への申し送り: 429 の `detail` は辞書（入口の枠）と文字列（1 日の上限）の 2 形。メーターは新しい提案が届いたときだけ呼ぶ（ポーリングしない）。
 
+### I-29（実装時の気づき / 設定 / low。次の改訂（v20）で §8.2 の最悪額を直す）DV-15 の再実行（2026-10-04。計画の 2 段の読みと指示文の変更の後）
+
+- ケース 1 ×2（本物の Gemini、`--judge`）: 2 回とも合意（高。16〜17 回、$0.17〜0.18、思考の平均 513〜568、schema_invalid 0）。1 回目だけ、計画の 1 呼び出しが `max_output_tokens`=2,048 で切れた（思考 1,934 ＋ 出力 98。無効手 `output_truncated` 1 件。次の呼び出しで回復して合意）→ DV-15 の `no_truncation` で不合格。2 回目は切れなし。ケース 3 ×1（攻撃。`attacker.md` の本番の指示文）: 判定まで届き、schema_invalid 0。
+- 判断: `[agents] max_output_tokens` を 2,048 → 3,072 にした（X-63 の範囲 256〜4,096 の中。計画が MEDIUM で思考が 1,100〜1,900 に伸びる手番がある）。§8.2 の「1 日の最悪の金額」（2,048 で見積もり）は 1.5 倍になる（v20 で数字を直す）。再実行して 2 回連続合格を確かめる。
+- 計画の 2 段の読み（`PlanEnvelope`）と指示文の 1 文は、本物のモデルで退行なし（schema_invalid 0。合意の組み合わせはこれまでと同じ 650〜700 万帯）。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |

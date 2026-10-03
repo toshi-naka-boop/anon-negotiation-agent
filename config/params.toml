@@ -95,7 +95,8 @@ temperature = 0
 plan_thinking_level = "MEDIUM"
 decide_thinking_level = "LOW"
 # 1 回の呼び出しの出力＋思考の上限(§4.2・台帳 X-50)。切れた出力は output_truncated の無効手になる(台帳 C-53)
-max_output_tokens = 2048
+# 2026-10-04: 計画の思考が MEDIUM で 1,900 トークンに達し、2,048 では 1 回切れた(本物の Gemini、DV-15 の再実行)。X-63 の範囲(256〜4,096)の中で 3,072 に上げた。§8.2 の最悪額は 1.5 倍(台帳 I-29)
+max_output_tokens = 3072
 # google-genai のクライアント側の自動再試行の回数(1 = 再試行なし。§4.2・台帳 X-55)。再試行はレフェリーだけが行う
 http_retry_attempts = 1
 # 受信本文の上限(バイト。暫定 32 KB。§4.3・U-03)
