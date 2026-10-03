@@ -1,32 +1,24 @@
 {
-  "currentNode": "承認CP",
-  "status": "awaiting_user",
+  "currentNode": "実装",
+  "status": "in_progress",
   "designVersion": "v19",
-  "approvedDesignVersion": null,
-  "approvedDesignSha256": null,
-  "approvedAt": null,
-  "approvalEvidence": null,
+  "approvedDesignVersion": "v19",
+  "approvedDesignSha256": "298da78d4ee4c3813d014ecc3509180e22c6cf8956dcf914c75c5a0010ced532",
+  "approvedAt": "2026-10-03T23:30:00+09:00",
+  "approvalEvidence": "v19:298da78d4ee4　承認します。\n２明示して\n３組織の配下\n４推奨で進めて\n５なし\n６ opusで良い",
   "requiredApprovalFingerprint": "v19:298da78d4ee4",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
-  "openIssueIds": [
-    "P-8",
-    "P-9",
-    "P-10",
-    "P-11",
-    "P-12",
-    "P-13",
-    "P-14"
-  ],
+  "openIssueIds": [],
   "requiredReads": [
     "design.md",
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "承認 CP（2026-10-03）: v19 の指紋 v19:298da78d4ee4 をブリーフつきで提示した。18 巡目は両批評とも新規の high なし（codex の medium 5 と design-critic の medium 2・low 7 は v18・v19 で直した。直し自体は再批評していない）。承認されたら ③④⑤（L15-1・L15-2・MAX_PROMPT_TOKENS の config 化・L16-1/X-74 の 2 段の読み（P-14 の答え次第）・L18-5 の IP ごとの制限・store.py の封印・deploy_check.sh・画面）。TEE スパイクの実装は A・B・C とも取り込み済み（d459168 まで。全テスト 2,309 件）。ユーザーの手順 A の結果待ち。P-12 の承認後に pyproject に cryptography・google-auth を明示。ユーザーの確認待ち: P-8〜P-14、design-critic のモデル（frontmatter は opus。16〜18 巡目は claude-opus-5-5 で走った）。",
+  "nextAction": "v19 を承認（2026-10-03。指紋 v19:298da78d4ee4）。ユーザーの判断: P-12 明示する、P-13 組織の配下（拒否ポリシーを足す）、P-14 案 1、P-8〜P-11 推奨どおり、design-critic は opus のまま。次: (1) pyproject に cryptography・google-auth を明示（済ませる）。(2) ユーザーの手順 A の結果を待ち、B〜F（と拒否ポリシー G）を進める。(3) ③④⑤ の実装を委譲（sonnet、worktree）: ③ = L15-1・L15-2・MAX_PROMPT_TOKENS の config 化・計画の 2 段の読み（PlanEnvelope。P-14 案 1 で AC-04 の試験を直す）・L18-5 の IP ごとの制限・store.py の封印（DV-19）・deploy_check.sh（(a)〜(h) ＋ 拒否ポリシー）、④⑤ は §11 の範囲。完了判定は呼び出し側が DV を実行する。",
   "lastUpdated": "2026-10-03",
   "delegation": {
-    "批評": "claude/design-critic（frontmatter は `model: opus`。16 巡目の実際のモデルは claude-opus-5-5。2026-10-02 の『fable』の指示と食い違うので、直すかはユーザーに確認）+ codex exec (gpt-5.6-sol, xhigh)",
+    "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
     "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）",
     "反証": "claude/design-critic(opus)（正しさ）+ codex exec xhigh（安全性。実際のモデルはログで確かめて記録する）。ユーザーの指示で 2 レンズ（2026-09-30）",
     "TEE スパイクの実装": "claude/general-purpose (model: sonnet) ×3 worktree（A 金庫の TEE 版・B web と共有の検証部品・C イメージと手順）2026-10-03"
