@@ -269,6 +269,7 @@ async def test_the_http_request_carries_the_configured_generation_settings(phase
     assert config["temperature"] == DEFAULT_AGENTS_CONFIG.temperature == 0
     assert config["responseMimeType"] == "application/json"
     assert "responseSchema" not in config  # 計画・決定とも JSON モード(応答スキーマなし。台帳 I-19)
+    assert "responseJsonSchema" not in config  # どちらの形の応答スキーマも実ペイロードに付かない(制約付きデコードに戻らない。台帳 X-68)
     assert sent["systemInstruction"]["parts"] == [{"text": load_instruction("candidate")}]  # 前文だけ
     (content,) = sent["contents"]
     assert content["role"] == "user" and len(content["parts"]) == 1  # TurnInput の JSON が 1 件だけ
