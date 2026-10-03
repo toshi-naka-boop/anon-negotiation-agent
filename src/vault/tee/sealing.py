@@ -3,8 +3,8 @@
 Firestore に書く機微な項目を、DEK(データ暗号鍵。メモリにだけ置く)で項目ごとに封印する。保存形式は `nonce(12) || 暗号文(タグ込み)`。
 AAD は `f"{path}#{field}"`(path は Firestore の文書パス)なので、運営者が暗号文を別の文書・別の項目に差し替えても開封できない。
 
-この段階では store.py には組み込まない(10/5 以降)。TEE 版の起動口が、封印の往復を確かめる自己試験(vault.tee.main)で使う。
-Cloud Run 版・テストは、そのまま返す NoopSealer を使う。
+store.py は、vault.seal_layer を通して、本物の依頼者と live の交渉の機微な項目を封印する(design.md §9 の 2)。TEE 版の起動口(vault.tee.main)が、
+この Sealer を VaultStore に渡し、封印の往復を確かめる自己試験にも使う。Cloud Run 版・テストは、そのまま返す NoopSealer を使う(保存の形は変わらない)。
 
 SealError と ValueError のメッセージに、平文・暗号文・鍵は入れない。
 """

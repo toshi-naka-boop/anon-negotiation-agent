@@ -23,6 +23,14 @@
 - 残る仮定（R-7）: 「`X-Forwarded-For` の末尾 = クライアント IP」は Cloud Run の直接公開を前提にしている。外部ロードバランサの背後では末尾が LB の IP になるので、デプロイの確認項目に「末尾がクライアント IP であること」を足す。
 - 攻撃用の指示文 `attacker.md` は仮の 3 行のまま。F（攻撃モード）で書くときに、履歴の `check` の 1 文を入れ、`off_grid` を書かない。
 
+### I-22（実装時の気づき / 文面 / low。次の改訂（v20）で設計書に反映する）封印の組み込み（E）で分かった、§9 の 2・§3.2・DV-19 の文面の不足
+
+- §9 の 2「平文のまま」の列挙に足すもの（実際に平文で残る）: `nid`・`created_at`、`participants.*.company_id`・`participants.*.job_category_info`（公開フィクスチャの情報）、`participants.employer.attribute_bands`（常に null）、`principals` の `deleting`、冪等キーの文書の `nid`・`created_at`・`ttl_at`。これらも封印するかの判断は不要（索引・制御・公開情報）と見て、列挙に足す。
+- §9 の 2 に書き足すこと: AAD の項目名はドット区切りのパス（例 `participants.candidate.attribute_bands`・`views.candidate.payload`）。値が None の項目も封印する（「ない」ことを平文に残さない）。`status`・`end_reason` が平文なので、合意に至ったか否かは Firestore を読める者に見える（説明文にも）。
+- §3.2: `views.<side>` が `{seq, payload}` の形になるのは封印するとき（live）だけ。デモ・攻撃・Cloud Run 版（NoopSealer）はフラットなまま。
+- DV-19: 「live の依頼者 2 人（候補者・求人）」のうち、本物の求人の依頼者を相手にする交渉は現状の API では作れない（求人側は常にテンプレート）。テストでは文書を封印レイヤ経由で直接置いて確かめる、と書き添える（本物の求人を入れるときの設計メモ §14 に紐づける）。
+- 実装の決め: `NoopSealer` は封印レイヤごと素通し。本物の `Sealer` では、封印する項目が bytes でなければ `SealError`（封印なしの版が書いた live のデータは読めない。移行は想定しない）。`SealError` は HTTP では 500。一覧（`list_open_negotiations`・`list_principal_negotiations`）は文書全体を復号する（規模が増えたら平文の項目だけの読み出しに分ける）。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |

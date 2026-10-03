@@ -8,7 +8,8 @@ tee-restart-policy=OnFailure が再起動する):
 2. メタデータサーバ(プロジェクト ID・番号・ゾーン・インスタンス名)。
 3. 鍵の解放(STS と KMS。DEK を得る)。DEK は `vault-db` の `_tee/dek` に包んで保管するので、Firestore のクライアントはこの前に作る。
    保管された DEK は、包んだ鍵の版が KMS の鍵の primary と一致するときだけ解く(一致しなければ失敗。批評 C-56)。
-4. VaultStore(Firestore の vault-db。サービスアカウントの既定の認証)。
+4. VaultStore(Firestore の vault-db。サービスアカウントの既定の認証)。DEK の Sealer を渡し、本物の依頼者と live の交渉の機微な項目を封印して保存する
+   (design.md §9 の 2。項目と仕組みは vault.seal_layer)。
 5. 封印の自己試験(`_tee/selftest` は、なければ作り、あれば開封して確かめる。批評 X-70)。再起動をまたいで、既存の暗号文が同じ DEK で
    開くことを確かめる(鍵の版を切り替えたあとに、既存のデータが読めなくなっていないかを、ここで見つける)。
 6. TLS の鍵と自己署名の証明書(メモリ上の tls_dir に 0600 で書く)。
@@ -147,8 +148,11 @@ def main() -> int:
         metadata = _step("metadata", read_instance_metadata)
         db = _step("firestore", lambda: create_client(project=metadata.project_id))
         dek = _step("key release", lambda: release_dek(db, metadata=metadata, config=config))
-        store = _step("store", lambda: VaultStore(db=db, clock=SystemClock(), config=DEFAULT_VAULT_CONFIG))
-        _step("sealing self-test", lambda: run_sealing_self_test(db, Sealer(dek)))
+        sealer = Sealer(dek)  # release_dek が 32 バイトで返す。保存の封印と、起動時の自己試験の両方に使う
+        store = _step(
+            "store", lambda: VaultStore(db=db, clock=SystemClock(), config=DEFAULT_VAULT_CONFIG, sealer=sealer)
+        )
+        _step("sealing self-test", lambda: run_sealing_self_test(db, sealer))
         key_path, cert_path, certificate_sha256 = _step("tls", lambda: prepare_tls(config))
         app = _step("app", lambda: build_app(store, config, metadata, certificate_sha256))
     except StartupError:

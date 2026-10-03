@@ -70,6 +70,7 @@ from vault.models import (
     EventView,
     EventViews,
     NegotiationDocument,
+    NegotiationMode,
     NegotiationResult,
     Participant,
     Participants,
@@ -79,8 +80,10 @@ from vault.models import (
     Snapshots,
     default_job_category_info,
 )
+from vault.seal_layer import SealLayer
 from vault.serialization import model_from_firestore, model_to_firestore
 from vault.stop_rule import determine_stop_reason
+from vault.tee.sealing import NoopSealer, Sealer
 from vault.templates import TEMPLATES_COLLECTION, resolve_employer_policy
 
 NEGOTIATIONS_COLLECTION = "negotiations"
@@ -113,12 +116,16 @@ class _MoveOutcome:
 
 
 class VaultStore:
-    """金庫の状態機械の実装。Firestore クライアント・時計・暫定値を受け取る。"""
+    """金庫の状態機械の実装。Firestore クライアント・時計・暫定値・封印(sealer。省略は封印しない)を受け取る。"""
 
-    def __init__(self, db: firestore.Client, clock: Clock, config: VaultConfig) -> None:
+    def __init__(
+        self, db: firestore.Client, clock: Clock, config: VaultConfig, *, sealer: Sealer | NoopSealer = NoopSealer()
+    ) -> None:
         self._db = db
         self._clock = clock
         self._config = config
+        # §9 の 2: 本物の依頼者と live の交渉の機微な項目を、書く前に封印し、読んだ後に開く(NoopSealer なら何もしない)。
+        self._seal = SealLayer(sealer)
         # 外側の再試行の間の待ち(_run_transaction)。テストは、待たずに済むよう差し替えられる。
         self._sleep = time.sleep
 
@@ -141,6 +148,31 @@ class VaultStore:
     def _idempotency_ref(self, request_id: str):
         key = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
         return self._db.collection(IDEMPOTENCY_COLLECTION).document(key)
+
+    # ------------------------------------------------------------------
+    # 封印レイヤの入口(§9 の 2)。封印の対象になりうる文書(依頼者・交渉・イベント)のうち、封印する項目を読み書きするときは、
+    # 必ずこれらを通す(項目の一覧と封印の仕組みは vault.seal_layer)。
+    # ------------------------------------------------------------------
+
+    def _read_negotiation(self, snap) -> NegotiationDocument:
+        return self._seal.negotiation_from_firestore(snap.reference.path, snap.to_dict())
+
+    def _write_negotiation(self, txn: firestore.Transaction, ref, doc: NegotiationDocument) -> None:
+        txn.set(ref, self._seal.negotiation_to_firestore(ref.path, doc))
+
+    def _read_principal(self, snap) -> dict | None:
+        """依頼者の文書を、封印した項目を開けた dict にして返す(文書がなければ None)。"""
+        if not snap.exists:
+            return None
+        return self._seal.principal_from_firestore(snap.reference.path, snap.to_dict())
+
+    def _merge_principal(self, ref, update: dict, txn: firestore.Transaction | None = None) -> None:
+        """依頼者の文書に update の項目を書き足す(merge)。封印する項目は封印して書く。txn を渡せば、そのトランザクションの一部。"""
+        data = self._seal.principal_to_firestore(ref.path, update)
+        if txn is None:
+            ref.set(data, merge=True)
+        else:
+            txn.set(ref, data, merge=True)
 
     def _new_transaction(self) -> firestore.Transaction:
         # 既定の max_attempts=5 のまま(内側の再試行)。DV-02 が求める高い並行度のもとで、
@@ -250,12 +282,12 @@ class VaultStore:
         }
         if request.attribute_bands is not None:
             update["attribute_bands"] = model_to_firestore(request.attribute_bands)
-        self._principal_ref(pid).set(update, merge=True)
+        self._merge_principal(self._principal_ref(pid), update)
 
     def get_policy(self, pid: str) -> PolicyView:
         snap = self._principal_ref(pid).get()
         self._reject_if_principal_deleting(pid, snap)
-        data = snap.to_dict() if snap.exists else None
+        data = self._read_principal(snap)
         if not data or data.get("policy") is None:
             raise NotFoundError(f"principal has no policy: {pid}")
         bands_data = data.get("attribute_bands")
@@ -270,7 +302,7 @@ class VaultStore:
     def put_blocklist(self, pid: str, request: PutBlocklistRequest) -> None:
         """候補者のブロック先(企業 ID)を置き換える(§3.3)。"""
         self._reject_if_principal_deleting(pid)
-        self._principal_ref(pid).set({"blocklist": list(request.blocklist)}, merge=True)
+        self._merge_principal(self._principal_ref(pid), {"blocklist": list(request.blocklist)})
 
     # ------------------------------------------------------------------
     # §3.5 交渉の作成
@@ -289,7 +321,7 @@ class VaultStore:
                 nid = idem_snap.to_dict()["nid"]
                 neg_snap = neg_col.document(nid).get(transaction=txn)
                 if neg_snap.exists:
-                    existing = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
+                    existing = self._read_negotiation(neg_snap)
                     return CreateNegotiationResponse(status="created", nid=nid, version=existing.version)
                 # 冪等キーだけが残っていて、指す交渉がない(交渉が TTL や本人の削除で先に消えた)。
                 # 古いキーとして扱い、下で上書きして作り直す(500 にしない。台帳 I-8)。
@@ -313,7 +345,7 @@ class VaultStore:
                 )
             else:
                 candidate_principal_snap = self._principal_ref(cand_req.principal_id).get(transaction=txn)
-                principal_data = candidate_principal_snap.to_dict() if candidate_principal_snap.exists else None
+                principal_data = self._read_principal(candidate_principal_snap)
                 if not principal_data or principal_data.get("policy") is None:
                     raise NotFoundError(f"candidate principal has no policy: {cand_req.principal_id}")
                 # 差し戻し対応 3(§3.8 手順 1): 削除中の依頼者は、新しい交渉を作れない。
@@ -356,7 +388,7 @@ class VaultStore:
 
             # --- ブロック先(AC-16): 断るなら、交渉もイベントも回数も作らずここで抜ける ---
             if not cand_req.is_fictional:
-                blocklist = candidate_principal_snap.to_dict().get("blocklist", [])
+                blocklist = principal_data.get("blocklist", [])
                 if employer_template.company_id in blocklist:
                     return CreateNegotiationResponse(status="refused", reason="blocked")
 
@@ -372,7 +404,7 @@ class VaultStore:
             # --- 予算の予約(本物の依頼者だけ) ---
             new_budget_window = None
             if not cand_req.is_fictional:
-                window_data = candidate_principal_snap.to_dict().get("evaluation_budget")
+                window_data = principal_data.get("evaluation_budget")
                 existing_window = model_from_firestore(EvaluationBudgetWindow, window_data) if window_data else None
                 ok, new_budget_window = budget_math.reserve(
                     existing_window,
@@ -415,12 +447,12 @@ class VaultStore:
                 # デモ・攻撃は、交渉と同じ期限を付ける(台帳 I-8)。live は付けず、本人の削除で消す。
                 idem_data["ttl_at"] = ttl_at
             txn.set(idem_ref, idem_data)
-            txn.set(neg_col.document(nid), model_to_firestore(doc))
+            self._write_negotiation(txn, neg_col.document(nid), doc)
             if not cand_req.is_fictional and new_budget_window is not None:
-                txn.set(
+                self._merge_principal(
                     self._principal_ref(cand_req.principal_id),
                     {"evaluation_budget": model_to_firestore(new_budget_window)},
-                    merge=True,
+                    txn,
                 )
 
             return CreateNegotiationResponse(status="created", nid=nid, version=0)
@@ -500,7 +532,8 @@ class VaultStore:
             ttl_at=doc.ttl_at,
         )
         doc_id = f"{doc.version:08d}"
-        txn.set(self._events(nid).document(doc_id), model_to_firestore(record))
+        event_ref = self._events(nid).document(doc_id)
+        txn.set(event_ref, self._seal.event_to_firestore(event_ref.path, record, doc.mode))
 
     def _write_shared_termination(
         self, txn: firestore.Transaction, nid: str, doc: NegotiationDocument, reason: EndReason
@@ -525,13 +558,13 @@ class VaultStore:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
                 raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            doc = self._read_negotiation(snap)
             now = self._clock.now()
 
             # §3.4: 期限切れの判定は、トランザクションの最初(expected_version 等より前)で行う。
             if doc.status != "judged" and self._is_expired(doc, now):
                 self._write_shared_termination(txn, nid, doc, "timeout")
-                txn.set(negotiation_ref, model_to_firestore(doc))
+                self._write_negotiation(txn, negotiation_ref, doc)
                 return MoveResponse(version=doc.version, status=doc.status, valid=True, end_reason="timeout")
 
             # 差し戻し対応 3(§3.8 手順 1): 本物の参加者(どちらか)が削除中なら拒否する。
@@ -562,7 +595,7 @@ class VaultStore:
             )
             if pre_stop is not None:
                 self._write_shared_termination(txn, nid, doc, pre_stop)
-                txn.set(negotiation_ref, model_to_firestore(doc))
+                self._write_negotiation(txn, negotiation_ref, doc)
                 return MoveResponse(version=doc.version, status=doc.status, valid=True, end_reason=pre_stop)
 
             previous_to_move, previous_status = doc.to_move, doc.status
@@ -603,7 +636,7 @@ class VaultStore:
                 self._assign_seq(doc, "candidate", candidate_view)
                 self._assign_seq(doc, "employer", employer_view)
                 self._record_event(txn, nid, doc, candidate_view, employer_view)
-                txn.set(negotiation_ref, model_to_firestore(doc))
+                self._write_negotiation(txn, negotiation_ref, doc)
                 return MoveResponse(version=doc.version, status=doc.status, valid=True, end_reason=end_reason)
 
             # --- 通常の(終了ではない)記録 ---
@@ -628,7 +661,7 @@ class VaultStore:
                     self._write_shared_termination(txn, nid, doc, post_stop)
                     end_reason_from_chain = post_stop
 
-            txn.set(negotiation_ref, model_to_firestore(doc))
+            self._write_negotiation(txn, negotiation_ref, doc)
             return MoveResponse(
                 version=doc.version,
                 status=doc.status,
@@ -850,13 +883,13 @@ class VaultStore:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
                 raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            doc = self._read_negotiation(snap)
             now = self._clock.now()
 
             # §3.4: 期限切れの判定は、トランザクションの最初で行う(手の操作と同じ)。
             if doc.status != "judged" and self._is_expired(doc, now):
                 self._write_shared_termination(txn, nid, doc, "timeout")
-                txn.set(negotiation_ref, model_to_firestore(doc))
+                self._write_negotiation(txn, negotiation_ref, doc)
                 return PrincipalAnswerResponse(version=doc.version, status=doc.status, end_reason="timeout")
 
             # --- 前提。1 つでも崩れていれば 409、何も消費しない(手の操作と同じ扱い) ---
@@ -882,7 +915,7 @@ class VaultStore:
                 assert participant.principal_id is not None
                 principal_ref = self._principal_ref(participant.principal_id)
                 principal_snap = principal_ref.get(transaction=txn)
-                principal_data = principal_snap.to_dict() if principal_snap.exists else {}
+                principal_data = self._read_principal(principal_snap) or {}
                 if principal_data.get("deleting", False):
                     raise MovePreconditionFailed("principal is being deleted")
 
@@ -904,22 +937,21 @@ class VaultStore:
                 if is_neutral and principal_data.get("policy") is not None:
                     body_policy = model_from_firestore(Policy, principal_data["policy"])
                     new_body_policy, _ = principal_answer.append_anchor_if_consistent(body_policy, anchor, answer)
-                    txn.set(principal_ref, {"policy": model_to_firestore(new_body_policy)}, merge=True)
+                    self._merge_principal(principal_ref, {"policy": model_to_firestore(new_body_policy)}, txn)
 
             # --- 2. 評価し直し(答えた側だけ。評価回数には数えない) ---
+            own_evaluation_of_p = evaluate(new_copy_policy, request.package)
             if doc.pending_offer is not None and doc.pending_offer.by != side:
                 doc.pending_offer.receiver_evaluation = evaluate(new_copy_policy, doc.pending_offer.package)
 
-            own_last_check = doc.last_check.candidate if side == "candidate" else doc.last_check.employer
-            if own_last_check is not None:
-                recomputed = EvaluatedPackage(
-                    package=own_last_check.package,
-                    own_evaluation=evaluate(new_copy_policy, own_last_check.package),
-                )
-                if side == "candidate":
-                    doc.last_check.candidate = recomputed
-                else:
-                    doc.last_check.employer = recomputed
+            # last_check は、聞いた組み合わせ P とその新しい評価に置き換える。P がもともと last_check でも、別の組み合わせ Q でも、
+            # last_check がなくても同じ(答えた結果が次の TurnInput に必ず出るように。§4.4 の 2・L15-1)。元の last_check(Q)を
+            # 評価し直した結果は、見え方から消える(Q を後で確かめ直すと評価を 1 回使う。X-69・L16-3)。
+            own_last_check = EvaluatedPackage(package=request.package, own_evaluation=own_evaluation_of_p)
+            if side == "candidate":
+                doc.last_check.candidate = own_last_check
+            else:
+                doc.last_check.employer = own_last_check
 
             # --- 3. status=active に戻し、期限を付け直し、答えた側の見え方にだけ記録する ---
             doc.status = "active"
@@ -928,7 +960,6 @@ class VaultStore:
             # null。control.pause/resume と同じ扱い)。
             doc.deadline = None if doc.paused else self._fresh_deadline(doc, now)
 
-            own_evaluation_of_p = evaluate(new_copy_policy, request.package)
             view = EventView(
                 seq=0,
                 kind="principal_answer",
@@ -941,7 +972,7 @@ class VaultStore:
             employer_view = view if side == "employer" else None
             self._record_event(txn, nid, doc, candidate_view, employer_view)
 
-            txn.set(negotiation_ref, model_to_firestore(doc))
+            self._write_negotiation(txn, negotiation_ref, doc)
             return PrincipalAnswerResponse(version=doc.version, status=doc.status, end_reason=None)
 
         return self._run_transaction(_txn, contention_error=ContentionExhausted)
@@ -974,7 +1005,7 @@ class VaultStore:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
                 raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            doc = self._read_negotiation(snap)
             now = self._clock.now()
 
             # §3.4: control は期限切れの判定より先に処理する(expired チェックをしない)。
@@ -995,7 +1026,7 @@ class VaultStore:
                 candidate_view = view if request.side == "candidate" else None
                 employer_view = view if request.side == "employer" else None
                 self._record_event(txn, nid, doc, candidate_view, employer_view)
-                txn.set(negotiation_ref, model_to_firestore(doc))
+                self._write_negotiation(txn, negotiation_ref, doc)
                 return ControlResponse(version=doc.version, status=doc.status, paused=doc.paused)
 
             if request.action == "resume":
@@ -1009,7 +1040,7 @@ class VaultStore:
                 candidate_view = view if request.side == "candidate" else None
                 employer_view = view if request.side == "employer" else None
                 self._record_event(txn, nid, doc, candidate_view, employer_view)
-                txn.set(negotiation_ref, model_to_firestore(doc))
+                self._write_negotiation(txn, negotiation_ref, doc)
                 return ControlResponse(version=doc.version, status=doc.status, paused=doc.paused)
 
             # cancel・stop_cost_limit: judged でなければ、active・paused・awaiting_principal のどこからでも効く(judged は上で返している)。
@@ -1017,7 +1048,7 @@ class VaultStore:
             # 終了の記録は双方に 1 件(AC-08)。
             reason: EndReason = "stopped_cost" if request.action == "stop_cost_limit" else "cancelled"
             self._write_shared_termination(txn, nid, doc, reason)
-            txn.set(negotiation_ref, model_to_firestore(doc))
+            self._write_negotiation(txn, negotiation_ref, doc)
             return ControlResponse(version=doc.version, status=doc.status, paused=doc.paused)
 
         return self._run_transaction(_txn, contention_error=TransactionRetryExhausted)
@@ -1029,14 +1060,14 @@ class VaultStore:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
                 raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            doc = self._read_negotiation(snap)
             now = self._clock.now()
 
             if doc.status == "judged" or not self._is_expired(doc, now):
                 return ExpireResponse(version=doc.version, status=doc.status, expired=False)
 
             self._write_shared_termination(txn, nid, doc, "timeout")
-            txn.set(negotiation_ref, model_to_firestore(doc))
+            self._write_negotiation(txn, negotiation_ref, doc)
             return ExpireResponse(version=doc.version, status=doc.status, expired=True)
 
         return self._run_transaction(_txn, contention_error=TransactionRetryExhausted)
@@ -1049,7 +1080,7 @@ class VaultStore:
         snap = self._negotiation_ref(nid).get()
         if not snap.exists:
             raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-        doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+        doc = self._read_negotiation(snap)
         self._reject_if_side_participant_deleting(doc, side, nid)
         counters = doc.counters.candidate if side == "candidate" else doc.counters.employer
 
@@ -1101,9 +1132,9 @@ class VaultStore:
         neg_snap = self._negotiation_ref(nid).get()
         if not neg_snap.exists:
             raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-        doc = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
+        doc = self._read_negotiation(neg_snap)
         self._reject_if_side_participant_deleting(doc, side, nid)
-        return self._read_event_items(nid, side, after_seq)
+        return self._read_event_items(nid, side, after_seq, doc.mode)
 
     def get_demo_events(self, nid: str, side: Side, after_seq: int = 0) -> list[EventViewItem]:
         """GET /v1/demo/negotiations/{nid}/events(台帳 X-38。§6.3「web と vault の両方で確かめる」)。
@@ -1118,19 +1149,18 @@ class VaultStore:
         neg_snap = self._negotiation_ref(nid).get()
         if not neg_snap.exists:
             raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-        doc = model_from_firestore(NegotiationDocument, neg_snap.to_dict())
+        doc = self._read_negotiation(neg_snap)
         if doc.mode not in ("demo", "attack") or not doc.participants.candidate.is_fictional:
             raise NotFoundError("negotiation not found")  # ID は入れない(台帳 X-40・X-64)
-        return self._read_event_items(nid, side, after_seq)
+        return self._read_event_items(nid, side, after_seq, doc.mode)
 
-    def _read_event_items(self, nid: str, side: Side, after_seq: int) -> list[EventViewItem]:
+    def _read_event_items(self, nid: str, side: Side, after_seq: int, mode: NegotiationMode) -> list[EventViewItem]:
         """イベント列の、side の見え方だけを seq の順に読む(get_events・get_demo_events の共通の下請け)。"""
         field_path = f"views.{side}.seq"
         query = self._events(nid).where(filter=FieldFilter(field_path, ">", after_seq)).order_by(field_path)
         items: list[EventViewItem] = []
         for snap in query.stream():
-            view_data = snap.to_dict()["views"][side]
-            view = model_from_firestore(EventView, view_data)
+            view = self._seal.event_view_from_firestore(snap.reference.path, side, snap.to_dict()["views"][side], mode)
             items.append(
                 EventViewItem(
                     seq=view.seq,
@@ -1156,7 +1186,7 @@ class VaultStore:
         )
         seen: dict[str, NegotiationDocument] = {}
         for snap in list(by_candidate.stream()) + list(by_employer.stream()):
-            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            doc = self._read_negotiation(snap)
             seen[doc.nid] = doc
 
         summaries = []
@@ -1190,7 +1220,7 @@ class VaultStore:
         先頭から返し直さない。L9-2)。
         """
         query = self._negotiations().where(filter=FieldFilter("status", "in", ["active", "awaiting_principal"]))
-        docs = [model_from_firestore(NegotiationDocument, snap.to_dict()) for snap in query.stream()]
+        docs = [self._read_negotiation(snap) for snap in query.stream()]
         docs.sort(key=lambda d: d.nid)
 
         if cursor is not None:
@@ -1293,7 +1323,7 @@ class VaultStore:
             snap = negotiation_ref.get(transaction=txn)
             if not snap.exists:
                 return
-            doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+            doc = self._read_negotiation(snap)
             if side == "candidate":
                 doc.last_check.candidate = None
                 doc.request_id = ""
@@ -1305,7 +1335,7 @@ class VaultStore:
             participant = doc.participants.candidate if side == "candidate" else doc.participants.employer
             participant.attribute_bands = None
             participant.principal_id = None  # 最後に消す
-            txn.set(negotiation_ref, model_to_firestore(doc))
+            self._write_negotiation(txn, negotiation_ref, doc)
 
         self._run_transaction(_txn, contention_error=TransactionRetryExhausted)
 
@@ -1316,7 +1346,7 @@ class VaultStore:
         if not snap.exists:
             return  # 冪等: すでに消えている
 
-        doc = model_from_firestore(NegotiationDocument, snap.to_dict())
+        doc = self._read_negotiation(snap)
         if doc.participants.candidate.principal_id == pid:
             own_side: Side = "candidate"
             other_participant = doc.participants.employer
@@ -1357,7 +1387,7 @@ class VaultStore:
         #    view・events)はすべて拒否される(差し戻し対応 3)。expire だけは例外(システムの
         #    操作なので)。
         if not snap.to_dict().get("deleting", False):
-            principal_ref.set({"deleting": True}, merge=True)
+            self._merge_principal(principal_ref, {"deleting": True})
 
         # 2. 関わる交渉のうち、終わっていないものに終了処理(cancelled)を行う。
         #    control の cancel 分岐は request.side を参照しないので(§3.4)、ここでは

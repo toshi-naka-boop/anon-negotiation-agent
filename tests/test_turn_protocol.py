@@ -245,8 +245,8 @@ async def test_known_not_acceptable_and_needs_confirmation_records_are_filled_wi
 async def test_a_needs_confirmation_record_is_checked_again_after_this_side_answered_a_question(store, web_env):
     # 「本人確認が必要」の記録(B)の後に、自分側の途中確認の回答(別の組み合わせ P への)がはさまれば、回答で受けるアンカーが
     # 広がり得るので、記録では埋めず、金庫で確かめ直す(その分の評価は消費する)。一方、「受けられない」の記録(A)は、
-    # 回答の後でも変わらないので、金庫を呼ばずに埋まる。B は last_check ではない古い履歴の記録にしておく(last_check は、回答で
-    # 評価し直されるので、履歴より優先して埋まる。台帳 L14-2)ために、確かめの順は B・A。
+    # 回答の後でも変わらないので、金庫を呼ばずに埋まる。last_check は、回答で聞いた組み合わせ(asked)に置き換わる(§4.4 の 2・L15-1)
+    # ので、B・A はどちらも、last_check ではない古い履歴の記録。
     env = web_env
     env.configure(answerer=ScriptedAnswerer("accept"))
     spy = SpyVault(env.vault)
@@ -265,7 +265,7 @@ async def test_a_needs_confirmation_record_is_checked_again_after_this_side_answ
 
     assert vault_checks(spy) == [B, A, B]  # 回答の後は、B だけが金庫で確かめ直された。A は埋まった
     plan_after, decide_after = [c.turn_input for c in env.agents.calls_for("candidate")][2:]
-    assert plan_after.last_check.package == A  # B は、last_check ではない古い履歴の記録
+    assert plan_after.last_check.package == asked  # 回答で聞いた組み合わせ(L15-1)。B・A は、last_check ではない古い履歴の記録
     assert plan_after.budget.remaining_evaluations == 14  # 確かめ 2 回・途中確認 1 回(17 → 14)
     assert [(c.package, c.evaluation) for c in decide_after.checked] == [(B, NEEDS), (A, NOT)]
     assert decide_after.budget.remaining_evaluations == 13  # 確かめ直した B の分だけ減った

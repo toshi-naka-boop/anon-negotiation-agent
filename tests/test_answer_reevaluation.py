@@ -2,7 +2,8 @@
 
 金庫の部分: 途中確認に答えた後の view で、pending_offer と last_check の評価が回答と合っていること、
 §4.1 の図の流れ(求人側の途中確認 → 回答 → accept)が金庫の API で最後まで通ること、
-評価のし直しで評価回数が減らない(消費しない)ことを確かめる。
+評価のし直しで評価回数が減らない(消費しない)ことを確かめる。last_check は、聞いた組み合わせ P とその新しい評価に置き換わる
+(last_check が別の組み合わせ Q のときも、last_check がないときも。Q の評価し直しは見え方に残らない。§4.4 の 2・L15-1・X-69・L16-3)。
 
 web(レフェリー)の部分(末尾。1d-1。v14 の計画・確かめ・決定に合わせた): 途中確認に答えた後の最初の TurnInput で、
 pending_offer と last_check の評価が回答と合っていること。§4.1 の図の流れ(求人側の途中確認 → 自動回答 → accept)が、
@@ -129,6 +130,89 @@ def test_reevaluation_after_answering_does_not_consume_evaluation_budget(store):
     assert store.get_view(nid, "employer").budget.remaining_evaluations == 17 - 2
 
 
+def _drive_to_employer_question(store, nid, asked, *, checked=None):
+    """candidate が propose(asked) → (checked があれば)employer が check(checked) → ask_principal(asked) まで進める。
+
+    checked は、求人側の last_check になる別の組み合わせ Q。None なら確かめずに聞く(last_check がない)。
+    """
+    v = store.process_move(
+        nid, MoveRequest(expected_version=0, side="candidate", move="propose", package=asked)
+    ).version
+    if checked is not None:
+        v = store.process_move(
+            nid, MoveRequest(expected_version=v, side="employer", move="check", package=checked)
+        ).version
+    ask_response = store.process_move(
+        nid, MoveRequest(expected_version=v, side="employer", move="ask_principal", package=asked)
+    )
+    assert ask_response.valid is True
+    assert ask_response.status == "awaiting_principal"
+    return ask_response.version
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [("accept", Verdict.ACCEPTABLE), ("reject", Verdict.NOT_ACCEPTABLE)],
+)
+def test_answering_about_p_replaces_a_last_check_of_another_package_q_with_p(store, answer, expected):
+    # DV-11・§4.4 の 2・L15-1・X-69・L16-3: last_check が別の組み合わせ Q のときに P について答えると、次の view の
+    # last_check.package が P で、評価が回答と合っている。評価回数は減らない。Q を評価し直した結果は、見え方に残らない。
+    p, q = sample_package(salary=700), sample_package(salary=600)  # q は、求人側には p より良い(「受ける」なら広がる組み合わせ)
+    nid = _create(store)
+    v = _drive_to_employer_question(store, nid, p, checked=q)
+
+    before = store.get_view(nid, "employer")
+    assert (before.last_check.package, before.last_check.own_evaluation) == (q, Verdict.NEEDS_CONFIRMATION)
+    store.process_principal_answer(
+        nid, PrincipalAnswerRequest(expected_version=v, side="employer", package=p, answer=answer)
+    )
+
+    after = store.get_view(nid, "employer")
+    assert (after.last_check.package, after.last_check.own_evaluation) == (p, expected)
+    assert (after.pending_offer.package, after.pending_offer.own_evaluation) == (p, expected)
+    assert after.budget.remaining_evaluations == before.budget.remaining_evaluations == 17 - 2  # 確かめ 1 回・途中確認 1 回だけ
+
+
+def test_answering_when_there_is_no_last_check_sets_it_to_p(store):
+    # L15-1: 確かめずに途中確認した(last_check がない)ときも、答えた結果が last_check に入る(次の TurnInput に必ず出る)。
+    p = sample_package()
+    nid = _create(store)
+    v = _drive_to_employer_question(store, nid, p)
+    assert store.get_view(nid, "employer").last_check is None
+
+    store.process_principal_answer(
+        nid, PrincipalAnswerRequest(expected_version=v, side="employer", package=p, answer="accept")
+    )
+
+    after = store.get_view(nid, "employer")
+    assert (after.last_check.package, after.last_check.own_evaluation) == (p, Verdict.ACCEPTABLE)
+    assert after.budget.remaining_evaluations == 17 - 1  # 途中確認の 1 回だけ。置き換えは評価を消費しない
+
+
+def test_the_candidate_side_replaces_its_last_check_the_same_way(store):
+    # L15-1: 候補者側(last_check.candidate)も同じ。q(800 万)は、候補者には p(700 万)より良い。
+    p, q = sample_package(salary=700), sample_package(salary=800)
+    candidate_template, employer_template = put_candidate_and_employer_templates(
+        store._db, candidate_policy=needs_confirmation_policy("candidate")
+    )
+    nid = store.create_negotiation(
+        demo_create_request(candidate_template.template_id, employer_template.template_id)
+    ).nid
+    v = store.process_move(nid, MoveRequest(expected_version=0, side="candidate", move="check", package=q)).version
+    v = store.process_move(
+        nid, MoveRequest(expected_version=v, side="candidate", move="ask_principal", package=p)
+    ).version
+    assert store.get_view(nid, "candidate").last_check.package == q
+
+    store.process_principal_answer(
+        nid, PrincipalAnswerRequest(expected_version=v, side="candidate", package=p, answer="accept")
+    )
+
+    after = store.get_view(nid, "candidate")
+    assert (after.last_check.package, after.last_check.own_evaluation) == (p, Verdict.ACCEPTABLE)
+    assert after.budget.remaining_evaluations == 17 - 2  # 確かめ 1 回・途中確認 1 回だけ
+
+
 # --- web(レフェリー)の部分(1d-1) ---
 
 
@@ -180,7 +264,9 @@ async def test_first_turn_input_after_the_answer_carries_the_reevaluated_verdict
     assert decide_turn.last_check.own_evaluation is Verdict.NEEDS_CONFIRMATION
     assert after_answer.pending_offer.package == package
     assert after_answer.pending_offer.own_evaluation is expected  # 回答に合わせて評価し直されている
-    assert after_answer.last_check.package == checked
+    # last_check は、聞いた組み合わせ(package)とその新しい評価に置き換わる(確かめていた checked の評価し直しは、見え方から消える。
+    # §4.4 の 2・L15-1・X-69・L16-3)。
+    assert after_answer.last_check.package == package
     assert after_answer.last_check.own_evaluation is expected
     # 自分の評価は確かめと ask_principal の 2 回だけ(17 → 16 → 15)。評価し直しでは減らない。
     assert decide_turn.budget.remaining_evaluations == 16
@@ -206,6 +292,9 @@ async def test_employer_question_flow_runs_through_the_referee_to_agreement(stor
     assert outcomes == [StepOutcome.MOVED, StepOutcome.MOVED, StepOutcome.ANSWERED, StepOutcome.FINISHED]
     assert answerer.calls == [(nid, "employer", package)]
     assert [c.turn_input.phase for c in env.agents.calls_for("employer")] == ["plan", "plan"]  # 決定は呼ばない(1 手番 1 回)
+    before_answer, after_answer = [c.turn_input for c in env.agents.calls_for("employer")]
+    assert before_answer.last_check is None  # 確かめていないので、回答の前は last_check がない
+    assert (after_answer.last_check.package, after_answer.last_check.own_evaluation) == (package, Verdict.ACCEPTABLE)  # L15-1
     doc = store._negotiation_ref(nid).get().to_dict()
     assert (doc["status"], doc["end_reason"]) == ("judged", "agreed")
     for side in ("candidate", "employer"):  # 最終記録は双方に 1 件だけ。同じ内容
@@ -271,7 +360,8 @@ async def test_a_package_that_needed_confirmation_before_the_answer_is_checked_a
     await drive(env.referee(nid))
 
     after_answer_plan, after_answer_decide = [c.turn_input for c in env.agents.calls_for("employer")][2:]
-    assert after_answer_plan.last_check.package == newer  # last_check は older ではない
+    # last_check は、回答で聞いた組み合わせ(package)に置き換わる。older・newer は、どちらも回答より前の古い履歴の記録(L15-1)。
+    assert after_answer_plan.last_check.package == package
     assert after_answer_plan.budget.remaining_evaluations == 14  # 確かめ 2 回・途中確認 1 回を使った(17 → 14)
     employer_checks = [r for r in spy.move_requests if r.side == "employer" and r.move == "check"]
     assert [r.package for r in employer_checks] == [older, newer, older]  # 回答の後に、older が 1 回、金庫で確かめられた

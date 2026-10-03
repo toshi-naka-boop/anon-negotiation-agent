@@ -208,7 +208,8 @@ def create_app_from_env() -> FastAPI:
     """本番の起動口(`uvicorn vault.app:create_app_from_env --factory`)。
 
     環境変数は読まない: Firestore の接続先は、クライアントが環境から決める(Cloud Run では、サービスアカウントと
-    サービスの属するプロジェクト)。時計は SystemClock、暫定値は config/params.toml。
+    サービスの属するプロジェクト)。時計は SystemClock、暫定値は config/params.toml。封印はしない(sealer を渡さない = NoopSealer。
+    TEE 版は vault.tee.main が Sealer を渡す。§9 の 2)。
     起動時に、uvicorn のアクセスログの URL から ID(依頼者 ID・交渉 ID)を伏せる(mask_ids_in_logs。台帳 X-40)。
     """
     mask_ids_in_logs()
