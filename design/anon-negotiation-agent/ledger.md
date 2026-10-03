@@ -40,6 +40,14 @@
 - `/healthz` は web・agents・vault とも認証の外（金庫の TEE 版でも `caller_verifier` の外。素の経路は `/v1/attestation` と `/healthz` だけ）。IAM で守られる agents・vault の `/healthz` は、`deploy_check.sh` が ID トークンを付けて呼ぶ（AC-22 に書く）。
 - 段の参照は `stages/{nid}` の `stage` の番号だけ（G が `StageStore` に読み出しを足したら `activity_api.read_stage` を差し替える）。
 
+### I-24（実装時の気づき / 設計 / low。次の改訂（v20）で設計書に反映）ケース 2・3 とリプレイ（J）で分かったこと
+
+- §8.4 に足す: リプレイの JSONL の形（ヘッダ `{"header": true, "case", "source": "live"|"scripted", "recorded_at", "schema": "replay/v1"}` ＋ 1 行 1 イベント `{"side", "seq", "observed_at", "event"}`。時刻は記録する側が付ける。P-18）、`run_demo.py --record`・`--replay [PATH]`・`--speed`、`replay_check.py`（3 回再生してハッシュ一致。AC-21）、`fixtures/replays/case{1,2,3}.jsonl` は台本の記録（`source: scripted`）で、本物の Gemini の記録はユーザーが `--live --record` で取り直す（同じパスは上書きされる）。AC-09〜11 の書き方を `--case N --replay` にそろえる。
+- §8.4 のケース 3 の「同程度の広さ」を数で書く: 候補者が受けられる組み合わせはケース 1 の候補者と同じ 5,328 通り（求人は全部受ける）。ケース 2 は 18,000 通りの総当たりで交わりが 0（候補者の最低 750 万、求人の最高 700 万。1 マス差）。
+- §8.3 に足す: 最悪の攻撃者（金庫の答えを全部見られる、年収だけの二分探索）は 5 手で 1 マス（600 万超〜650 万以下）に達し、評価上限 17 より手数上限 6 が先に効く。候補者が受けて終わる台本なら、交渉をまたいで 3 交渉で同じ区間。生の境目が 601〜650 万のどこでも答えは同じ。
+- 探索線の持ち方: 台本の定数（`tests/scripted_negotiators.SEARCH_LINE`）と `case3.toml` のコメント。web のメーターは線を知らなくてよい: 攻撃者の提案を「年収以外の軸の組」でまとめ、組ごとに区間を計算する（§8.3 の「他の軸は固定し、年収だけを変えた提案を使う」の実装の形。H2 で作る）。
+- `run_demo.py` の既定は台本（`--live` で本物の Gemini）。ケース 3 の `auto_response` は false/false（審査員が操作する求人）。`--live --case 3` の攻撃の指示文は暫定（`ATTACKER_INSTRUCTION`。F の `attacker.md` と合わせる）。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |

@@ -9,7 +9,12 @@
 - 結果の表示と実行の記録(JSONL)が、必要な項目(モデル ID・設定のハッシュ・単価の版・送信ごとのトークン数・物理の数・判定)を持ち、
   ID(交渉 ID・プロジェクト ID)を含まない。
 - --live の環境変数がそろっていなければ、何も呼ばずに(エミュレータも起動せずに)止まる。モデル名と場所は、最初に表示する。
-- main は、--scripted のとき終了コード 0 を返し、実行の記録を書く。--runs N --judge は、N 回とも合格なら 0、1 回でも不合格なら 1。
+- main は、--scripted(既定)のとき終了コード 0 を返し、実行の記録を書く。--runs N --judge は、N 回とも合格なら 0、1 回でも不合格なら 1。
+- ケース 2(両者が受けられる組み合わせがない)は、台本のエージェントで合意に届かず、手数の上限で止まって、双方に「なし」だけが返る。
+- ケース 3(攻撃。mode=attack)は、台本の攻撃者が探索線の上で年収を二分探索する。候補者側の金庫の答えから estimate_interval で作った
+  区間は、グリッド 1 マス(600 万より上、650 万以下)で止まり、候補者の生の境目(620 万)を含む。--live の攻撃には、攻撃者への指示が渡る。
+- 終了コードは、ケースの意図どおりに終わったか(ケース 1=合意 / 2=合意に届かず「なし」 / 3=判定まで届く)で決まる。
+- --record / --replay / --speed の引数の組み合わせ(記録と再生の往復は tests/test_replay.py)。
 """
 
 import asyncio
@@ -25,12 +30,15 @@ from pathlib import Path
 import pytest
 from google import genai
 from google.cloud import firestore
-from negotiation_core import Usage
+from negotiation_core import Package, Usage
+from negotiation_core.estimate_interval import estimate_interval
+from starlette.applications import Starlette
 
 SCRIPTS_DIRECTORY = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 import run_demo as demo_script  # noqa: E402  (scripts/ を import できるようにしてから読む)
 
+from scripted_negotiators import is_on_search_line  # noqa: E402
 from vault.config import DEFAULT_VAULT_CONFIG  # noqa: E402
 from vault.fixtures import load_case_fixture  # noqa: E402
 
@@ -69,8 +77,8 @@ def run_scripted_demo(firestore_emulator_host, **options):
     return run_scripted_demo_as(firestore_emulator_host, "scripted", **options)
 
 
-def run_scripted_demo_as(firestore_emulator_host, mode, **options):
-    """run_scripted_demo の本体(mode は、配線の確かめのときだけ live にする。同じネットワークの確認つき)。"""
+def run_scripted_demo_as(firestore_emulator_host, mode, *, case=1, **options):
+    """run_scripted_demo の本体(mode は、配線の確かめのときだけ live にする。同じネットワークの確認つき)。case はケース番号。"""
     project = f"demo-test-{uuid.uuid4().hex}"
     vault_db = firestore.Client(project=project, database="vault-db")
     default_db = firestore.Client(project=project, database="(default)")
@@ -81,7 +89,7 @@ def run_scripted_demo_as(firestore_emulator_host, mode, **options):
             patch.setattr(socket, "getaddrinfo", resolve_loopback_only)
             return asyncio.run(
                 demo_script.run_demo(
-                    fixture=load_case_fixture(1),
+                    fixture=load_case_fixture(case),
                     mode=mode,
                     vault_db=vault_db,
                     default_db=default_db,
@@ -188,8 +196,8 @@ def test_a_run_that_goes_over_the_time_limit_stops_at_the_next_send_with_what_it
     # 進行中の送信は終わるまで待ち、次の送信は始めない。それまでの手の並びと送信の記録は、残る。
     original = demo_script.scripted_sender
 
-    def slow_sender(case):
-        inner = original(case)
+    def slow_sender(case, read_candidate_events=None):
+        inner = original(case, read_candidate_events)
 
         async def send(role, turn_input, *, nid, timeout_s):
             await asyncio.sleep(0.4)
@@ -205,6 +213,92 @@ def test_a_run_that_goes_over_the_time_limit_stops_at_the_next_send_with_what_it
     assert run.events["candidate"]  # 止まるまでの手は、金庫の記録に残っている
     assert "時間切れ" in demo_script.format_report(run)
     assert not demo_script.judge(run, TARGETS).passed  # 時間切れは、不合格
+
+
+# ----------------------------------------------------------------------
+# ケース 2・3 の --scripted の流れ
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def case2_run(firestore_emulator_host):
+    """--scripted の交渉を、ケース 2 で 1 回通した結果。"""
+    return run_scripted_demo(firestore_emulator_host, case=2)
+
+
+@pytest.fixture(scope="module")
+def case3_run(firestore_emulator_host):
+    """--scripted の攻撃を、ケース 3 で 1 回通した結果。"""
+    return run_scripted_demo(firestore_emulator_host, case=3)
+
+
+def test_scripted_run_of_case2_stops_at_a_limit_and_returns_none_to_both_sides(case2_run):
+    # AC-10: 両者が受けられる組み合わせがないので、台本のエージェントは合意に届かず、手数(か評価)の上限で止まる。双方に「なし」だけが返る。
+    run, limits = case2_run, DEFAULT_VAULT_CONFIG.limits
+    assert not run.timed_out
+    assert run.status == "judged" and run.end_reason in ("stopped_budget", "stopped_invalid")
+    assert run.result.likelihood == "none" and run.result.package is None
+    for items in run.events.values():
+        final = items[-1]
+        assert final.kind == "final_result"
+        assert (final.result.likelihood, final.result.package) == ("none", None)
+        assert final.reason is None and final.own_evaluation is None  # 見込みと組み合わせだけ。理由はない(AC-08)
+    for counters in run.counters.values():
+        assert counters.moves_used <= limits.moves_budget_per_side
+        assert counters.evaluations_used <= limits.evaluation_budget_per_side
+        assert counters.principal_checks_used <= limits.principal_checks_per_side
+    assert demo_script.ended_as_intended(run)
+    judgement = demo_script.judge(case2_run, TARGETS)
+    assert judgement.passed and judgement.checks[0].name == "as_intended"
+
+
+def test_scripted_attack_of_case3_narrows_the_salary_to_one_grid_cell_and_no_further(case3_run):
+    # §8.3・§8.4: 台本の攻撃者が、探索線の上で年収を二分探索する。候補者側の金庫の答え(受け手としての評価)から作った区間は、
+    # 600 万より上、650 万以下の 1 マスで止まる。候補者の生の境目(620 万)は含むが、それ以上は絞れない。
+    run = case3_run
+    assert not run.timed_out and (run.status, run.end_reason) == ("judged", "ended_by_agent")
+    assert {call.role for call in run.calls} == {"candidate", "attacker"}  # 攻撃の交渉の求人側は、攻撃者のエージェント
+    probes = [e for e in run.events["candidate"] if e.kind == "offer_received"]
+    assert all(is_on_search_line(e.package) for e in probes)
+    assert [e.package.salary for e in probes] == [900, 550, 700, 600, 650]  # 二分探索の 5 手。手数の上限(6)の中
+
+    interval = estimate_interval([(e.package.salary, e.own_evaluation) for e in probes])
+    assert (interval.lower, interval.upper, interval.cells) == (600, 650, 1)
+    raw_boundary = load_case_fixture(3).candidate.raw.bounds[(1, 0, 6)]
+    assert raw_boundary == 620 and interval.contains(raw_boundary)
+    for items in run.events.values():  # 攻撃者が終えたので、双方に「なし」だけ
+        assert (items[-1].kind, items[-1].result.likelihood, items[-1].result.package) == ("final_result", "none", None)
+    assert demo_script.ended_as_intended(run) and demo_script.judge(run, TARGETS).passed
+
+
+def test_the_report_counts_the_attackers_sends_as_the_employers(case3_run):
+    attacker_sends = sum(1 for call in case3_run.calls if call.role == "attacker")
+    assert attacker_sends > 0
+    assert f"求人 {attacker_sends}" in demo_script.format_report(case3_run)
+
+
+def test_a_live_attack_hands_the_attacker_its_instruction(firestore_emulator_host, monkeypatch):
+    # --live の攻撃(ケース 3)は、求人側のエージェントへ、毎手番、指示(400 文字以内。§8.2)を渡す。候補者へは渡さない。
+    # 本物の Gemini は呼ばない: agents への送信の口に、指示を記録するだけのエージェントを差し込む。
+    import web.app as web_app_module
+    from web_helpers import plan_dict
+
+    assert 0 < len(demo_script.ATTACKER_INSTRUCTION) <= 400
+    opening = Package(**demo_script._SCRIPTED_CANDIDATE_OPENING, **demo_script._SCRIPTED_CATEGORICAL)
+    seen = []
+
+    async def recording_agent(role, turn_input, *, nid, timeout_s):
+        seen.append((role, getattr(turn_input, "principal_instruction", None)))
+        payload = plan_dict(move="end") if role == "attacker" else plan_dict(move="propose", package=opening)
+        return payload, demo_script.SCRIPTED_USAGE
+
+    monkeypatch.setattr(web_app_module, "bind_agents_client", lambda base_url: recording_agent)
+    monkeypatch.setattr(demo_script, "build_agents_app", lambda: Starlette())
+
+    run = run_scripted_demo_as(firestore_emulator_host, "live", case=3)
+
+    assert run.end_reason == "ended_by_agent"
+    assert seen == [("candidate", None), ("attacker", demo_script.ATTACKER_INSTRUCTION)]
 
 
 # ----------------------------------------------------------------------
@@ -610,3 +704,66 @@ def test_main_returns_one_when_the_case_has_no_fixture(capsys):
 def test_main_rejects_a_run_count_below_one():
     with pytest.raises(SystemExit):
         demo_script.main(["--case", "1", "--scripted", "--runs", "0"])
+
+
+def test_main_defaults_to_the_scripted_mode_without_a_flag(records_directory, capsys):
+    # --live も --scripted も付けなければ、台本のエージェントで動かす(リプレイの記録を作る `--case N --record PATH` が、そのまま動く)。
+    assert demo_script.main(["--case", "1"]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == "run_demo: ケース 1 / scripted"
+
+
+@pytest.mark.parametrize(
+    ("case", "verdict"),
+    [
+        (2, "判定: 合意に届かず「なし」で終わった(意図どおり) → 終了コード 0"),
+        (3, "判定: 攻撃の交渉が判定(judged)まで届いた → 終了コード 0"),
+    ],
+)
+def test_main_returns_zero_for_case_2_and_3_when_they_end_as_intended(records_directory, capsys, case, verdict):
+    # ケース 2 は合意しないのが意図、ケース 3 は攻撃の交渉が判定まで届くのが意図。ケース 1 の「合意しなければ 1」は当てはまらない。
+    assert demo_script.main(["--case", str(case)]) == 0
+    out = capsys.readouterr().out
+    assert verdict in out and not ID_IN_TEXT.search(out)
+    assert len(list(records_directory.glob(f"case{case}_scripted_*.jsonl"))) == 1
+
+
+def test_main_judges_case_2_by_whether_it_ended_as_intended(records_directory, capsys):
+    assert demo_script.main(["--case", "2", "--judge"]) == 0
+    out = capsys.readouterr().out
+    assert "[合格] as_intended" in out and "[合格] agreed" not in out and "DV-15 の判定: 1 回中 1 回が合格" in out
+
+
+def test_main_returns_one_when_case_2_ends_in_an_agreement(monkeypatch, records_directory, capsys, case2_run):
+    async def agreed(**kwargs):
+        return dataclasses.replace(case2_run, end_reason="agreed")  # 両者が受けられる組み合わせがないので、起きないはずの終わり方
+
+    monkeypatch.setattr(demo_script, "run_demo", agreed)
+
+    assert demo_script.main(["--case", "2"]) == 1
+    assert "判定: 意図と違う終わり方(合意した、または判定に届かなかった) → 終了コード 1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param([], id="no_case"),
+        pytest.param(["--live"], id="live_without_case"),
+        pytest.param(["--case", "1", "--speed", "2"], id="speed_without_replay"),
+        pytest.param(["--case", "1", "--record", "a.jsonl", "--runs", "2"], id="record_with_several_runs"),
+        pytest.param(["--replay"], id="replay_without_path_or_case"),
+        pytest.param(["--replay", "--speed", "2"], id="replay_without_path_or_case_with_speed"),
+        pytest.param(["--replay", "a.jsonl", "--live"], id="replay_with_live"),
+        pytest.param(["--replay", "a.jsonl", "--scripted"], id="replay_with_scripted"),
+        pytest.param(["--replay", "a.jsonl", "--runs", "2"], id="replay_with_runs"),
+        pytest.param(["--replay", "a.jsonl", "--judge"], id="replay_with_judge"),
+        pytest.param(["--replay", "a.jsonl", "--record", "b.jsonl"], id="replay_with_record"),
+        pytest.param(["--replay", "a.jsonl", "--speed", "0"], id="speed_zero"),
+        pytest.param(["--replay", "a.jsonl", "--speed", "-1"], id="speed_negative"),
+        pytest.param(["--replay", "a.jsonl", "--speed", "nan"], id="speed_nan"),
+    ],
+)
+def test_main_rejects_arguments_that_do_not_go_together(argv, capsys):
+    with pytest.raises(SystemExit) as raised:
+        demo_script.main(argv)
+    assert raised.value.code == 2
+    assert capsys.readouterr().err  # 理由を出す

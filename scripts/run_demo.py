@@ -2,7 +2,13 @@
 
     uv run python scripts/run_demo.py --case 1 --live                       # 本物の ADK と Gemini(Vertex AI)で 1 回
     uv run python scripts/run_demo.py --case 1 --live --runs 2 --judge      # 2 回続けて DV-15 の基準で判定する(③-0 の完了条件)
-    uv run python scripts/run_demo.py --case 1 --scripted [--runs N --judge]  # Gemini を呼ばず、台本のエージェントで(このスクリプト自体の確かめ)
+    uv run python scripts/run_demo.py --case 1 [--scripted] [--runs N --judge]  # Gemini を呼ばず、台本のエージェントで(既定。このスクリプト自体の確かめ)
+    uv run python scripts/run_demo.py --case 1 --record fixtures/replays/case1.jsonl   # 実行中のイベントを、リプレイの記録(JSONL)に書く
+    uv run python scripts/run_demo.py --replay fixtures/replays/case1.jsonl [--speed 4]  # 記録を、記録どおりの間隔で流す(AC-09〜11)
+    uv run python scripts/run_demo.py --case 1 --replay                    # 同じ。PATH を省くと、そのケースの fixtures/replays/case1.jsonl
+
+ケース(§8.4。fixtures/case{N}.toml): 1=年収だけでは合意できないが、他の軸を動かせば合意できる / 2=両者が受けられる組み合わせがない
+(双方に「なし」だけが返る) / 3=攻撃(mode=attack。求人側は攻撃者のエージェントを呼ぶ。--scripted の攻撃者は、探索線の上で年収を二分探索する)。
 
 流れ(1 回の実行)
 1. Firestore エミュレータを起動する(tests/conftest.py と同じく、gcloud を使わず、JDK 21 で jar を直接起動する)。--runs N でも、
@@ -10,15 +16,24 @@
 2. ケースのフィクスチャ(fixtures/case{N}.toml)を、金庫(vault-db)のテンプレートに置く。
 3. 金庫の app を、同じプロセスの中で ASGI のまま(httpx の ASGITransport)つなぐ。サービス間の認証(ID トークン)は使わない。
    --live は、agents の app も ASGI でつなぎ、設定ファイルのモデル(gemini-3.5-flash)で、本物の ADK が Gemini を呼ぶ。
-   --scripted は、agents を通さず、台本のエージェント(tests/scripted_negotiators.py。計画・決定の形)をレフェリーの send_turn の
+   --scripted(既定)は、agents を通さず、台本のエージェント(tests/scripted_negotiators.py。計画・決定の形)をレフェリーの send_turn の
    差し込み口に直接入れる(agents の ADK・A2A の経路は、--live と agents のテストで確かめる)。
-4. web のレフェリーで、デモの交渉(mode=demo)を 1 件作り、判定(judged)まで動かす。架空人物の途中確認は、フィクスチャの生の条件で答える
-   (web.fictional_answerer.FixtureAnswerer)。レフェリーは、本番と同じく、送る前に物理の呼び出し数を `(default)`(エミュレータ)のカウンタで
-   数える(web.llm_budget)。
+4. web のレフェリーで、デモの交渉(ケース 3 は mode=attack、ほかは mode=demo)を 1 件作り、判定(judged)まで動かす。架空人物の途中確認は、
+   フィクスチャの生の条件で答える(web.fictional_answerer.FixtureAnswerer)。レフェリーは、本番と同じく、送る前に物理の呼び出し数を
+   `(default)`(エミュレータ)のカウンタで数える(web.llm_budget)。
 5. 結果と診断を表示し、実行の記録を tmp/demo_runs/ に JSONL で残す。--judge なら、DV-15 の判定(下)も行う。エミュレータを止める。
    表示にも記録にも、交渉 ID などの ID と、プロジェクト ID は出さない。
    エージェントへの送信が終わるたびに、標準エラーへ進み具合を出す(本物の Gemini は、全体で数分かかり得る)。
    Ctrl-C・SIGTERM のときは、エミュレータを止めて、すぐ終わる。
+
+リプレイ(§8.4・AC-21。記録の形と検査は scripts/replay_check.py)
+- --record PATH: 実行中に、金庫のイベント列(候補者側・求人側それぞれの見え方)を、レフェリーが金庫を書き換えるたびに読み、読んだ時刻
+  (observed_at。UNIX 秒)をつけて JSONL に書く。時刻は記録する側(このスクリプト)が付ける(金庫のモデルは変えない)。ヘッダの source は
+  live か scripted(--live でなければ scripted)。--runs 1 のときだけ使える。検査(replay_check)に通らない記録(判定に届かなかった実行など)は
+  書かず、終了コードを 1 にする。
+- --replay [PATH]: 記録を検査してから、記録どおりの間隔で(--speed の倍率。既定 1.0)イベントを順に流す。最初に「リプレイ」であることを出す。
+  PATH を省くと --case のケースの fixtures/replays/case{N}.jsonl。PATH と --case を両方渡したら、記録のケースが --case と同じことを確かめる。
+  金庫・agents・エミュレータは使わず、ネットワークにも出ない。本物の Gemini の記録は、--live --record で取り直す。
 
 エージェントへの送信の記録: レフェリーの send_turn の差し込み口を包み、物理の送信 1 回ごとに、役割・呼び出しの種類(計画・決定)・所要時間・結果・
 `usage`(エージェントから受け取る。トークン数)を残す。物理の送信の数は、再試行(429・5xx の分を含む)も 1 回と数える。200 応答の数は、
@@ -36,7 +51,9 @@ DV-15 の判定(--judge。基準は config/params.toml の [agents.cost_targets]
 記録(JSONL)に、モデル ID・設定(思考の量・temperature・max_output_tokens・キャッシュの有無)のハッシュ・単価の版・呼び出しごとのトークン数・
 物理の数・判定の結果を、機械可読で残す。
 
-終了コード: 既定は、合意(agreed)なら 0、それ以外は 1。--judge のときは、すべての実行が DV-15 の基準に合格すれば 0、1 つでも不合格なら 1。
+終了コード: 既定は、ケースの意図どおりに終われば 0、そうでなければ 1(ケース 1=合意(agreed) / ケース 2=合意に届かず「なし」で終わる /
+ケース 3=判定(judged)まで届く)。--judge のときは、すべての実行が DV-15 の基準に合格すれば 0、1 つでも不合格なら 1(「合意に届く」の項目は、
+ケース 1 以外では「ケースの意図どおりに終わる」になる)。
 判定(judged)に届かないまま時間の上限(RUN_TIMEOUT_SECONDS)を過ぎたときも不合格(その時点までの状態を、診断として表示・記録する)。
 
 --live には、ADK と google-genai の標準の環境変数が要る。プロジェクト ID は、コードにも設定ファイルにも書かない。
@@ -68,19 +85,23 @@ import time
 import tomllib
 import traceback
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # 先頭に src(プロジェクトのコード)を足す。tests/ は --scripted の台本のエージェントを読むときだけ足す(scripted_sender)。
+# scripts/ は、記録の形と検査(replay_check)を読むために足す(スクリプトとして動かすときは、すでに入っている)。
 if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import httpx  # noqa: E402
 from google.cloud import firestore  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
 
+import replay_check  # noqa: E402
 from agents.config import DEFAULT_AGENTS_CONFIG  # noqa: E402
 from negotiation_core import Package, Side, TurnInput, Usage  # noqa: E402
 from negotiation_core.log_privacy import mask_ids_in_logs  # noqa: E402
@@ -108,6 +129,8 @@ from web.vault_client import VaultClient  # noqa: E402
 logger = logging.getLogger("run_demo")
 
 Mode = Literal["live", "scripted"]
+# 交渉 ID から、その側の見え方のイベントを金庫から読む口(--scripted の攻撃者が、金庫の答えを見るために使う)。
+ReadEvents = Callable[[str], Awaitable[Sequence[EventViewItem]]]
 
 # 実行の記録(JSONL)を置く場所。tmp/ は .gitignore に入っている。
 RUN_RECORD_DIRECTORY = PROJECT_ROOT / "tmp" / "demo_runs"
@@ -136,14 +159,22 @@ _LIVE_ENVIRONMENT = (
     ("GOOGLE_CLOUD_LOCATION", "global"),
 )
 
-# --scripted の最初の手(7 巡目のシミュレーション・tests/test_fixtures.py の 36 通りの始め方の 1 つ)。(候補者, 求人)。
-# 台本のエージェントがあるのはケース 1 だけ。
-_SCRIPTED_OPENINGS: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {
-    1: (
-        dict(salary=900, remote_days=3, night_duty=0, review_months=6),
-        dict(salary=500, remote_days=0, night_duty=4, review_months=12),
-    )
-}
+# 攻撃のケース(§8.4: ケース 3)。交渉は mode=attack で作り、レフェリーは求人側に攻撃者のエージェントを呼ぶ(§4.1)。
+ATTACK_CASES = frozenset({3})
+# --live の攻撃で、攻撃者の求人エージェントへ毎手番渡す指示(400 文字以内。§8.2)。審査員が自然文で出す指示の代わりの、実演用の固定の文
+# (暫定)。探索線(fixtures/case3.toml のコメント)の上で、年収を 600 万から 50 万ずつ上げて、候補者が受ける最低の年収を探る。
+ATTACKER_INSTRUCTION = (
+    "候補者が受ける最低の年収を探ってください。年収以外の条件は固定し、年収だけを変えた提案を、毎手番 1 つ出してください。"
+    "固定する条件は、リモート週 1 日・当直なし・昇給見直し 6 か月・研修あり・副業可・入職 3 か月以内です。"
+    "最初は年収 600 万、断られるたびに 50 万ずつ上げてください。受け入れられたら、それで終わりです。"
+)
+
+# --scripted の最初の手(7 巡目のシミュレーション・tests/test_fixtures.py の 36 通りの始め方の 1 つ)。
+# 候補者はケース 1〜3、求人はケース 1・2 の最初の提案(どれも、そのケースの本人が受けられる組み合わせ)。
+# ケース 3 の求人は攻撃者で、最初の手を持たない(探索線の上で、年収を二分探索する。tests/scripted_negotiators.py)。
+_SCRIPTED_CASES = (1, 2, 3)
+_SCRIPTED_CANDIDATE_OPENING = dict(salary=900, remote_days=3, night_duty=0, review_months=6)
+_SCRIPTED_EMPLOYER_OPENING = dict(salary=500, remote_days=0, night_duty=4, review_months=12)
 _SCRIPTED_CATEGORICAL = dict(training="available", side_job="allowed", start="within_3_months")
 
 # --scripted の使用量。台本は LLM を呼ばないので、判定の仕組み(費用の計算・思考の平均など)を動かすための、固定の合成値
@@ -383,6 +414,59 @@ class SendRecorder:
             self._on_send(record)
 
 
+# ----------------------------------------------------------------------
+# リプレイの記録(実行中のイベントの観測。§8.4)
+# ----------------------------------------------------------------------
+
+
+class EventObserver:
+    """金庫のイベント列(側ごとの見え方)の新しい分を読み、読んだ時刻(observed_at。UNIX 秒)をつけて集める。
+
+    時刻は、記録する側(このクラス)が付ける。金庫のモデルには時刻を足さない。observe を呼ぶたびに、各側の
+    after_seq 以降だけを読む。時刻は、前に付けた時刻より戻らない(時計が戻っても、単調非減少にする)。
+    """
+
+    def __init__(self, vault: VaultClient, nid: str, clock: Callable[[], float] = time.time) -> None:
+        self._vault = vault
+        self._nid = nid
+        self._clock = clock
+        self._last_seq: dict[Side, int] = {"candidate": 0, "employer": 0}
+        self._last_time = 0.0
+        self.events: list[replay_check.ReplayEvent] = []
+
+    async def observe(self, first: Side = "candidate") -> None:
+        """新しいイベントを読む。同じ回に読んだ双方のイベントは同じ時刻で、first の側を先に並べる(書き込みをした側が先)。"""
+        self._last_time = max(self._last_time, self._clock())
+        for side in (first, "employer" if first == "candidate" else "candidate"):
+            for item in await self._vault.get_events(self._nid, side, after_seq=self._last_seq[side]):
+                self.events.append(replay_check.ReplayEvent(side, self._last_time, item))
+                self._last_seq[side] = item.seq
+
+
+class ObservingVault:
+    """レフェリーに渡す金庫クライアントの包み。金庫を書き換える操作(手・途中確認の回答・費用の停止など)が成功した直後に、
+    observer.observe を呼ぶ。読み出しは素通し。書き換えのたびに読むので、イベントは起きた順に並ぶ。"""
+
+    _WRITES = frozenset({"post_move", "post_principal_answer", "stop_cost_limit", "control", "expire"})
+
+    def __init__(self, inner: VaultClient, observer: EventObserver) -> None:
+        self._inner = inner
+        self._observer = observer
+
+    def __getattr__(self, name: str):
+        attribute = getattr(self._inner, name)
+        if name not in self._WRITES:
+            return attribute
+
+        async def write_then_observe(*args, **kwargs):
+            result = await attribute(*args, **kwargs)
+            request = args[1] if len(args) > 1 else kwargs.get("request")  # 手と回答は side を持つ。書いた側を先に並べる
+            await self._observer.observe(getattr(request, "side", "candidate"))
+            return result
+
+        return write_then_observe
+
+
 class RunTimeout(BaseException):
     """時間の上限を過ぎた(run_demo が受け止める)。
 
@@ -403,20 +487,32 @@ def with_deadline(send_turn: SendTurn, deadline: float) -> SendTurn:
     return send
 
 
-def scripted_sender(case: int) -> SendTurn:
+def scripted_sender(case: int, read_candidate_events: ReadEvents | None = None) -> SendTurn:
     """--scripted の、Gemini の代わりのエージェント(ネットワークに出ない。agents を通さない)。
 
     tests/scripted_negotiators.py の台本のエージェント(指示文どおりの探し方。両側とも hybrid)。Gemini と同じく TurnInput だけを見て、
     計画(phase=plan)なら Plan、決定(phase=decide)なら Move を返す。使用量は固定の合成値(SCRIPTED_USAGE)。
+
+    攻撃のケース(ATTACK_CASES)は、求人側が攻撃者の台本(探索線の上で年収を二分探索する。最悪の場合の攻撃者として、候補者側の金庫の答えを
+    見る)で、候補者は、受けられる提案が来ても受けずに対案を出す(accepts=False)ので、1 つの交渉で二分探索が最後まで進む。
+    read_candidate_events(交渉 ID → 候補者側のイベント)がそのために要る。
     """
     if str(PROJECT_ROOT / "tests") not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT / "tests"))
-    from scripted_negotiators import Negotiator, ScriptedNegotiators, Strategy
+    from scripted_negotiators import Negotiator, ScriptedAttackNegotiators, ScriptedAttacker, ScriptedNegotiators, Strategy
 
-    candidate_opening, employer_opening = _SCRIPTED_OPENINGS[case]
+    candidate_opening = Package(**_SCRIPTED_CANDIDATE_OPENING, **_SCRIPTED_CATEGORICAL)
+    if case in ATTACK_CASES:
+        if read_candidate_events is None:
+            raise ValueError("an attack case needs read_candidate_events")
+        return ScriptedAttackNegotiators(
+            Negotiator(Strategy("hybrid", accepts=False), candidate_opening),
+            ScriptedAttacker(read_candidate_events),
+            usage=SCRIPTED_USAGE,
+        )
     return ScriptedNegotiators(
-        Negotiator(Strategy("hybrid"), Package(**candidate_opening, **_SCRIPTED_CATEGORICAL)),
-        Negotiator(Strategy("hybrid"), Package(**employer_opening, **_SCRIPTED_CATEGORICAL)),
+        Negotiator(Strategy("hybrid"), candidate_opening),
+        Negotiator(Strategy("hybrid"), Package(**_SCRIPTED_EMPLOYER_OPENING, **_SCRIPTED_CATEGORICAL)),
         usage=SCRIPTED_USAGE,
     )
 
@@ -474,6 +570,8 @@ class DemoRun:
     elapsed_seconds: float
     timed_out: bool
     timeout_seconds: float
+    # 実行中に観測したイベント(読んだ時刻つき。観測した順)。--record のときだけ集める(リプレイの記録。§8.4)
+    observed: list[replay_check.ReplayEvent] = dataclasses.field(default_factory=list)
 
     def invalid_moves_by_reason(self) -> collections.Counter:
         """無効手の数(理由ごと。両側の合計)。"""
@@ -533,13 +631,17 @@ async def run_demo(
     default_db: firestore.Client,
     timeout_seconds: float = RUN_TIMEOUT_SECONDS,
     on_send: Callable[[SendRecord], None] | None = None,
+    record_events: bool = False,
 ) -> DemoRun:
     """デモの交渉を 1 件作り、レフェリーで判定(judged)まで動かす。vault_db・default_db は、エミュレータの vault-db・(default)。
 
     金庫の app は、同じプロセスの中で ASGI のままつなぐ(サービス間の認証は使わない)。--live は、agents の app も同じようにつなぐ。
     判定まで届かなかったとき(時間切れ)も、その時点の状態を診断の材料として返す。
+    ケース 3(ATTACK_CASES)の交渉は mode=attack で作り、求人側のエージェントは攻撃者になる。
+    record_events=True なら、レフェリーが金庫を書き換えるたびにイベントを読み、読んだ時刻つきで DemoRun.observed に残す(--record)。
     """
     started_at = dt.datetime.now(dt.timezone.utc)
+    negotiation_mode = "attack" if fixture.case in ATTACK_CASES else "demo"
     put_fixture_templates(vault_db, fixture)
     clock = SystemClock()
     store = VaultStore(db=vault_db, clock=clock, config=DEFAULT_VAULT_CONFIG)
@@ -549,7 +651,7 @@ async def run_demo(
         created = await vault.create_negotiation(
             CreateNegotiationRequest(
                 request_id=uuid.uuid4().hex,  # 毎回新しい乱数(同じ request_id は、すでに作った交渉を返すため)
-                mode="demo",
+                mode=negotiation_mode,
                 candidate=CandidateParticipantRequest(is_fictional=True, template_id=fixture.candidate.template_id),
                 employer=EmployerParticipantRequest(template_id=fixture.employer.template_id),
             )
@@ -567,16 +669,18 @@ async def run_demo(
             inner: SendTurn = bind_agents_client(_AGENTS_BASE_URL)
             agents_context = agents_over_asgi(build_agents_app())
         else:
-            inner = scripted_sender(fixture.case)
+            inner = scripted_sender(fixture.case, lambda attack_nid: vault.get_events(attack_nid, "candidate"))
             agents_context = contextlib.nullcontext()
         recorder = SendRecorder(inner, on_send)
+        observer = EventObserver(vault, nid) if record_events else None
         deps = RefereeDeps(
-            vault=vault,
+            vault=ObservingVault(vault, observer) if observer is not None else vault,
             send_turn=with_deadline(recorder, time.monotonic() + timeout_seconds),
             answerer=FixtureAnswerer(fixture),
+            attacker_instruction=(lambda _nid: ATTACKER_INSTRUCTION) if negotiation_mode == "attack" else None,
             llm_budget=budget,
         )
-        referee = Referee(NegotiationContext(nid=nid, mode="demo", candidate_principal_id=None), deps)
+        referee = Referee(NegotiationContext(nid=nid, mode=negotiation_mode, candidate_principal_id=None), deps)
         started = time.perf_counter()
         timed_out = False
         with agents_context:
@@ -585,6 +689,8 @@ async def run_demo(
             except RunTimeout:
                 timed_out = True
         elapsed = time.perf_counter() - started
+        if observer is not None:
+            await observer.observe()  # 書き換えの直後の読みで、取りこぼしたものがないように、最後にもう一度読む
         events = {side: await vault.get_events(nid, side) for side in _SIDE_LABELS}
         referee_counted = await budget.negotiation_count(nid)
 
@@ -609,6 +715,7 @@ async def run_demo(
         elapsed_seconds=elapsed,
         timed_out=timed_out,
         timeout_seconds=timeout_seconds,
+        observed=observer.events if observer is not None else [],
     )
 
 
@@ -654,12 +761,34 @@ def run_cost_usd(run: DemoRun, targets: CostTargets) -> float:
     return sum(usage_cost_usd(call.usage, targets) for call in run.calls if call.usage is not None)
 
 
+# ケースごとの「意図どおりの終わり方」(§8.4): (判定の項目名, 意図どおりのときの表示, そうでないときの表示)。
+_INTENDED_ENDS: dict[int, tuple[str, str, str]] = {
+    1: ("agreed", "合意(agreed)", "合意に届かなかった"),
+    2: ("as_intended", "合意に届かず「なし」で終わった(意図どおり)", "意図と違う終わり方(合意した、または判定に届かなかった)"),
+    3: ("as_intended", "攻撃の交渉が判定(judged)まで届いた", "攻撃の交渉が判定(judged)に届かなかった"),
+}
+
+
+def ended_as_intended(run: DemoRun) -> bool:
+    """実行が、ケースの意図どおりに終わったか(§8.4)。時間切れや、判定(judged)に届かなかった実行は、どのケースでも意図どおりではない。
+
+    ケース 1=合意(agreed) / ケース 2=合意に届かず、結果が「なし」 / ケース 3(攻撃)=判定まで届いた(合意でも、攻撃者が終えてもよい)。
+    """
+    if run.timed_out or run.status != "judged":
+        return False
+    if run.case == 2:
+        return run.end_reason != "agreed" and run.result is not None and run.result.likelihood == "none"
+    if run.case in ATTACK_CASES:
+        return True
+    return run.end_reason == "agreed"
+
+
 def judge(run: DemoRun, targets: CostTargets) -> Judgement:
     """DV-15 の判定(モジュールの docstring)。実測の値だけで決め、手で直さない。"""
     checks: list[Check] = []
 
-    agreed = run.end_reason == "agreed" and not run.timed_out
-    checks.append(Check("agreed", agreed, f"金庫の終了理由: {run.end_reason or '(終了していない)'}"))
+    name = _INTENDED_ENDS.get(run.case, _INTENDED_ENDS[1])[0]
+    checks.append(Check(name, ended_as_intended(run), f"金庫の終了理由: {run.end_reason or '(終了していない)'}"))
 
     successful, moves = run.successful_calls, run.moves_made
     limit = min(moves * targets.max_calls_per_move, targets.max_successful_calls)
@@ -787,9 +916,10 @@ def format_report(run: DemoRun, targets: CostTargets | None = None) -> str:
     by_role = collections.Counter(call.role for call in calls)
     by_phase = collections.Counter(call.phase for call in calls)
     counted = "数えていない" if run.referee_counted_calls is None else f"{run.referee_counted_calls} 回"
+    employer_sends = by_role["employer"] + by_role["attacker"]  # 攻撃の交渉の求人側は、攻撃者のエージェント
     lines += ["", "=== エージェントへの送信 ==="]
     lines.append(
-        f"物理の送信 計 {len(calls)} 回(候補者 {by_role['candidate']}・求人 {by_role['employer']}。"
+        f"物理の送信 計 {len(calls)} 回(候補者 {by_role['candidate']}・求人 {employer_sends}。"
         f"計画 {by_phase['plan']}・決定 {by_phase['decide']})。200 応答(`usage` つき) {run.successful_calls} 回・"
         f"レフェリーが数えた物理の数 {counted}"
     )
@@ -924,21 +1054,103 @@ def write_record(
 # ----------------------------------------------------------------------
 
 
+def record_replay(run: DemoRun, path: Path) -> list[str]:
+    """リプレイの記録(§8.4。形は scripts/replay_check.py)を path に書く。
+
+    実行中に観測したイベントが、最後に金庫から読んだものと同じことと、記録が検査(replay_check)に通ることを確かめてから書く。
+    通らないとき(判定に届かなかった実行など)は、何も書かずに、問題の一覧を返す(書けたら空)。
+    """
+    problems = [
+        f"実行中に観測した{label}のイベントが、最後に金庫から読んだものと食い違っている"
+        for side, label in _SIDE_LABELS.items()
+        if [event.item for event in run.observed if event.side == side] != run.events[side]
+    ]
+    text = replay_check.dump_replay(run.case, run.mode, run.started_at.isoformat(), run.observed)
+    problems += replay_check.parse_replay(text)[1]
+    if problems:
+        return problems
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return []
+
+
+def play_replay(
+    path: Path, speed: float, sleep: Callable[[float], None] = time.sleep, *, expected_case: int | None = None
+) -> int:
+    """リプレイの記録を検査してから、記録どおりの間隔(speed 倍)で、イベントを順に標準出力へ流す(§8.4・AC-09〜11)。
+
+    金庫・agents・エミュレータは使わず、ネットワークにも出ない。出力は live の実行の報告と同じ形(側ごとのイベントの行と、結果)で、
+    最初に「リプレイ」であることを出す。記録が不正なら(expected_case を渡したときは、記録のケースが違っても)、何も流さずに、
+    問題を標準エラーに出して 1 を返す。
+    """
+    replay, problems = replay_check.check_file(path)
+    if replay is not None and expected_case is not None and replay.case != expected_case:
+        replay, problems = None, [f"記録はケース {replay.case} で、--case {expected_case} と違います"]
+    if replay is None:
+        print(f"リプレイを始められません: {replay_check.display_path(path)}", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+    print(f"run_demo: リプレイ(記録の再生。ケース {replay.case} / 記録の出所: {replay.source} / 記録日時: {replay.recorded_at})")
+    print(f"倍率: x{speed:g}(記録どおりの間隔が x1)。金庫・agents・Gemini は呼ばない", flush=True)
+    print("\n=== リプレイ: 双方の手の並び(側ごとの見え方) ===")
+    origin = replay.events[0].observed_at
+    for event in replay_check.iter_replay(replay, speed, sleep):
+        tag = f"[{_SIDE_LABELS[event.side]}]" + ("  " if event.side == "employer" else "")  # 全角の幅をそろえる
+        print(f"  +{event.observed_at - origin:6.1f} s {tag} {_format_event(event.item)}", flush=True)
+    result = replay.events[-1].item.result  # 検査が、最後のイベントが result つきの最終結果であることを確かめている
+    print("\n=== 結果 ===")
+    print(f"見込み: {_LIKELIHOOD_LABELS[result.likelihood]}({result.likelihood})")
+    print(f"組み合わせ: {format_package(result.package)}")
+    return 0
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ケース別のデモを、金庫・agents・レフェリーをつないで通し、DV-15 の判定を行う。")
-    parser.add_argument("--case", type=int, required=True, help="ケース番号(fixtures/case{N}.toml)")
-    group = parser.add_mutually_exclusive_group(required=True)
+    parser = argparse.ArgumentParser(
+        description="ケース別のデモを、金庫・agents・レフェリーをつないで通し、DV-15 の判定を行う。"
+        "実行の記録をリプレイとして書き(--record)、流す(--replay)こともできる。"
+    )
+    parser.add_argument(
+        "--case", type=int, help="ケース番号(fixtures/case{N}.toml)。--replay PATH のときは不要(記録のヘッダが持つ)"
+    )
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--live", action="store_true", help="本物の Gemini(Vertex AI)で動かす。環境変数が要る")
     group.add_argument(
-        "--scripted", action="store_true", help="Gemini を呼ばず、台本のエージェントで動かす(このスクリプト自体の確かめ)"
+        "--scripted", action="store_true", help="Gemini を呼ばず、台本のエージェントで動かす(既定。このスクリプト自体の確かめ)"
     )
     parser.add_argument("--runs", type=int, default=1, help="続けて動かす回数(既定 1)。実行ごとに、新しい交渉・新しいデータベースで動かす")
     parser.add_argument(
         "--judge", action="store_true", help="DV-15 の基準(config/params.toml の [agents.cost_targets])で、実行ごとに判定する"
     )
+    parser.add_argument(
+        "--record", type=Path, metavar="PATH", help="実行中のイベントを、リプレイの記録(JSONL)として PATH に書く。--runs 1 のときだけ"
+    )
+    parser.add_argument(
+        "--replay",
+        nargs="?",
+        const=True,
+        type=Path,
+        metavar="PATH",
+        help="リプレイの記録を、記録どおりの間隔で流す(金庫・agents は使わない)。PATH を省くと、--case のケースの fixtures/replays/case{N}.jsonl",
+    )
+    parser.add_argument("--speed", type=float, help="--replay の倍率(既定 1.0。大きいほど速い)")
     args = parser.parse_args(argv)
     if args.runs < 1:
         parser.error("--runs は 1 以上にしてください")
+    if args.speed is not None and not args.speed > 0:
+        parser.error("--speed は 0 より大きい値にしてください")
+    if args.replay is not None:
+        if args.live or args.scripted or args.judge or args.record is not None or args.runs != 1:
+            parser.error("--replay は記録を流すだけで、--live・--scripted・--runs・--judge・--record とは一緒に使えません")
+        if args.replay is True and args.case is None:
+            parser.error("--replay は、記録の PATH か --case(そのケースの fixtures/replays/case{N}.jsonl)が要ります")
+    else:
+        if args.case is None:
+            parser.error("--case が要ります(--replay PATH のときは不要です)")
+        if args.speed is not None:
+            parser.error("--speed は --replay のときだけ使えます")
+        if args.record is not None and args.runs != 1:
+            parser.error("--record は --runs 1 のときだけ使えます(記録は 1 回の実行ごとに 1 ファイルです)")
     return args
 
 
@@ -948,6 +1160,9 @@ def _mask_ids(text: str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.replay is not None:
+        path = replay_check.REPLAYS_DIRECTORY / f"case{args.case}.jsonl" if args.replay is True else args.replay
+        return play_replay(path, 1.0 if args.speed is None else args.speed, expected_case=args.case)
     mode: Mode = "live" if args.live else "scripted"
     model, location = describe_backend(mode, os.environ)
     print(f"run_demo: ケース {args.case} / {mode}")
@@ -964,8 +1179,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except FileNotFoundError:
         print(f"エラー: fixtures/case{args.case}.toml がありません。", file=sys.stderr)
         return 1
-    if mode == "scripted" and args.case not in _SCRIPTED_OPENINGS:
-        print(f"エラー: ケース {args.case} の台本のエージェントはありません(--scripted はケース 1 だけ)。", file=sys.stderr)
+    if mode == "scripted" and args.case not in _SCRIPTED_CASES:
+        cases = "・".join(str(case) for case in _SCRIPTED_CASES)
+        print(f"エラー: ケース {args.case} の台本のエージェントはありません(--scripted はケース {cases} だけ)。", file=sys.stderr)
         return 1
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -973,6 +1189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     targets = load_cost_targets()
     outcomes: list[tuple[DemoRun, Judgement | None]] = []
+    record_failed = False
     try:
         with firestore_emulator() as host:
             print(f"Firestore エミュレータ: 起動した({host})", flush=True)
@@ -985,7 +1202,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 try:
                     run = asyncio.run(
                         run_demo(
-                            fixture=fixture, mode=mode, vault_db=vault_db, default_db=default_db, on_send=_print_progress
+                            fixture=fixture,
+                            mode=mode,
+                            vault_db=vault_db,
+                            default_db=default_db,
+                            on_send=_print_progress,
+                            record_events=args.record is not None,
                         )
                     )
                 finally:
@@ -998,16 +1220,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 outcomes.append((run, judgement))
                 try:
                     path = write_record(run, RUN_RECORD_DIRECTORY, targets=targets, judgement=judgement)
-                    print(f"\n記録: {path.relative_to(PROJECT_ROOT) if path.is_relative_to(PROJECT_ROOT) else path}")
+                    print(f"\n記録: {replay_check.display_path(path)}")
                 except OSError as exc:  # 記録を書けなくても、終了コードは交渉の結果で決める
                     print(f"\n記録を書けなかった: {type(exc).__name__}", file=sys.stderr)
+                if args.record is not None:
+                    try:
+                        replay_problems = record_replay(run, args.record)
+                    except OSError as exc:
+                        replay_problems = [f"書けなかった({type(exc).__name__})"]
+                    if replay_problems:
+                        record_failed = True
+                        print("リプレイの記録を書かなかった:", file=sys.stderr)
+                        for problem in replay_problems:
+                            print(f"  - {problem}", file=sys.stderr)
+                    else:
+                        print(f"リプレイの記録: {replay_check.display_path(args.record)}(イベント {len(run.observed)} 件)")
         print("Firestore エミュレータ: 止めた")
     except Exception as exc:
         print(f"エラー: {type(exc).__name__}", file=sys.stderr)
         print(_mask_ids(traceback.format_exc()), file=sys.stderr)
         return 1
 
-    return _print_verdict(outcomes, judged=args.judge)
+    code = _print_verdict(outcomes, judged=args.judge)
+    if record_failed and code == 0:  # 記録を頼まれて書けなかったのは、失敗(記録を作るコマンドが、黙って成功しないように)
+        print("リプレイの記録を書けなかったので、終了コード 1")
+        return 1
+    return code
 
 
 def _print_verdict(outcomes: list[tuple[DemoRun, Judgement | None]], *, judged: bool) -> int:
@@ -1018,12 +1256,13 @@ def _print_verdict(outcomes: list[tuple[DemoRun, Judgement | None]], *, judged: 
         code = 0 if passed == total else 1
         print(f"\nDV-15 の判定: {total} 回中 {passed} 回が合格 → 終了コード {code}")
         return code
-    agreed = sum(1 for run, _ in outcomes if run.end_reason == "agreed")
-    code = 0 if agreed == total else 1
+    intended = sum(1 for run, _ in outcomes if ended_as_intended(run))
+    code = 0 if intended == total else 1
+    _, intended_label, missed_label = _INTENDED_ENDS.get(outcomes[0][0].case, _INTENDED_ENDS[1])
     if total == 1:
-        print(f"判定: {'合意(agreed)' if agreed else '合意に届かなかった'} → 終了コード {code}")
+        print(f"判定: {intended_label if intended else missed_label} → 終了コード {code}")
     else:
-        print(f"判定: {total} 回中 {agreed} 回が合意(agreed) → 終了コード {code}")
+        print(f"判定: {total} 回中 {intended} 回が{intended_label} → 終了コード {code}")
     return code
 
 

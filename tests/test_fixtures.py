@@ -16,15 +16,29 @@ DV-14(名前に case1_reachability を含むテスト)
   上限は config/params.toml の値のまま(側ごとに手数 6・評価 17・途中確認 1。v14)。
 - 合否に入れる探し方(1・2・5 行目)は、それぞれ 36 通り中 34 通り以上が合意(judged・agreed)に届くこと。
   記録だけの探し方(3・4・6 行目と、5 行目の向きを入れ替えたもの)の結果は、表にして出力する(合否に入れない)。
+
+ケース 2(AC-10。名前に case2 を含むテスト)
+- 全 18,000 通りの総当たりで、両者が受けられる組み合わせが 0 件(丸め済みポリシーでも、生の条件でも)。候補者が受ける最低の年収が、
+  求人が受ける最高の年収を上回るので、年収以外の軸をどう動かしても合意できない。
+- 台本のエージェント(7 つの探し方 × 4 通りの始め方)で始めても、合意に至らず、手数か評価の上限で止まって(judged)、結果は双方に「なし」。
+
+ケース 3(AC-09〜11・AC-12。§8.2・§8.3・§8.4。名前に case3 を含むテスト)
+- 候補者は demo-candidate-1(受けられる集合はケース 1 の候補者と同程度の広さ。生の境目はグリッド上にない値)。求人は何でも受ける。
+- 探索線(年収以外の軸を固定した線。tests/scripted_negotiators.py の SEARCH_LINE)の上で、受ける境目と受けない境目が隣り合うマスにある
+  (「本人確認が必要」の隙間がない)。台本の攻撃者が年収を二分探索しても、評価の上限(17 回)の中で、区間(estimate_interval)は
+  グリッド 1 マス(600 万より上、650 万以下)で止まり、候補者の生の境目(620 万)までは分からない。グリッドの全点を問い合わせても同じ。
+- estimate_interval の単体の確かめ(§8.3 の計算)。
 """
 
 import itertools
+import math
 from collections import Counter
 from dataclasses import dataclass
 
 import pytest
 
 from negotiation_core import (
+    AXES,
     Package,
     Verdict,
     contained_in,
@@ -32,10 +46,29 @@ from negotiation_core import (
     iter_all_packages,
     satisfies,
 )
+from negotiation_core.estimate_interval import estimate_interval
 
-from scripted_negotiators import Negotiator, ScriptedNegotiators, Strategy
+from scripted_negotiators import (
+    SALARY_GRID,
+    SEARCH_LINE,
+    Negotiator,
+    ScriptedAttackNegotiators,
+    ScriptedAttacker,
+    ScriptedNegotiators,
+    Strategy,
+    is_on_search_line,
+    next_probe_salary,
+    probe_package,
+)
 from vault.config import DEFAULT_VAULT_CONFIG
-from vault.fixtures import FIXTURES_DIRECTORY, CaseFixture, load_case_fixture, put_fixture_templates
+from vault.fixtures import (
+    FIXTURES_DIRECTORY,
+    CaseFixture,
+    RawConditions,
+    build_rounded_policy,
+    load_case_fixture,
+    put_fixture_templates,
+)
 from vault.models import EmployerRule
 from vault.templates import get_template, put_template
 from vault_helpers import (
@@ -432,3 +465,383 @@ async def test_case1_reachability_of_scripted_negotiators_within_the_limits(stor
     for search_type in SEARCH_TYPES:
         if search_type.gates:
             assert results[search_type.row]["agreed"] >= REQUIRED_AGREEMENTS, report
+
+
+# ----------------------------------------------------------------------
+# ケース 2: 両者が受けられる組み合わせがない(AC-10)
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def case2() -> CaseFixture:
+    return load_case_fixture(2)
+
+
+def test_case2_fixture_has_every_part_of_the_format(case2):
+    # §8.4: ケース 1 と同じ形(候補者: 生の条件・丸め済みポリシー・属性帯・職務要約・連絡先 / 求人: 企業名・公開求人・生の裁量・
+    # 丸め済みポリシー・自動応答の設定)。
+    candidate, employer = case2.candidate, case2.employer
+    assert candidate.raw.bounds and candidate.policy.accept_anchors and candidate.policy.reject_anchors
+    assert candidate.attribute_bands.job_category == "it_web"
+    assert candidate.job_summary and candidate.contact.name and candidate.contact.email.endswith("@example.com")
+    assert employer.company_name and employer.public_job.title
+    assert employer.auto_response.meet is True and employer.auto_response.approve is True
+    (rule,) = employer.rules
+    assert rule.when == {} and rule.raw.bounds and rule.policy.accept_anchors and rule.policy.reject_anchors
+    assert employer.rule_for(candidate.attribute_bands) is rule
+
+
+def test_case2_has_no_combination_that_both_sides_accept(case2):
+    # AC-10: 全 18,000 通りの総当たりで、両者が受けられる組み合わせが 0 件(丸め済みポリシーでも、生の条件でも)。
+    candidate_policy, employer_rule = case2.candidate.policy, case2.employer.rules[0]
+    assert not [
+        p
+        for p in ALL_PACKAGES
+        if evaluate(candidate_policy, p) is Verdict.ACCEPTABLE and evaluate(employer_rule.policy, p) is Verdict.ACCEPTABLE
+    ]
+    assert not [p for p in ALL_PACKAGES if case2.candidate.raw.accepts(p) and employer_rule.raw.accepts(p)]
+
+
+def test_case2_candidate_asks_more_than_the_employer_pays_whatever_the_other_axes_are(case2):
+    # 候補者が受ける最低の年収(750 万)が、求人が受ける最高の年収(700 万)を上回る。年収以外の軸(リモート・当直・昇給見直し)を
+    # どう動かしても、この差は埋まらない。いちばん近い組み合わせでも、年収で 1 マス(50 万)足りない。
+    lowest = min(p.salary for p in ALL_PACKAGES if evaluate(case2.candidate.policy, p) is Verdict.ACCEPTABLE)
+    highest = max(p.salary for p in ALL_PACKAGES if evaluate(case2.employer.rules[0].policy, p) is Verdict.ACCEPTABLE)
+    assert (lowest, highest) == (750, 700)
+    assert lowest - highest == SALARY_GRID[1] - SALARY_GRID[0]
+
+
+def test_case2_both_sides_are_real_people_with_no_gap(case2):
+    # どちらも、何も受けない・何でも受ける、という中身のない人物ではない。判定が決まらない組み合わせもない(途中確認は起きない)。
+    for policy in (case2.candidate.policy, case2.employer.rules[0].policy):
+        verdicts = Counter(evaluate(policy, p) for p in ALL_PACKAGES)
+        assert verdicts[Verdict.NEEDS_CONFIRMATION] == 0
+        assert verdicts[Verdict.ACCEPTABLE] >= 1000 and verdicts[Verdict.NOT_ACCEPTABLE] >= 1000
+
+
+@pytest.mark.parametrize("case", [2, 3])
+def test_case2_and_case3_rounded_policies_agree_with_the_raw_conditions(case):
+    # 丸め済みポリシー(金庫が見るもの)は、生の条件と同じ判定を、全 18,000 通りで返す(§2.5)。ケース 3 の生の境目は、グリッド上にない値
+    # (680・620・570 万)を含むが、グリッド上の組み合わせの判定は変わらない。矛盾も、判定が決まらない組み合わせもない。
+    fixture = load_case_fixture(case)
+    rule = fixture.employer.rules[0]
+    for policy, raw in ((fixture.candidate.policy, fixture.candidate.raw), (rule.policy, rule.raw)):
+        for package in ALL_PACKAGES:
+            accepted = any(satisfies(package, a, policy.side) for a in policy.accept_anchors)
+            rejected = any(contained_in(package, a, policy.side) for a in policy.reject_anchors)
+            assert accepted != rejected
+            assert accepted == raw.accepts(package)
+
+
+@pytest.mark.anyio
+async def test_case2_scripted_negotiators_never_agree_and_stop_within_the_limits(store, web_env, case2, capsys):
+    # AC-10: 台本のエージェント(7 つの探し方。確かめずに出す型を含む)が、4 通りの始め方で交渉しても、合意に至らない。手数か評価の
+    # 上限で止まり(judged)、結果は双方に「なし」だけ。上限(側ごとに手数 6・評価 17・途中確認 1)の中で終わる。
+    put_fixture_templates(store._db, case2)
+    limits = DEFAULT_VAULT_CONFIG.limits
+    starts = [
+        (
+            _opening(salary=candidate_salary, remote_days=3, night_duty=0, review_months=6),
+            _opening(salary=employer_salary, remote_days=0, night_duty=4, review_months=12),
+        )
+        for candidate_salary, employer_salary in itertools.product((900, 1000), (400, 500))
+    ]
+    ends: Counter = Counter()
+    for search_type in SEARCH_TYPES:
+        for candidate_opening, employer_opening in starts:
+            document = await negotiate_to_the_end(
+                web_env,
+                store,
+                case2,
+                Negotiator(search_type.candidate, candidate_opening),
+                Negotiator(search_type.employer, employer_opening),
+            )
+            assert document["status"] == "judged"
+            assert document["end_reason"] in ("stopped_budget", "stopped_invalid")  # 手数か評価の上限(合意でも取消でもない)
+            assert document["result"] == {"likelihood": "none", "package": None}
+            for counters in document["counters"].values():
+                assert counters["moves_used"] <= limits.moves_budget_per_side
+                assert counters["evaluations_used"] <= limits.evaluation_budget_per_side
+                assert counters["principal_checks_used"] <= limits.principal_checks_per_side
+            ends[document["end_reason"]] += 1
+    with capsys.disabled():
+        print(f"\nケース 2 の到達(台本のエージェント。{sum(ends.values())} 通り): 合意 0 / " + " / ".join(f"{k} {v}" for k, v in sorted(ends.items())))
+
+
+# ----------------------------------------------------------------------
+# ケース 3: 攻撃。探索線の性質(§8.3・§8.4)
+# ----------------------------------------------------------------------
+
+_SEARCH_COLUMN = (SEARCH_LINE["remote_days"], SEARCH_LINE["night_duty"], SEARCH_LINE["review_months"])
+ACC, NOT, NC = Verdict.ACCEPTABLE, Verdict.NOT_ACCEPTABLE, Verdict.NEEDS_CONFIRMATION
+
+
+@pytest.fixture(scope="module")
+def case3() -> CaseFixture:
+    return load_case_fixture(3)
+
+
+def test_the_three_cases_use_different_template_ids_and_case3_uses_the_attack_candidate():
+    fixtures = [load_case_fixture(case) for case in (1, 2, 3)]
+    for ids in (
+        [f.candidate.template_id for f in fixtures],
+        [f.employer.template_id for f in fixtures],
+        [f.employer.company_id for f in fixtures],
+        [f.employer.job_id for f in fixtures],
+    ):
+        assert len(set(ids)) == 3
+    assert fixtures[2].candidate.template_id == "demo-candidate-1"  # §8.2: 攻撃モードの相手のテンプレート
+
+
+@pytest.mark.parametrize(("case", "mode"), [(2, "demo"), (3, "attack")])
+def test_case2_and_case3_templates_are_put_into_the_vault_and_copied_into_a_negotiation(store, case, mode):
+    # 金庫のテンプレート(§3.7)に置け、読み戻せる。交渉(ケース 2 は demo、ケース 3 は attack)の作成時に、交渉用コピーが写される。
+    fixture = load_case_fixture(case)
+    put_fixture_templates(store._db, fixture)
+    put_fixture_templates(store._db, fixture)  # 置き直しても同じ
+    candidate_template, employer_template = fixture.templates()
+    assert get_template(store._db, fixture.candidate.template_id) == candidate_template
+    assert get_template(store._db, fixture.employer.template_id) == employer_template
+
+    created = store.create_negotiation(
+        demo_create_request(fixture.candidate.template_id, fixture.employer.template_id, mode=mode)
+    )
+    assert created.status == "created"
+    document = store._negotiation_ref(created.nid).get().to_dict()
+    assert document["mode"] == mode
+    assert document["participants"]["employer"]["job_id"] == fixture.employer.job_id
+    assert document["participants"]["candidate"]["attribute_bands"] == fixture.candidate.attribute_bands.model_dump()
+    copy_candidate, copy_employer = document["snapshots"]["candidate"], document["snapshots"]["employer"]
+    assert len(copy_candidate["accept_anchors"]) == len(fixture.candidate.policy.accept_anchors)
+    assert len(copy_candidate["reject_anchors"]) == len(fixture.candidate.policy.reject_anchors)
+    assert len(copy_employer["accept_anchors"]) == len(fixture.employer.rules[0].policy.accept_anchors)
+    assert len(copy_employer["reject_anchors"]) == len(fixture.employer.rules[0].policy.reject_anchors)
+
+
+def test_case3_fixture_has_every_part_of_the_format(case3):
+    candidate, employer = case3.candidate, case3.employer
+    assert candidate.raw.bounds and candidate.policy.accept_anchors and candidate.policy.reject_anchors
+    assert candidate.attribute_bands.job_category == "it_web"
+    assert candidate.job_summary and candidate.contact.name and candidate.contact.email.endswith("@example.com")
+    assert employer.company_name and employer.public_job.title and employer.public_job.confidential is False
+    assert (employer.auto_response.meet, employer.auto_response.approve) == (False, False)  # 求人は審査員が操作する
+    (rule,) = employer.rules
+    assert rule.when == {} and rule.raw.bounds
+    assert employer.rule_for(candidate.attribute_bands) is rule
+
+
+def test_case3_employer_accepts_every_combination(case3):
+    # §8.2: 攻撃モード用の求人ポリシーは「何でも受ける」。攻撃者が自由に提案を探れるようにするため。
+    rule = case3.employer.rules[0]
+    assert all(evaluate(rule.policy, p) is Verdict.ACCEPTABLE for p in ALL_PACKAGES)
+    assert all(rule.raw.accepts(p) for p in ALL_PACKAGES)
+
+
+def test_case3_candidate_accepts_as_wide_a_set_as_case1s_candidate(case1, case3):
+    # 「受けられる集合は ケース 1 と同程度の広さ」: ケース 1 の候補者(18,000 通りのうち 5,328 通り)と、1 割以内で同じ。
+    # 攻撃用の求人は何でも受けるので、両者が受けられる広さ(§3.6)は、候補者が受けられる広さと等しい。
+    def accepted(policy) -> int:
+        return sum(evaluate(policy, p) is Verdict.ACCEPTABLE for p in ALL_PACKAGES)
+
+    wide1, wide3 = accepted(case1.candidate.policy), accepted(case3.candidate.policy)
+    assert wide1 == 5328 and abs(wide3 - wide1) <= wide1 * 0.1
+    assert sum(1 for p in ALL_PACKAGES if case3.candidate.raw.accepts(p)) == wide3  # 生の条件でも同じ
+
+
+def test_case3_candidate_keeps_a_raw_boundary_that_is_not_on_the_grid(case3):
+    # 丸め(§2.5)が隠すもの: 探索線の上の生の境目は 620 万。グリッド上にない値で、金庫は 600 万と 650 万の間までしか答えない。
+    raw_boundary = case3.candidate.raw.bounds[_SEARCH_COLUMN]
+    assert raw_boundary == 620 and raw_boundary not in SALARY_GRID
+
+
+def test_case3_candidate_leaves_no_gap_of_needs_confirmation_anywhere(case3):
+    # どの線で探しても、受ける境目と受けない境目が隣り合う(「本人確認が必要」の隙間があると、メーターが複数マスで止まる。§8.3)。
+    assert all(evaluate(case3.candidate.policy, p) is not Verdict.NEEDS_CONFIRMATION for p in ALL_PACKAGES)
+
+
+def test_case3_search_line_has_adjacent_accept_and_reject_cells(case3):
+    # §8.4: 台本の探索線(SEARCH_LINE)の上で、受ける境目と受けない境目が隣り合うマスにある。
+    verdicts = [evaluate(case3.candidate.policy, probe_package(salary)) for salary in SALARY_GRID]
+    first_accept = verdicts.index(Verdict.ACCEPTABLE)
+    assert first_accept >= 1
+    assert all(v is Verdict.NOT_ACCEPTABLE for v in verdicts[:first_accept])
+    assert all(v is Verdict.ACCEPTABLE for v in verdicts[first_accept:])
+    lower, upper = SALARY_GRID[first_accept - 1], SALARY_GRID[first_accept]
+    assert (lower, upper) == (600, 650) and upper - lower == SALARY_GRID[1] - SALARY_GRID[0]
+    assert lower < case3.candidate.raw.bounds[_SEARCH_COLUMN] <= upper  # 生の境目は、この 1 マスの中
+
+
+def test_case3_scripted_attacker_cannot_narrow_the_salary_below_one_grid_cell_within_the_evaluation_limit(case3):
+    # 台本の攻撃者(最悪の場合: 候補者側の金庫の 3 値の答えをすべて見られる)が、探索線の上で年収だけを二分探索する。
+    # 評価の上限(17 回)の中で、区間はグリッド 1 マスで止まり、候補者の生の境目(620 万)は含むが、それ以上は絞れない(幅は 1 マス以上)。
+    policy, limit = case3.candidate.policy, DEFAULT_VAULT_CONFIG.limits.evaluation_budget_per_side
+    assert limit == 17
+    observations: list[tuple[int, Verdict]] = []
+    while len(observations) < limit:
+        salary = next_probe_salary(estimate_interval(observations))
+        if salary is None:
+            break  # 1 マスになった。グリッド上に、これ以上詰める点がない
+        observations.append((salary, evaluate(policy, probe_package(salary))))
+
+    interval = estimate_interval(observations)
+    raw_boundary = case3.candidate.raw.bounds[_SEARCH_COLUMN]
+    assert len(observations) == math.ceil(math.log2(len(SALARY_GRID) + 1)) == 5  # 二分探索は 5 回で終わる(上限の 17 回の中)
+    assert [salary for salary, _ in observations] == [900, 550, 700, 600, 650]
+    assert (interval.lower, interval.upper, interval.cells) == (600, 650, 1)
+    assert interval.cells >= 1 and interval.contains(raw_boundary)
+
+    # 回数を使い切っても、グリッドの全点(25 点)を問い合わせても、同じ。グリッド外の値は、そもそも提案できない(FR-18)。
+    everything = [(salary, evaluate(policy, probe_package(salary))) for salary in SALARY_GRID]
+    assert estimate_interval(everything) == interval
+    with pytest.raises(ValueError):
+        probe_package(625)
+
+
+@pytest.mark.anyio
+async def test_case3_scripted_attacker_narrows_to_one_cell_across_negotiations_when_the_candidate_accepts(
+    store, web_env, case3
+):
+    # 候補者が、受けられる提案を受けて交渉を終わらせる(accepts=True。AC-12 の「受けて終わる台本」)なら、1 つの交渉では 1 回の提案で
+    # 終わる。交渉をまたいで候補者側の答えを集めれば(web のメーターと同じ。§8.3)、台本の攻撃者は、続きの交渉で二分探索を進め、
+    # 同じ 1 マス(600 万より上、650 万以下)で止まる。本物の金庫・レフェリー・攻撃モードの交渉を通す。
+    put_fixture_templates(store._db, case3)
+    nids: list[str] = []
+
+    async def read_every_negotiation(_nid: str):
+        return [item for nid in nids for item in await web_env.vault.get_events(nid, "candidate")]
+
+    sender = ScriptedAttackNegotiators(
+        Negotiator(Strategy("hybrid"), _opening(salary=900, remote_days=3, night_duty=0, review_months=6)),
+        ScriptedAttacker(read_every_negotiation),
+    )
+    deps = RefereeDeps(
+        vault=web_env.vault,
+        send_turn=sender,
+        clock=web_env.clock,
+        sleep=web_env.sleep,
+        config=web_env.config,
+        answerer=FixtureAnswerer(case3),
+        count_llm_calls=False,  # 台帳 X-60: 計上はこのテストの対象外
+    )
+    limits = DEFAULT_VAULT_CONFIG.limits
+    end_reasons = []
+    for _ in range(10):  # 1 マスになるまで。上限を置くのは、止まらない場合に失敗させるため
+        created = store.create_negotiation(
+            demo_create_request(case3.candidate.template_id, case3.employer.template_id, mode="attack")
+        )
+        assert created.status == "created"
+        nids.append(created.nid)
+        context = NegotiationContext(nid=created.nid, mode="attack", candidate_principal_id=None)
+        await drive(Referee(context, deps), max_steps=100)
+        document = store._negotiation_ref(created.nid).get().to_dict()
+        assert document["status"] == "judged"
+        for counters in document["counters"].values():
+            assert counters["moves_used"] <= limits.moves_budget_per_side
+            assert counters["evaluations_used"] <= limits.evaluation_budget_per_side
+        end_reasons.append(document["end_reason"])
+        probes = [e for e in await read_every_negotiation("") if e.kind == "offer_received"]
+        interval = estimate_interval([(e.package.salary, e.own_evaluation) for e in probes])
+        if interval.cells == 1:
+            break
+
+    assert end_reasons == ["agreed", "agreed", "agreed"]  # 候補者が受けられる提案を受けるたびに、交渉が終わる
+    assert [e.package.salary for e in probes] == [900, 550, 700, 600, 650]  # 1 つの交渉の中で進めたときと同じ二分探索の 5 手
+    assert (interval.lower, interval.upper, interval.cells) == (600, 650, 1)
+    assert interval.contains(case3.candidate.raw.bounds[_SEARCH_COLUMN])
+
+
+def test_the_interval_never_gets_narrower_than_one_grid_cell_whatever_the_raw_boundary():
+    # 丸めは、フィクスチャのポリシーの作り方(build_rounded_policy。§2.5)と同じ。候補者の生の境目が 300〜1500 万のどこにあっても、
+    # 探索線の全グリッド点の答えから作った区間は、ちょうど 1 マスで、生の境目を含む。
+    # 同じマスの中の生の境目(601〜650 万)は、答えがまったく同じなので、攻撃者には見分けられない。
+    columns = list(itertools.product(*(AXES[axis].grid for axis in ("remote_days", "night_duty", "review_months"))))
+
+    def answers(raw_boundary: int) -> list[tuple[int, Verdict]]:
+        # どの列(リモート・当直・昇給見直しの組)も、同じ生の境目で受ける候補者
+        policy = build_rounded_policy(RawConditions("candidate", {column: raw_boundary for column in columns}))
+        return [(salary, evaluate(policy, probe_package(salary))) for salary in SALARY_GRID]
+
+    for raw_boundary in (*range(300, 1501, 25), 301, 349, 351, 599, 1499, 1500):
+        interval = estimate_interval(answers(raw_boundary))
+        assert interval.cells == 1 and interval.contains(raw_boundary), raw_boundary
+    same_cell = {tuple(verdict for _, verdict in answers(raw_boundary)) for raw_boundary in (601, 620, 625, 640, 650)}
+    assert len(same_cell) == 1
+
+
+# ----------------------------------------------------------------------
+# estimate_interval の単体(§8.3 の計算)
+# ----------------------------------------------------------------------
+
+
+def test_estimate_interval_with_no_answer_covers_the_whole_grid_and_one_cell_beyond():
+    interval = estimate_interval([])
+    assert (interval.lower, interval.upper, interval.cells) == (None, None, len(SALARY_GRID) + 1)
+
+
+@pytest.mark.parametrize(
+    ("observations", "lower", "upper", "cells"),
+    [
+        pytest.param([(900, ACC)], None, 900, 13, id="acceptable_only"),
+        pytest.param([(550, NOT)], 550, None, 20, id="not_acceptable_only"),
+        pytest.param([(900, ACC), (550, NOT)], 550, 900, 7, id="both"),
+        pytest.param([(900, ACC), (700, ACC), (550, NOT), (600, NOT), (650, NOT)], 650, 700, 1, id="one_cell_after_a_bisection"),
+        pytest.param([(700, ACC), (650, ACC), (600, NOT), (550, NOT)], 600, 650, 1, id="the_closest_pair_decides"),
+        pytest.param([(700, NC)], None, None, 26, id="needs_confirmation_tells_nothing"),
+        pytest.param([(900, "acceptable"), (550, "not_acceptable")], 550, 900, 7, id="event_strings"),
+        pytest.param([(300, ACC)], None, 300, 1, id="acceptable_at_the_lowest_grid_point"),
+        pytest.param([(1500, NOT)], 1500, None, 1, id="not_acceptable_at_the_highest_grid_point"),
+    ],
+)
+def test_estimate_interval_follows_the_three_valued_answers(observations, lower, upper, cells):
+    # 「受けられる」(年収 s)なら境目は s 以下、「受けられない」なら s より上、「本人確認が必要」は情報なし(§8.3)。
+    interval = estimate_interval(observations)
+    assert (interval.lower, interval.upper, interval.cells) == (lower, upper, cells)
+
+
+def test_estimate_interval_does_not_depend_on_the_order_of_the_answers():
+    answers = [(900, ACC), (550, NOT), (700, ACC), (600, NOT), (650, NC)]
+    expected = estimate_interval(answers)
+    assert (expected.lower, expected.upper) == (600, 700)
+    for ordered in itertools.permutations(answers):
+        assert estimate_interval(ordered) == expected
+
+
+def test_a_needs_confirmation_gap_between_the_boundaries_keeps_the_interval_wide():
+    # 「受けられない」と「受けられる」の間に、本人確認が必要なマスがあると、区間は 2 マスのまま止まる(だから探索線には隙間を持たせない)。
+    gap = [(600, NOT), (650, NC), (700, ACC)]
+    assert estimate_interval(gap).cells == 2
+
+
+@pytest.mark.parametrize(
+    "observations",
+    [
+        pytest.param([(650, ACC), (700, NOT)], id="not_acceptable_above_an_acceptable_salary"),
+        pytest.param([(650, ACC), (650, NOT)], id="both_answers_at_one_salary"),
+    ],
+)
+def test_estimate_interval_rejects_answers_that_contradict_each_other(observations):
+    with pytest.raises(ValueError, match="contradict"):
+        estimate_interval(observations)
+
+
+@pytest.mark.parametrize("observations", [[(625, ACC)], [(0, NOT)], [(900, "maybe")]], ids=["off_grid", "below_grid", "unknown_verdict"])
+def test_estimate_interval_rejects_an_off_grid_salary_and_an_unknown_verdict(observations):
+    with pytest.raises(ValueError):
+        estimate_interval(observations)
+
+
+def test_the_interval_is_open_below_and_closed_above():
+    interval = estimate_interval([(600, NOT), (650, ACC)])
+    assert not interval.contains(600) and interval.contains(600.5) and interval.contains(620) and interval.contains(650)
+    assert not interval.contains(650.5)
+    assert estimate_interval([(650, ACC)]).contains(-100) and not estimate_interval([(650, ACC)]).contains(651)  # 下は開いている
+    assert estimate_interval([(600, NOT)]).contains(10_000) and not estimate_interval([(600, NOT)]).contains(600)
+
+
+def test_next_probe_salary_bisects_the_interval_and_stops_at_one_cell():
+    assert next_probe_salary(estimate_interval([])) == 900
+    assert next_probe_salary(estimate_interval([(900, ACC), (550, NOT)])) == 700
+    assert next_probe_salary(estimate_interval([(700, ACC), (600, NOT)])) == 650
+    assert next_probe_salary(estimate_interval([(650, ACC), (600, NOT)])) is None
+    assert next_probe_salary(estimate_interval([(300, ACC)])) is None
+    assert is_on_search_line(probe_package(900)) and not is_on_search_line(probe_package(900).model_copy(update={"remote_days": 2}))

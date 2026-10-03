@@ -28,15 +28,24 @@ TurnInput の history・pending_offer・last_check・last_invalid から作り�
 3. 確かめで「受けられる」組み合わせが見つからなければ(決定)、受けられると分かっている組み合わせのうち、相手の直前の提案に
    いちばん近いものを propose する。
 check_first=False の探し方は、確かめずに候補の先頭を propose する(確かめずに譲歩案を出す型。7 巡目の表の 6 行目)。
-途中確認(ask_principal)は使わない。ケース 1 のポリシーは、受けられる・受けられないがすべて決まっていて、
+accepts=False の探し方は、受けられる提案が来ても accept せず、対案を出し続ける(交渉を終わらせない候補者。ケース 3 の攻撃で使う。
+AC-12 の「候補者側が対案を返す台本」)。
+途中確認(ask_principal)は使わない。ケース 1〜3 のポリシーは、受けられる・受けられないがすべて決まっていて、
 「本人確認が必要」になる組み合わせがないので、使う場面がない。
+
+攻撃者の台本(ScriptedAttacker。ケース 3。§8.2・§8.3): 攻撃モードの求人エージェント(role=attacker)の代わり。探索線(年収以外の軸を
+固定した線)の上で、年収を二分探索する。交渉者の台本と違い、TurnInput だけでは候補者側の金庫の答えが分からないので、
+候補者側のイベントを読む口(read_candidate_events)から答えを受け取る。金庫の答えをすべて見られる、最悪の場合の攻撃者を表す。
 """
 
 import itertools
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from negotiation_core import AXES, AXIS_KEYS, NUMERIC_AXIS_KEYS, Package, Side, TurnInput, Usage, Verdict
+from negotiation_core.estimate_interval import Interval, estimate_interval
+from vault.api_models import EventViewItem
 from web_helpers import make_usage, move_dict, plan_dict
 
 # 7 軸のグリッド上の位置(AXIS_KEYS の順)。探し方の計算は、値ではなく位置で行う(シミュレーションと同じ)。
@@ -62,6 +71,7 @@ class Strategy:
     switch: int = 1  # concede: 何回目の提案から他の軸も寄せるか(それまでは年収だけを譲る)
     monotone: bool = True  # 確認した結果から、支配関係で評価を推し量る
     check_first: bool = True  # False なら、確認せずに候補の先頭を propose する
+    accepts: bool = True  # False なら、相手の提案が「受けられる」でも accept せず、対案を出す
     max_checks: int = 3  # 1 手番に使う確認の最大回数
     near: int = 4  # hybrid: 自分の直前の提案と相手の直前の提案の距離がこれ以下なら「差が縮んだ」
 
@@ -302,7 +312,7 @@ def _check_limit(turn_input: TurnInput, negotiator: Negotiator) -> int:
 def plan(turn_input: TurnInput, negotiator: Negotiator) -> dict:
     """計画(phase=plan): TurnInput だけから、確かめたい案を出したい順に並べる(確かめが要らなければ、手をそのまま返す)。"""
     pending = turn_input.pending_offer
-    if pending is not None and pending.own_evaluation is Verdict.ACCEPTABLE:
+    if negotiator.strategy.accepts and pending is not None and pending.own_evaluation is Verdict.ACCEPTABLE:
         return plan_dict(move="accept")
     scan = _scan(turn_input, negotiator, check_limit=_check_limit(turn_input, negotiator))
     if scan.to_check:
@@ -318,7 +328,7 @@ def choose(turn_input: TurnInput, negotiator: Negotiator) -> dict:
     ものなので、飛ばして、受けられると分かっているものを探す)。
     """
     pending = turn_input.pending_offer
-    if pending is not None and pending.own_evaluation is Verdict.ACCEPTABLE:
+    if negotiator.strategy.accepts and pending is not None and pending.own_evaluation is Verdict.ACCEPTABLE:
         return move_dict("accept")
     scan = _scan(turn_input, negotiator, check_limit=0)
     chosen = scan.chosen if scan.chosen is not None else _fallback(turn_input, negotiator)
@@ -339,4 +349,83 @@ class ScriptedNegotiators:
     async def __call__(self, role, turn_input, *, nid, timeout_s) -> tuple[dict, Usage]:
         negotiator = self._negotiators[role]
         payload = plan(turn_input, negotiator) if turn_input.phase == "plan" else choose(turn_input, negotiator)
+        return payload, self._usage
+
+
+# --- 攻撃者の台本(ケース 3。§8.2・§8.3) ---
+
+# 探索線: 攻撃者が固定する、年収以外の軸の値(fixtures/case3.toml のコメントの探索線と同じ)。年収だけを変えた提案を出す。
+SEARCH_LINE: dict = dict(
+    remote_days=1, night_duty=0, review_months=6, training="available", side_job="allowed", start="within_3_months"
+)
+SALARY_GRID: tuple[int, ...] = AXES["salary"].grid
+
+# 交渉 ID から、候補者側の見え方のイベントを読む口。最悪の場合の攻撃者が、金庫の答え(候補者の受け手としての評価)を見るために使う。
+ReadEvents = Callable[[str], Awaitable[Sequence[EventViewItem]]]
+
+
+def probe_package(salary: int) -> Package:
+    """探索線の上の、年収が salary の提案。"""
+    return Package(salary=salary, **SEARCH_LINE)
+
+
+def is_on_search_line(package: Package) -> bool:
+    return all(getattr(package, axis) == value for axis, value in SEARCH_LINE.items())
+
+
+def next_probe_salary(interval: Interval) -> int | None:
+    """区間の真ん中のグリッド点(二分探索で次に提案する年収)。区間が 1 マスなら None(グリッド上に、これ以上詰める点がない)。"""
+    low = -1 if interval.lower is None else SALARY_GRID.index(interval.lower)
+    high = len(SALARY_GRID) if interval.upper is None else SALARY_GRID.index(interval.upper)
+    return SALARY_GRID[(low + high) // 2] if high - low > 1 else None
+
+
+class ScriptedAttacker:
+    """攻撃者の求人エージェントの台本(攻撃モードの role=attacker の代わり。年収の二分探索の実演。FR-45)。
+
+    最悪の場合の攻撃者: 金庫の答えをすべて見られるものとして動く。read_candidate_events が返す候補者側のイベントから、探索線の上の
+    提案への 3 値評価を集め、estimate_interval で区間を作り、真ん中の年収を提案する。区間が 1 マスになったら、これ以上は詰められない
+    ので、交渉を終える。候補者が実際に受けたかどうか(LLM の手)は使わない(§8.3)。
+    候補者が受けて交渉が終わる場合は、交渉をまたいで続ける。read_candidate_events が、それまでの交渉のイベントも合わせて返せばよい
+    (web のメーターが、交渉 ID の一覧から区間を積み上げるのと同じ)。
+    """
+
+    def __init__(self, read_candidate_events: ReadEvents) -> None:
+        self._read_candidate_events = read_candidate_events
+
+    async def next_move(self, nid: str) -> tuple[str, Package | None]:
+        """次の手(手の種類, 組み合わせ)。"""
+        events = await self._read_candidate_events(nid)
+        observations = [
+            (event.package.salary, event.own_evaluation)
+            for event in events
+            if event.kind == "offer_received" and is_on_search_line(event.package)
+        ]
+        salary = next_probe_salary(estimate_interval(observations))
+        return ("end", None) if salary is None else ("propose", probe_package(salary))
+
+
+class ScriptedAttackNegotiators:
+    """SendTurn(web.referee)の形の台本。攻撃モードの交渉の、候補者(role=candidate)と攻撃者(role=attacker)。
+
+    候補者は、ScriptedNegotiators と同じ探し方(Negotiator)。使用量は固定の値(台本は LLM を呼ばない)。
+    """
+
+    def __init__(self, candidate: Negotiator, attacker: ScriptedAttacker, *, usage: Usage | None = None) -> None:
+        self._candidate = candidate
+        self._attacker = attacker
+        self._usage = usage if usage is not None else make_usage()
+
+    async def __call__(self, role, turn_input, *, nid, timeout_s) -> tuple[dict, Usage]:
+        if role == "attacker":
+            move, package = await self._attacker.next_move(nid)
+            payload = plan_dict(move=move, package=package) if turn_input.phase == "plan" else move_dict(move, package)
+        elif role == "candidate":
+            payload = (
+                plan(turn_input, self._candidate)
+                if turn_input.phase == "plan"
+                else choose(turn_input, self._candidate)
+            )
+        else:
+            raise ValueError(f"an attack negotiation has no {role!r} agent")
         return payload, self._usage
