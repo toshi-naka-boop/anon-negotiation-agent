@@ -211,3 +211,9 @@ def release_for_digest(releases: list[dict], digest: str) -> dict | None
 | C | `tests/test_tee_image_files.py`・`tests/test_tee_record_release.py` | `uv run pytest tests/test_tee_image_files.py tests/test_tee_record_release.py -q` |
 
 最後に全体 `uv run pytest -q` が通ること（既存 1,498 件を壊さない）。
+
+## 15. 追記（2026-10-03。批評 16 巡目 X-67 の受理。パッケージ B に伝達済み）
+
+- §8 の検証（初回のピン留めと、接続エラー後の付け替え）は **transport 単位の single-flight** にする。同時に来た要求は同じ検証の結果を待って共有し、それぞれが `/v1/attestation` を呼ばない。検証が失敗したら、待っていた要求にも同じ失敗（`httpx.ConnectError`）を返す。再検証の間隔の下限（2 秒）は single-flight の後に適用する（直前の検証が間隔内なら、待たずにその結果を使う）。
+- `GET /api/tee/attestation` は、`nonce` なしなら検証済みの直近の結果（5 分）を返すのが既定で、金庫の発行枠（毎秒 1 回）を使うのは `nonce` ありの転送だけ（2 秒の制限）。
+- 理由: 起動時に見回りが複数の交渉を同時に再開すると、single-flight がなければ 1 件以外が金庫の 429 に当たる。
