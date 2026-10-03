@@ -21,7 +21,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "③④⑤ の実装（2026-10-04）。取り込み済み: D・E・J・I・H・K・F・G・H2（全体 3,114 件通過、b56f920）。進行中（sonnet・worktree）: L（画面の前半。利用制限で中断 → 再開）、K2（面談の枠を limiter へ・削除で面談の状態も消す・meter の入口・古いコメント）、M（deploy_check.sh・canary_scan.py・README・expected-kms-principals.json）。次: L2（段階開示・開示台帳・メーター・2 パネルの画面）、設計書 v20（I-21〜I-27 の反映。批評 1 巡 → 承認）、本物の Gemini での確認（面談の指示文・attacker.md・DV-15 の再実行）。ユーザー待ち: 手順 A の結果、依存の追加の可否（Cloud Trace の exporter、sse-starlette・uvicorn の明示）。",
+  "nextAction": "③④⑤ の実装（2026-10-04）。取り込み済み: D・E・J・I・H・K・F・G・H2・K2・L（全体 3,244 件通過、e70efb9）。DV-15 は max_output_tokens 3,072 で 2/2 合格、ケース 3 の攻撃者も本物の Gemini で動作。進行中（sonnet・worktree）: M（deploy_check.sh・canary_scan.py・README・expected-kms-principals.json）、L2（段階開示・台帳・2 パネル・メーター・シミュレーション・二分探索の実演の画面と API）。次: 設計書 v20（I-21〜I-29 の反映。批評 1 巡 → 承認）、面談の指示文 2 本を本物の Gemini で 1 回確認、デモ動画、提出物（信頼境界図・説明文・Zenn）。ユーザー待ち: 手順 A の結果、依存の追加の可否（Cloud Trace の exporter、sse-starlette・uvicorn の明示）。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
