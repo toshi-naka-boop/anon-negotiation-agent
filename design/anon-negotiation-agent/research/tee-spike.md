@@ -1076,6 +1076,76 @@ gcloud kms keys remove-iam-policy-binding vault-kek --location="$REGION" --keyri
 
 ---
 
+### G. オーナーの復号を拒否ポリシーで拒む（P-13 の答え: プロジェクトは組織の配下。本番の VM が動いた後、live のデータを入れる前）
+
+前提: 拒否ポリシーを作るには `roles/iam.denyAdmin` が要り、組織の管理者が付ける（組織の配下でだけ使える）。自分が付けられるかを先に確かめる（組織 ID は `gcloud projects get-ancestors` で分かる）。
+
+組織 ID を調べて変数に入れる（`TYPE` が `organization` の行の ID）。
+
+```
+gcloud projects get-ancestors "$PROJECT_ID"
+```
+
+```
+export ORG_ID=<組織 ID>
+```
+
+自分のユーザーに、プロジェクトの拒否ポリシーの管理者を付ける（組織の管理者として実行する。すでにあれば飛ばす）。
+
+```
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="user:$(gcloud config get-value account)" --role=roles/iam.denyAdmin
+```
+
+拒否ポリシーの本文を書く（KEK の復号・暗号化の権限を、金庫のプール（Workload Identity Pool `vault-tee-pool`）のワークロード以外のすべての主体に拒否する。オーナーも含む。プール単位の例外なので、ダイジェストが変わっても書き換えなくてよい。どのダイジェストに許すかは、従来どおり鍵の IAM で決める）。
+
+```
+cat > tmp/tee_spike/deny-kms.json <<EOF
+{
+  "displayName": "vault KEK: only the TEE workload pool may use the key",
+  "rules": [
+    {
+      "denyRule": {
+        "deniedPrincipals": ["principalSet://goog/public:all"],
+        "exceptionPrincipals": ["principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/vault-tee-pool/*"],
+        "deniedPermissions": [
+          "cloudkms.googleapis.com/cryptoKeyVersions.useToDecrypt",
+          "cloudkms.googleapis.com/cryptoKeyVersions.useToEncrypt"
+        ]
+      }
+    }
+  ]
+}
+EOF
+```
+
+拒否ポリシーをプロジェクトに付ける（プロジェクトの中のすべての鍵に効く。この構成では鍵は KEK 1 本）。
+
+```
+gcloud iam policies create vault-kek-deny --attachment-point="cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" --kind=denypolicies --policy-file=tmp/tee_spike/deny-kms.json
+```
+
+付いたことを確かめる（結果を貼る）。
+
+```
+gcloud iam policies list --attachment-point="cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" --kind=denypolicies --format=json
+```
+
+負の試験（C-58 の拒否版）: 自分（オーナー）でダミーの暗号文を復号すると、今度は `PERMISSION_DENIED` になる（拒否ポリシーの反映に数分かかることがある）。
+
+```
+gcloud kms decrypt --location="$REGION" --keyring=vault-tee --key=vault-kek --ciphertext-file=tmp/tee_spike/dummy.bin --plaintext-file=-
+```
+
+本番の金庫を再起動して、金庫（プールのワークロード）はこれまでどおり起動できることを確かめる（launcher のログに `sealing self-test ok`）。
+
+```
+gcloud compute instances reset vault-tee --zone="$ZONE"
+```
+
+注意: 拒否ポリシーが効いている間は、オーナーも `scripts/tee_reset_dek.py` の後に金庫を再起動するだけで DEK を作り直せる（作り直しは金庫が行う）。手元から KEK を使う作業（ない前提）は、拒否ポリシーを一度外す必要があり、その変更は Admin Activity の監査ログに残る。デプロイの確認（設計書 §10）には「拒否ポリシー `vault-kek-deny` があり、本文が上と一致する」を足す。Policy Analyzer の範囲は `--organization="$ORG_ID"` にする。
+
+---
+
 ## コードの変更
 
 規模は「行数の見積もり」（【推測】。テスト込みの目安）。「スパイク」は、10/3〜4 の検証に要るもの。
