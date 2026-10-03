@@ -10,11 +10,13 @@ tee-restart-policy=OnFailure が再起動する):
    保管された DEK は、包んだ鍵の版が KMS の鍵の primary と一致するときだけ解く(一致しなければ失敗。批評 C-56)。
 4. VaultStore(Firestore の vault-db。サービスアカウントの既定の認証)。DEK の Sealer を渡し、本物の依頼者と live の交渉の機微な項目を封印して保存する
    (design.md §9 の 2。項目と仕組みは vault.seal_layer)。
-5. 封印の自己試験(`_tee/selftest` は、なければ作り、あれば開封して確かめる。批評 X-70)。再起動をまたいで、既存の暗号文が同じ DEK で
+5. 架空人物のテンプレートの投入(vault.seed。イメージに焼いた fixtures/case*.toml を、`templates/{template_id}` に冪等に書く。
+   design.md §3.7・台帳 P-15)。テンプレートは公開フィクスチャなので、封印しない。失敗(ファイルの検証エラー・Firestore の失敗)したら起動しない。
+6. 封印の自己試験(`_tee/selftest` は、なければ作り、あれば開封して確かめる。批評 X-70)。再起動をまたいで、既存の暗号文が同じ DEK で
    開くことを確かめる(鍵の版を切り替えたあとに、既存のデータが読めなくなっていないかを、ここで見つける)。
-6. TLS の鍵と自己署名の証明書(メモリ上の tls_dir に 0600 で書く)。
-7. create_app(呼び出し元の検証と attestation の口を付けた金庫の app)。
-8. uvicorn(0.0.0.0:port、TLS は金庫の中で終端する)。SIGTERM は uvicorn に任せる。
+7. TLS の鍵と自己署名の証明書(メモリ上の tls_dir に 0600 で書く)。
+8. create_app(呼び出し元の検証と attestation の口を付けた金庫の app)。
+9. uvicorn(0.0.0.0:port、TLS は金庫の中で終端する)。SIGTERM は uvicorn に任せる。
 
 失敗の理由には、トークン・鍵・ID が入りうるので、例外の文は書かず、型名だけを書く(詳細は、各段が自分でログに書く)。
 """
@@ -38,6 +40,8 @@ from vault.app import create_app
 from vault.clock import SystemClock
 from vault.config import DEFAULT_VAULT_CONFIG, VaultTeeConfig, load_vault_tee_config
 from vault.firestore_client import create_client
+from vault.fixtures import FIXTURES_DIRECTORY
+from vault.seed import seed_templates
 from vault.store import VaultStore
 from vault.tee import tls
 from vault.tee.attestation_api import AttestationService
@@ -152,6 +156,7 @@ def main() -> int:
         store = _step(
             "store", lambda: VaultStore(db=db, clock=SystemClock(), config=DEFAULT_VAULT_CONFIG, sealer=sealer)
         )
+        _step("seed templates", lambda: seed_templates(db, FIXTURES_DIRECTORY))
         _step("sealing self-test", lambda: run_sealing_self_test(db, sealer))
         key_path, cert_path, certificate_sha256 = _step("tls", lambda: prepare_tls(config))
         app = _step("app", lambda: build_app(store, config, metadata, certificate_sha256))

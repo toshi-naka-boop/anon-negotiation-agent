@@ -16,6 +16,8 @@ STS と Cloud KMS は偽物(httpx.MockTransport)、Firestore は conftest が起
 - 封印の自己試験(批評 X-70): `_tee/selftest` は、なければ作り(probe・probe_sha256・created_at)、あれば開封して SHA-256 を確かめる。
   開かない・一致しない・項目がないときは、固定文をログに書いて失敗する(値は出さない)。
 - 起動の順序(契約 §4)と、段が失敗したときの非 0 終了、uvicorn に渡す TLS と待ち受け。
+- 架空人物のテンプレートの投入(vault.seed。台帳 P-15): store の後、封印の自己試験の前の段。フィクスチャを投入し(封印しない)、再起動で
+  書き直さない。投入に失敗したら、自己試験に進まずに非 0 で終わる(投入そのものの確かめは tests/test_seed.py)。
 GCP には接続しない。
 """
 
@@ -38,9 +40,11 @@ import pytest
 import uvicorn.config
 from fastapi.testclient import TestClient
 from google.api_core.exceptions import AlreadyExists
+from google.cloud import firestore
 
 import vault.tee.main as main_module
 from vault.config import VaultTeeConfig, load_vault_config, load_vault_tee_config
+from vault.fixtures import load_case_fixture
 from vault.tee.key_release import (
     KMS_BASE_URL,
     RETRY_DELAYS_SECONDS,
@@ -996,13 +1000,16 @@ def test_when_another_instance_created_the_probe_first_that_probe_is_the_one_che
 
 # --- 起動の順序 ---
 
-STEP_ORDER = ["config", "metadata", "firestore", "key release", "store", "sealing self-test", "tls", "app", "serve"]
+STEP_ORDER = [
+    "config", "metadata", "firestore", "key release", "store", "seed templates", "sealing self-test", "tls", "app", "serve"
+]
 PATCHED_NAME = {
     "config": "load_vault_tee_config",
     "metadata": "read_instance_metadata",
     "firestore": "create_client",
     "key release": "release_dek",
     "store": "VaultStore",
+    "seed templates": "seed_templates",
     "sealing self-test": "run_sealing_self_test",
     "tls": "prepare_tls",
     "app": "build_app",
@@ -1059,6 +1066,7 @@ def startup(monkeypatch, config, firestore_client, caplog) -> Startup:
         "create_client": recorded("firestore", create_client),
         "release_dek": recorded("key release", lambda db, *, metadata, config: KNOWN_DEK),
         "VaultStore": recorded("store", main_module.VaultStore),
+        "seed_templates": recorded("seed templates", main_module.seed_templates),
         "run_sealing_self_test": recorded("sealing self-test", main_module.run_sealing_self_test),
         "prepare_tls": recorded("tls", main_module.prepare_tls),
         "build_app": recorded("app", main_module.build_app),
@@ -1081,6 +1089,48 @@ def test_the_startup_runs_the_steps_in_the_order_of_the_contract(startup, firest
     assert startup.calls == ["mask_ids_in_logs", *STEP_ORDER]
     assert startup.constructed["firestore"] == {"project": PROJECT_ID}  # メタデータのプロジェクト ID を明示する
     assert firestore_client.document("_tee/selftest").get().exists  # 本物の自己試験が走った
+
+
+def test_the_startup_writes_the_fixture_templates_without_sealing_and_a_restart_does_not_write_them_again(
+    startup, firestore_client, monkeypatch
+):
+    written: list[str] = []
+    original_set = firestore.DocumentReference.set
+
+    def recording_set(self, *args, **kwargs):
+        written.append(self.path)
+        return original_set(self, *args, **kwargs)
+
+    monkeypatch.setattr(firestore.DocumentReference, "set", recording_set)
+
+    assert main_module.main() == 0
+
+    template_ids = {snapshot.id for snapshot in firestore_client.collection("templates").stream()}
+    assert {t.template_id for t in load_case_fixture(1).templates()} <= template_ids
+    for snapshot in firestore_client.collection("templates").stream():
+        assert not any(isinstance(value, bytes) for value in snapshot.to_dict().values())  # 公開フィクスチャは封印しない(§3.8)
+    assert sorted(path for path in written if path.startswith("templates/")) == sorted(f"templates/{tid}" for tid in template_ids)
+
+    written.clear()
+    assert main_module.main() == 0  # 再起動
+    assert [path for path in written if path.startswith("templates/")] == []
+
+
+def test_a_fixture_that_cannot_be_seeded_stops_the_startup_before_the_sealing_self_test(
+    startup, firestore_client, monkeypatch, caplog, tmp_path
+):
+    (tmp_path / "case1.toml").write_text('case = 1\nmarker = "VALUE-IN-THE-BROKEN-FIXTURE"\n', encoding="utf-8")  # 知らない項目・必須の項目がない
+    monkeypatch.setattr(main_module, "FIXTURES_DIRECTORY", tmp_path)
+
+    assert main_module.main() == 1
+
+    assert startup.calls == ["mask_ids_in_logs", *STEP_ORDER[: STEP_ORDER.index("seed templates") + 1]]
+    assert startup.served == {}  # uvicorn は起動しない
+    assert "startup failed at the step 'seed templates' (ValidationError)" in caplog.text
+    assert "the fixture file case1.toml is not usable" in caplog.text
+    assert "VALUE-IN-THE-BROKEN-FIXTURE" not in caplog.text  # 例外の文(フィクスチャの値を含む)は書かない
+    assert not firestore_client.document("_tee/selftest").get().exists  # 自己試験まで進んでいない
+    assert list(firestore_client.collection("templates").stream()) == []
 
 
 def test_the_app_is_wired_with_the_verifier_the_attestation_part_and_the_served_certificate(startup, config):

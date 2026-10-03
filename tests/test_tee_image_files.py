@@ -5,7 +5,9 @@ Docker も GCP も使わない(この Mac には Docker が無い)。Cloud Build
 Dockerfile.vault(金庫専用のイメージ)
 - ポートの公開が、config/params.toml の [vault.tee] port と同じ。launch policy のラベルは 2 つだけ。起動コマンドは固定(ENTRYPOINT)で引数なし。
   非 root のユーザーを作らない。
-- COPY するのは、依存のファイル 3 つ(先)と、src/vault・src/negotiation_core・config/params.toml だけ。依存の層(uv sync)が、コードの COPY より先。
+- COPY するのは、依存のファイル 3 つ(先)と、src/vault・src/negotiation_core・config/params.toml・fixtures だけ。依存の層(uv sync)が、
+  コードの COPY より先。fixtures は、金庫が起動時にテンプレートを投入するために読む(src/vault/seed.py)ので、金庫のコードが探す位置
+  (コードの 2 つ上のディレクトリの fixtures/)に置く。
 - イメージに入るコード(src/vault・src/negotiation_core)が、入らない web・agents を import していない。
 Dockerfile(アプリ。Cloud Run 用)
 - 土台が Dockerfile.vault と同じ。src・config・scripts・deploy・fixtures を COPY する。static/ は「あれば」: 有るときだけ COPY する
@@ -30,10 +32,12 @@ import re
 import shlex
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml  # PyYAML。google-adk が使うので uv.lock にある(テストでだけ直接使う)
+
+from vault.fixtures import FIXTURES_DIRECTORY
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE_KEYWORDS = {
@@ -202,8 +206,24 @@ def test_vault_dockerfile_copies_only_the_dependency_files_then_the_vault_code(v
         (["src/vault"], "./src/vault"),
         (["src/negotiation_core"], "./src/negotiation_core"),
         (["config/params.toml"], "./config/params.toml"),
+        (["fixtures"], "./fixtures"),
     ]
     assert of_kind(vault_dockerfile, "ADD") == []
+
+
+def test_vault_dockerfile_puts_the_fixtures_where_the_vault_code_looks_for_them(vault_dockerfile):
+    """金庫は、fixtures.py の 2 つ上のディレクトリの fixtures/ を読む(vault.fixtures.FIXTURES_DIRECTORY)。イメージでも同じ相対位置に置く。"""
+    (workdir,) = [item.argument for item in of_kind(vault_dockerfile, "WORKDIR")]
+    destinations = {tuple(sources): destination for sources, destination in copies_of(vault_dockerfile)}
+
+    def in_image(destination: str) -> PurePosixPath:
+        return PurePosixPath(workdir) / destination
+
+    code_in_image = in_image(destinations[("src/vault",)]) / "fixtures.py"
+
+    assert code_in_image.parents[2] / "fixtures" == in_image(destinations[("fixtures",)]) == PurePosixPath("/app/fixtures")
+    assert FIXTURES_DIRECTORY == ROOT / "fixtures"  # リポジトリでも同じ関係(コードの側の計算が、この前提から外れていない)
+    assert sorted(path.name for path in FIXTURES_DIRECTORY.glob("case*.toml"))  # 投入するフィクスチャが、1 つはある
 
 
 def test_vault_dockerfile_installs_the_locked_dependencies_before_copying_the_code(vault_dockerfile):

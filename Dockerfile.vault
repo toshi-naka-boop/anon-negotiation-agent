@@ -24,10 +24,13 @@ WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev
 
-# 金庫のコード。イメージに入れるのは、この 3 つだけ。
+# 金庫のコードと設定。イメージに入れるのは、この 4 つだけ。
+# fixtures/ は、架空人物のテンプレート(case*.toml)。金庫が起動のたびに vault-db へ冪等に書く(src/vault/seed.py。台帳 P-15)。
+# replays/ と interview_templates.toml も入るが、金庫は読まない。digest は、fixtures/ の中身まで覆う(変えれば digest が動く)。
 COPY src/vault ./src/vault
 COPY src/negotiation_core ./src/negotiation_core
 COPY config/params.toml ./config/params.toml
+COPY fixtures ./fixtures
 
 # 受信ポート([vault.tee] の port と同じ値)。Confidential Space の VM は、ここに書いたポートだけを開ける。変えると digest が変わる。
 EXPOSE 8443/tcp

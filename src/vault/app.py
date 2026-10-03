@@ -12,10 +12,12 @@ TEE(Confidential Space)版では Cloud Run の IAM が効かないので、creat
 
 本番の起動口は create_app_from_env(`uvicorn vault.app:create_app_from_env --factory`)。起動時に、uvicorn のアクセスログの
 URL から ID(依頼者 ID・交渉 ID)を伏せる(§3.8。台帳 X-40)。伏せる処理は web の起動口と共通で、negotiation_core にある
-(vault は web に依存しない)。
+(vault は web に依存しない)。あわせて、架空人物のテンプレートを、イメージ内の fixtures/ から vault-db に投入する(§3.7。
+vault.seed。台帳 P-15。環境変数 VAULT_SEED_TEMPLATES=false で切れる)。
 """
 
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -54,10 +56,14 @@ from vault.errors import (
     TransactionRetryExhausted,
 )
 from vault.firestore_client import create_client
+from vault.fixtures import FIXTURES_DIRECTORY
+from vault.seed import seed_templates
 from vault.store import VaultStore
 
 if TYPE_CHECKING:
     from vault.tee.attestation_api import AttestationService
+
+SEED_TEMPLATES_ENV = "VAULT_SEED_TEMPLATES"
 
 
 async def _healthz(request: Request) -> JSONResponse:
@@ -211,13 +217,30 @@ def _create_vault_db() -> firestore.Client:
     return create_client()
 
 
-def create_app_from_env() -> FastAPI:
+def _seed_templates_enabled(source: Mapping[str, str]) -> bool:
+    """環境変数 VAULT_SEED_TEMPLATES から、起動時にテンプレートを投入するかを決める。true・false(未設定は true)だけ。
+    ほかの値は、起動を拒否する(打ち間違いで、意図せず切れたり入ったりしないように)。"""
+    value = source.get(SEED_TEMPLATES_ENV, "true").strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"the environment variable {SEED_TEMPLATES_ENV} must be true or false")
+
+
+def create_app_from_env(environ: Mapping[str, str] | None = None) -> FastAPI:
     """本番の起動口(`uvicorn vault.app:create_app_from_env --factory`)。
 
-    環境変数は読まない: Firestore の接続先は、クライアントが環境から決める(Cloud Run では、サービスアカウントと
+    読む環境変数は VAULT_SEED_TEMPLATES だけ(true・false。未設定は true): true なら、起動時に、イメージ内の fixtures/ の
+    架空人物のテンプレートを vault-db に冪等に書く(vault.seed。§3.7・台帳 P-15)。失敗したら起動しない。ローカルの開発では
+    false にできる。Firestore の接続先は、クライアントが環境から決める(Cloud Run では、サービスアカウントと
     サービスの属するプロジェクト)。時計は SystemClock、暫定値は config/params.toml。封印はしない(sealer を渡さない = NoopSealer。
     TEE 版は vault.tee.main が Sealer を渡す。§9 の 2)。
     起動時に、uvicorn のアクセスログの URL から ID(依頼者 ID・交渉 ID)を伏せる(mask_ids_in_logs。台帳 X-40)。
     """
+    seed = _seed_templates_enabled(os.environ if environ is None else environ)
     mask_ids_in_logs()
-    return create_app(VaultStore(db=_create_vault_db(), clock=SystemClock(), config=DEFAULT_VAULT_CONFIG))
+    db = _create_vault_db()
+    if seed:
+        seed_templates(db, FIXTURES_DIRECTORY)
+    return create_app(VaultStore(db=db, clock=SystemClock(), config=DEFAULT_VAULT_CONFIG))

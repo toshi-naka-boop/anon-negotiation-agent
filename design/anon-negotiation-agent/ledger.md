@@ -48,6 +48,12 @@
 - 探索線の持ち方: 台本の定数（`tests/scripted_negotiators.SEARCH_LINE`）と `case3.toml` のコメント。web のメーターは線を知らなくてよい: 攻撃者の提案を「年収以外の軸の組」でまとめ、組ごとに区間を計算する（§8.3 の「他の軸は固定し、年収だけを変えた提案を使う」の実装の形。H2 で作る）。
 - `run_demo.py` の既定は台本（`--live` で本物の Gemini）。ケース 3 の `auto_response` は false/false（審査員が操作する求人）。`--live --case 3` の攻撃の指示文は暫定（`ATTACKER_INSTRUCTION`。F の `attacker.md` と合わせる）。
 
+### I-25（実装時の気づき / 文面 / low。次の改訂（v20）で設計書に反映）テンプレートの起動時の投入（I。P-15 を実装）
+
+- 金庫は起動のたびに、イメージ内の `fixtures/case*.toml` を全部読んで検証し、`templates/{template_id}` に冪等に書く（同じ内容なら書かない、違えば上書き、削除はしない。1 つでも壊れていれば 1 件も書かずに起動失敗）。TEE 版は鍵の解放と `VaultStore` の後・自己試験の前（検証済みのワークロードだけが書く）。Cloud Run 版は `VAULT_SEED_TEMPLATES`（既定 true）。封印しない（公開フィクスチャ）。
+- §3.7・§3.8・§8.4（`case<N>.toml` の命名と `template_id` のファイル間の一意性）・§9 の 1（`Dockerfile.vault` に `fixtures/` が入り、フィクスチャの中身がダイジェストを動かす）・§10・契約 §4・DV の追加（初回に全件・再起動で 0 回・変更で上書き・壊れで例外）を書く。
+- 運用の注意: `COPY fixtures ./fixtures` は `fixtures/replays/*.jsonl` と `interview_templates.toml` も入れるので、リプレイの録り直しでも金庫のダイジェストが動く（対応表への追記と principalSet の付け直しが要る）。狭めるなら `COPY fixtures/case*.toml ./fixtures/`（テストの COPY 元の検査を glob 対応に）。ローリング更新で古いイメージが再起動すると古いテンプレートで上書きする（§3.7 の前提の範囲）。Cloud Run 版の金庫は root logger が WARNING のままなので INFO（投入の件数）は出ない。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |
