@@ -226,6 +226,34 @@ max_anchors_per_kind = 100
 max_blocklist_entries = 200
 max_company_id_length = 100
 
+# --- 面談(design.md §5・§8.2。src/web/interview/)の暫定値 ---
+# モデル名と temperature は [agents] の値を使う(キーを持たない)。LLM の一時的なエラーの再試行の回数・待ち時間・1 呼び出しの上限は
+# [web.referee] と同じ(§4.1)。面談の文面は fixtures/interview_templates.toml(U-01)。
+
+[web.interview]
+# 面談の LLM に向かう入力(自由記述の 3 問・自由コメント・辞めた理由)を含む、リクエスト本文の上限(バイト。§5・台帳 C-49)
+max_request_body_bytes = 32768
+# 面談エージェントの 1 回の呼び出しの出力＋思考の上限(§5・台帳 C-49)。許す範囲は [agents] max_output_tokens と同じ(256〜4,096)
+max_output_tokens = 2048
+# 面談エージェントの思考の量(MINIMAL / LOW / MEDIUM / HIGH)。決まった形に読み替えるだけなので低くする
+thinking_level = "LOW"
+# 依頼者ごとの LLM 呼び出しの窓(プロセスのメモリ上)。§8.2 の「面談の LLM 呼び出し 30 回／10 分」を、クライアント IP の取り方(R-7)が
+# 決まるまでの間、依頼者 ID ごとに暫定で掛ける(再試行を含む。1 日の物理の数の上限は web.llm_budget が別に受け持つ)
+llm_calls_per_window = 30
+llm_window_seconds = 600
+# 面談の途中の状態(サーバのメモリ)。最後に使ってからこの秒数でメモリから消す。同時に持てる面談の数の上限
+state_idle_ttl_seconds = 3600
+max_active_interviews = 500
+# パッケージ二択(§5 の 4。5〜8 組): 出す組の数と、確認画面に進むために答え終えるべき組の最小数
+choice_pairs = 6
+min_answered_pairs = 5
+# 自由コメント・辞めた理由の 1 回から受け付ける発言の数の上限
+max_statements_per_extraction = 10
+# 手取りを額面に直すときの、手取りが額面に占める割合(前提の文に出す。§5 の 2)
+net_to_gross_ratio = 0.8
+# 経験年数の帯の境目(年。この値未満が前の帯。§2.6)。[attribute_bands.experience_band] のグリッドの数より 1 つ少ない
+experience_band_upper_bounds = [3, 5, 10]
+
 # --- TEE(Confidential Space)版の金庫だけが使う(design.md §9、research/tee-spike.md、research/tee-spike-contract.md) ---
 # Cloud Run 版は読まない。プロジェクト ID・番号・ゾーンは書かない(金庫は実行時にメタデータサーバから取る)。
 [vault.tee]

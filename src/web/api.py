@@ -83,6 +83,7 @@ from web.api_models import (
 from web.attested_transport import AttestationSource
 from web.client_ip import client_ip
 from web.deletion import DeletionOutcome
+from web.interview.api import build_interview_router
 from web.llm_budget import LlmBudgetUnavailable
 from web.referee import NegotiationContext
 from web.services import WebServices
@@ -239,6 +240,7 @@ def _claims_for_display(token: str | None, verified: VerifiedAttestation | None)
 def build_router(services: WebServices, tee: TeeAttestationConfig | None = None) -> APIRouter:
     """services の部品を使うルートを作る。tee を渡すと(TEE モード)、GET /api/tee/attestation も作る。"""
     router = APIRouter()
+    router.include_router(build_interview_router(services))  # 面談の API(別の APIRouter。web/interview/api.py)
     vault = services.vault
 
     # ------------------------------------------------------------------

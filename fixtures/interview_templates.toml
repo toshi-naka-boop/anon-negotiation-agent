@@ -1,0 +1,250 @@
+# 面談の設問テンプレート(design.md §5・§2.4・§2.6。未決事項 U-01)。
+#
+# 【暫定(U-01)】文面は、すべて仮のものです。U-01 が決まったら、このファイルの文面を差し替えるだけで済むようにしてあります。
+# 差し替えるときの決まり:
+# - 軸のキー・グリッドの値(remote_days などの数字、training などの区分の値)は、config/params.toml のグリッドと一致させる
+#   (読み込みのときに検証します。食い違えば起動を止めます)。
+# - 波括弧 {value}・{days} は、コードが値を差し込む場所です。消さないでください。
+# - 二択の組(pairs)の年収は、本人が言った年収(を 50 万円単位のグリッドに寄せたもの)から、何段上か下かで書きます。
+#
+# このファイルを読むのは src/web/interview/templates.py です。
+
+provisional = true
+
+# --- 年収の正規化の 3 問(§5 の 2。FR-01)。TOML の決まりで、表([...])より前に書く ---
+salary_questions = [
+  "いまの(または直近の)お給料はいくらですか。年収か月収か、額面(税引き前)か手取りかも、わかる範囲で教えてください。",
+  "その中に、固定残業代(みなし残業代)は含まれていますか。含まれていれば、月にいくらかも教えてください。",
+  "賞与(ボーナス)は、年に月給の何か月分ですか。上のお給料に、賞与がすでに含まれているかも教えてください。",
+]
+
+# --- 面談の入口の注記(§5・§1.2・§6.3。P-4・P-6 の回答) ---
+[notice]
+title = "はじめに(必ずお読みください)"
+vertex_ai = "この面談では、あなたが書いた文章を AI(Google Cloud の Vertex AI で動く Gemini)に送って、数字や条件に読み取ります。Google 側では、不正利用を見つけるために、送った内容が一定の期間、記録されることがあります。このシステムは、あなたの生の値(年収の数字や「辞めた理由」の文章)を保存しませんが、Google 側の記録までは消せません。"
+global_endpoint = "AI の処理は Google Cloud の global エンドポイントで行われます。処理される国は決まっておらず、日本の国内とは限りません。"
+server_memory = "面談の途中の回答は、運営側のサーバーのメモリの上にだけ置き、送信するか、面談をやめると消えます(ディスクやデータベースには書きません)。送信すると、条件はグリッドの一番近いマスに丸めた形だけが保存されます。"
+auto_delete = "最後に使ってから {days} 日たつと、保存されたデータは自動で削除されます。いつでも「データを消す」で消すこともできます。"
+
+# --- 自由コメントと、辞めた理由の問い(§5 の 4・5。FR-06) ---
+[free_comment]
+prompt = "ここまでの質問で言い足りない条件があれば、自由に書いてください(例:「年収 650 万円以上なら、フル出社でも行く」「当直が月 4 回以上なら行かない」)。"
+
+[reason_for_leaving]
+prompt = "よければ、いまの仕事を辞めたい(辞めた)理由を教えてください。次の仕事で避けたい条件に読み替えます。書いた文章そのものは保存せず、読み替えた条件を確認したあとに捨てます。(任意)"
+
+# --- 軸を外す選択(§5 の 3。FR-05) ---
+[axes]
+notice = "この軸は、条件そのものが外から知られ得ます。"
+remove_label = "この軸の条件を外す(事前には答えず、交渉中に聞かれたら答える)"
+
+# --- パッケージ二択(§5 の 4・§2.4。FR-02) ---
+[two_choice]
+intro = "次の 2 つの条件について、それぞれ「行く」「行かない」「迷う」で答えてください。"
+closing = "この条件なら行きますか?"
+# 外した軸があるとき、保存しない回答(「行かない」。§2.4 の表)と、外した軸に触れる自由コメントを、本人に伝える文
+not_saved = "この条件を外しているので、この回答は保存せず、交渉中に確認します。"
+
+[two_choice.answers]
+go = "行く"
+no_go = "行かない"
+undecided = "迷う"
+
+# 外した軸の見せ方の文(§2.4)。順序のある軸は最も悪い値で見せる({value} がその値)。順序のない区分軸は「どちらでも」。
+[two_choice.removed_axis_phrases]
+remote_days = "リモートが週 {value} 日でも"
+night_duty = "当直が月 {value} 回でも"
+review_months = "昇給見直しが {value} か月後でも"
+training = "研修があってもなくても"
+side_job = "副業が可でも不可でも"
+start = "入職時期がいつになっても"
+
+# 二択の組の雛形。a・b は、2 つの選択肢。salary_steps は、本人の年収(を寄せたグリッド点)から 50 万円を何段上(+)下(-)か。
+# 区分軸(training・side_job・start)は、書かなければ「どちらでも」。
+# 並び順がそのまま出す順番。年収と 1 つの軸のトレードオフ 6 組のあとに、年収だけを動かす 5 組を置く
+# (軸を外すと、その軸のトレードオフの組は出さない。すべて外しても、年収だけの 5 組で、最少の 5 組に届く)。
+[[pairs]]
+id = "remote"
+[pairs.a]
+salary_steps = 2
+remote_days = 0
+night_duty = 0
+review_months = 12
+[pairs.b]
+salary_steps = 0
+remote_days = 3
+night_duty = 0
+review_months = 12
+
+[[pairs]]
+id = "night_duty"
+[pairs.a]
+salary_steps = 2
+remote_days = 2
+night_duty = 4
+review_months = 12
+[pairs.b]
+salary_steps = 0
+remote_days = 2
+night_duty = 0
+review_months = 12
+
+[[pairs]]
+id = "review"
+[pairs.a]
+salary_steps = 1
+remote_days = 2
+night_duty = 0
+review_months = 12
+[pairs.b]
+salary_steps = 0
+remote_days = 2
+night_duty = 0
+review_months = 6
+
+[[pairs]]
+id = "training"
+[pairs.a]
+salary_steps = 1
+remote_days = 2
+night_duty = 0
+review_months = 12
+training = "none"
+[pairs.b]
+salary_steps = 0
+remote_days = 2
+night_duty = 0
+review_months = 12
+training = "available"
+
+[[pairs]]
+id = "side_job"
+[pairs.a]
+salary_steps = 1
+remote_days = 2
+night_duty = 0
+review_months = 12
+side_job = "not_allowed"
+[pairs.b]
+salary_steps = 0
+remote_days = 2
+night_duty = 0
+review_months = 12
+side_job = "allowed"
+
+[[pairs]]
+id = "start"
+[pairs.a]
+salary_steps = 1
+remote_days = 2
+night_duty = 0
+review_months = 12
+start = "within_1_month"
+[pairs.b]
+salary_steps = 0
+remote_days = 2
+night_duty = 0
+review_months = 12
+start = "within_3_months"
+
+[[pairs]]
+id = "salary_1"
+[pairs.a]
+salary_steps = 2
+remote_days = 2
+night_duty = 0
+review_months = 12
+[pairs.b]
+salary_steps = -1
+remote_days = 2
+night_duty = 0
+review_months = 12
+
+[[pairs]]
+id = "salary_2"
+[pairs.a]
+salary_steps = 1
+remote_days = 2
+night_duty = 0
+review_months = 12
+[pairs.b]
+salary_steps = -2
+remote_days = 2
+night_duty = 0
+review_months = 12
+
+[[pairs]]
+id = "salary_3"
+[pairs.a]
+salary_steps = 3
+remote_days = 2
+night_duty = 0
+review_months = 12
+[pairs.b]
+salary_steps = 0
+remote_days = 2
+night_duty = 0
+review_months = 12
+
+[[pairs]]
+id = "salary_4"
+[pairs.a]
+salary_steps = 0
+remote_days = 2
+night_duty = 0
+review_months = 12
+[pairs.b]
+salary_steps = -3
+remote_days = 2
+night_duty = 0
+review_months = 12
+
+[[pairs]]
+id = "salary_5"
+[pairs.a]
+salary_steps = 2
+remote_days = 2
+night_duty = 0
+review_months = 12
+[pairs.b]
+salary_steps = -2
+remote_days = 2
+night_duty = 0
+review_months = 12
+
+# --- ブロック先の選択(§5 の 8・§6.1。FR-07。P-1 の回答) ---
+# 企業の一覧には、公開求人・非公開求人の有無に関係なく全企業を載せ、求人があるかどうかは示さない。
+[blocklist]
+prompt = "いまの勤め先の企業を、紹介の相手から外せます。一覧から選んでください(選ばなくても進めます)。"
+note = "登録できるのは、あなたの現職の企業だけです(利用規約で定めます)。一覧には、すべての企業が載っています。"
+
+# --- プロフィールの選択肢の表示名(§5 の 1・§2.6)。キーは config/params.toml の [attribute_bands.*] のグリッドと一致させる ---
+[labels.experience_band]
+under_3y = "〜3年"
+3_to_5y = "3〜5年"
+5_to_10y = "5〜10年"
+10y_plus = "10年〜"
+
+[labels.region_block]
+hokkaido_tohoku = "北海道・東北"
+kanto = "関東"
+chubu = "中部"
+kinki = "近畿"
+chugoku_shikoku = "中国・四国"
+kyushu_okinawa = "九州・沖縄"
+
+[labels.job_category]
+medical_welfare = "医療・福祉"
+it_web = "IT・Web"
+sales = "営業"
+administration = "事務"
+other = "その他"
+
+# 都道府県 → 地域ブロック(§2.6)。画面は都道府県を選ばせ、web がその場でブロックに変換して、都道府県は捨てる。
+[region_prefectures]
+hokkaido_tohoku = ["北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県"]
+kanto = ["茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県"]
+chubu = ["新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県", "岐阜県", "静岡県", "愛知県"]
+kinki = ["三重県", "滋賀県", "京都府", "大阪府", "兵庫県", "奈良県", "和歌山県"]
+chugoku_shikoku = ["鳥取県", "島根県", "岡山県", "広島県", "山口県", "徳島県", "香川県", "愛媛県", "高知県"]
+kyushu_okinawa = ["福岡県", "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県"]

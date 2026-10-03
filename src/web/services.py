@@ -15,6 +15,7 @@ from vault.clock import Clock, SystemClock
 
 from web.config import DEFAULT_WEB_CONFIG, WebConfig
 from web.deletion import PrincipalDeletion
+from web.interview import InterviewService, build_interview_service
 from web.ledger import DisclosureLedger
 from web.llm_budget import LlmBudget
 from web.locks import PrincipalLocks
@@ -45,6 +46,7 @@ class WebServices:
     sweeper: Sweeper
     principal_sweeper: PrincipalSweeper
     default_db: firestore.Client
+    interview: InterviewService
 
 
 def build_services(
@@ -93,6 +95,9 @@ def build_services(
     principal_sweeper = PrincipalSweeper(
         meta=meta, deletion=deletion, clock=clock, sleep=sleep, config=config.principal_sweeper
     )
+    interview = build_interview_service(
+        vault=vault, meta=meta, llm_budget=llm_budget, clock=clock, sleep=sleep, web_config=config
+    )
     return WebServices(
         vault=vault,
         clock=clock,
@@ -108,4 +113,5 @@ def build_services(
         sweeper=sweeper,
         principal_sweeper=principal_sweeper,
         default_db=default_db,
+        interview=interview,
     )
