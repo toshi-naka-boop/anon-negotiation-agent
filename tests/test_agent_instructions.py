@@ -2,8 +2,9 @@
 
 指示文は LLM に渡る固定の前文で、側ごとに 1 つ(計画と決定で共有)。内容の良し悪しは本物の Gemini でしか確かめられない
 (DV-15)ので、ここでは、設計と食い違うと機械的に分かる点だけを確かめる: v14 で足した項目(2 種類の呼び出し・checked・
-`check` という手がないこと・output_truncated・評価の残しかた)があること、グリッドと軸の向きが設定と同じであること、
-出せる手が AgentMoveType と同じであること。
+`check` という手がないこと・履歴の `check` はレフェリーの確かめであること・output_truncated・評価の残しかた)があること、
+グリッドと軸の向きが設定と同じであること、出せる手が AgentMoveType と同じであること、last_error の理由が LastErrorReason と
+同じであること(off_grid という理由はない)。
 """
 
 import re
@@ -36,6 +37,29 @@ def test_the_instruction_lists_exactly_the_moves_an_agent_can_make_and_says_ther
     moves = "・".join(get_args(AgentMoveType))
     assert f"手は {moves} の {len(get_args(AgentMoveType))} つ。check という手はない。" in text
     assert "- check:" not in text and "check（確かめる）" not in text  # v13 までの、手としての check の説明は残っていない
+
+
+@pytest.mark.parametrize("role", ROLES_WITH_FULL_INSTRUCTION)
+def test_the_instruction_says_a_check_in_the_history_is_the_referees_and_not_the_agents_move(role):
+    # §2.7・台帳 L16-1 (履歴の check はレフェリーの確かめで、エージェントの手ではない。move に check を書かないよう、指示文に書く。
+    # JSON モードでは、move の形の違反が計画全体を無効にし得る。レフェリーは checks が有効なら move を捨てるが、書かせないのが先)
+    text = load_instruction(role)
+    assert "履歴の check はレフェリーの確かめで、あなたの手ではない。move に check を書かない。" in text
+    history_line = next(line for line in text.splitlines() if line.startswith("- history:"))
+    assert "履歴の check はレフェリーの確かめ" in history_line  # 履歴を説明する項目の中にある
+
+
+@pytest.mark.parametrize("role", ROLES_WITH_FULL_INSTRUCTION)
+def test_the_instruction_names_the_last_error_reasons_of_the_schema_and_no_off_grid(role):
+    # §2.7・台帳 L16-2 (last_error の理由は LastErrorReason の値だけ。グリッド外の値は Package の検証で落ちて schema_invalid になるので、
+    # off_grid という理由はない。指示文は、理由ごとの直し方を、LastErrorReason の値のすべてについて書く)
+    text = load_instruction(role)
+    reasons = get_args(LastErrorReason)
+    assert "off_grid" not in reasons
+    assert "off_grid" not in text
+    for reason in reasons:
+        assert f"  - {reason}: " in text, reason
+    assert "  - schema_invalid: 値をグリッドの中から選び、出力の形を直す。" in text
 
 
 @pytest.mark.parametrize("role", ROLES_WITH_FULL_INSTRUCTION)

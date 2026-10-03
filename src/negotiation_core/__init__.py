@@ -34,8 +34,10 @@ from negotiation_core.schema import (
     MoveType,
     Phase,
     Plan,
+    PlanEnvelope,
     TurnInput,
     Usage,
+    parse_plan,
 )
 from negotiation_core.statements import (
     PartialStatement,
@@ -82,6 +84,7 @@ __all__ = [
     "Package",
     "Phase",
     "Plan",
+    "PlanEnvelope",
     "PartialStatement",
     "Policy",
     "Side",
@@ -99,6 +102,7 @@ __all__ = [
     "is_contradictory",
     "iter_all_packages",
     "neutral_fill_value_for_removal",
+    "parse_plan",
     "round_anchor",
     "round_numeric_value",
     "satisfies",

@@ -3,8 +3,10 @@
 秘密に触れる判断・状態の遷移・記録は、すべて金庫に任せる。レフェリーがするのは次だけ(1 手ごとの流れ。§4.1 の 1〜7。LLM の
 呼び出しは 1 手番に最大 2 回)。
 - 手番の側の残りの手数が 0 なら、LLM を呼ばずに end を登録して、金庫の停止の判定を効かせる(台帳 L9-3)。
-- 計画: 金庫の view とイベント列から TurnInput(phase=plan)を組み立ててエージェントを呼び、Plan として検証する。checks が空なら、
-  その手をそのまま登録する。checks と move の両方があれば、checks を実行して move を無視する(台帳 C-51)。
+- 計画: 金庫の view とイベント列から TurnInput(phase=plan)を組み立ててエージェントを呼び、2 段で読んで Plan にする
+  (negotiation_core.parse_plan。§2.7・§4.1 の 2。台帳 X-74・X-79: PlanEnvelope で schema と checks だけを検証し、checks があれば
+  move・package は型検証せずに捨てる。空なら move・package を Move の規則で検証する)。checks が空なら、その手をそのまま登録する。
+  checks と move の両方があれば、checks を実行して move を無視する(台帳 C-51。move の中身が check・グリッド外でも無効にしない。L16-1)。
 - 確かめ: checks を並びの順に 1 つずつ処理する。その側の見え方にすでにある評価は、金庫を呼ばずに埋める(web.turn_input.
   known_evaluations)。残りの評価回数が「残りの手数 ＋ 残りの途中確認数」以下なら、確かめずに null にする(台帳 C-47・X-48)。
   それ以外は、expected_version を付けて金庫の check を登録し、view を読み直して評価と version を取る。「受けられる」が出たら、
@@ -40,7 +42,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from negotiation_core import AttackerTurnInput, CheckedPackage, Move, Package, Plan, Side, TurnInput, Usage, Verdict
+from negotiation_core import AttackerTurnInput, CheckedPackage, Move, Package, Plan, Side, TurnInput, Usage, Verdict, parse_plan
 
 from vault.api_models import EventViewItem, MoveRequest, NegotiationViewResponse, PrincipalAnswerRequest
 from vault.clock import Clock, SystemClock
@@ -325,7 +327,7 @@ class Referee:
             # 確かめの要らない手(accept・reject・end・ask_principal、確かめ済みの案の propose など)は、そのまま登録する。
             return await self._register(self._move_request(side, view.version, plan.move, plan.package))
 
-        # checks と move の両方があるときも、checks を実行して move を無視する(台帳 C-51)。
+        # checks と move の両方があるときも、checks を実行して move を無視する(台帳 C-51)。parse_plan が move・package を捨てている。
         checked = await self._run_checks(side, view, events, plan.checks)
 
         # 確かめで、残りの評価回数と last_check・history が変わっている。view とイベント列を読み直して決定へ(台帳 L12-2)。
@@ -434,6 +436,8 @@ class Referee:
     ) -> Plan | Move | _InvalidOutput:
         """エージェントを 1 回呼び(計画なら Plan、決定なら Move)、検証する。失敗は _InvalidOutput(無効手の理由)にする。
 
+        計画は parse_plan で 2 段に読む(Plan 型で一括には検証しない。§2.7)。決定は Move 型で strict に検証する。
+
         上限に達していて送れないときは _CostLimitReached、カウンタに書けないときは LlmBudgetUnavailable のまま伝える
         (無効手にしない。送っていないので、エージェントの失敗ではない)。
         """
@@ -449,7 +453,7 @@ class Referee:
         try:
             payload, usage = await self._call_agent(role, turn_input)
             self._log_usage(side, phase, "ok", usage)
-            return model.model_validate(payload)
+            return parse_plan(payload) if model is Plan else model.model_validate(payload)
         except (_CostLimitReached, LlmBudgetUnavailable):
             raise
         except ValueError as exc:

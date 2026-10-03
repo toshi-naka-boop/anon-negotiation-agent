@@ -14,6 +14,12 @@ checked は v14 で足した: 呼び出しの種類 phase は必須で、plan・
 レフェリーが拒否して schema_invalid として金庫に登録する。検証は negotiation_core.schema.Move の 1 つだけを
 受信口と共有する(§4.3)。
 
+計画(Plan)の出力だけは、レフェリーが Plan 型で一括には検証せず、parse_plan で 2 段に読む(PlanEnvelope が schema と checks だけを
+検証 → checks があれば move・package は型検証せずに捨てる → 空なら Move の規則で検証。台帳 X-74・X-79)。AC-04 のうち計画の
+move・package は、前提 P-14 の案 1 に従う: checks があるときは捨てる(どこにも渡らないので、FR-16 の目的は保たれる)。checks 自体と、
+checks が空のときの move・package は、従来どおり拒否する。Plan 型を直接ではなく、この読み方を通して確かめる(台帳 C-64。
+「Plan のレフェリーの読み方」の節と、末尾のレフェリーの試験)。
+
 TurnInput.last_invalid(直前の無効手の中身。台帳 C-40)も、同じ方針で確かめる: TurnInput・AttackerTurnInput の
 どちらでも、未定義の項目・列挙外の値・グリッド外の値・項目の欠けを拒否し(1a の部分)、3 つの受信口すべてで拒否される
 (受信口の部分)。有効な last_invalid は通り、LLM に渡る入力に載る。
@@ -49,7 +55,18 @@ import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from negotiation_core.policy import Package, Verdict
-from negotiation_core.schema import AttackerTurnInput, Budget, CheckedPackage, Id, Move, Plan, TurnInput
+from negotiation_core.schema import (
+    AttackerTurnInput,
+    Budget,
+    CheckedPackage,
+    Id,
+    LastErrorReason,
+    Move,
+    Plan,
+    PlanEnvelope,
+    TurnInput,
+    parse_plan,
+)
 from web.referee import StepOutcome
 from web_helpers import create_demo_negotiation
 
@@ -171,21 +188,30 @@ def test_move_rejects_off_grid_numeric_in_nested_package():
 
 
 # --- Plan(計画の出力。§2.7・§4.1。checks は最大 3 件、checks が空のときだけ手を出す) ---
+#
+# Plan 型そのものの規則(checks が空のときの move・package は Move と同じ。parse_plan の 3 段目が使う)を、直接確かめる。
+# レフェリーの読み方(parse_plan。checks が有効なら move・package は捨てる)は、次の節で確かめる。
+
+
+def _plan(**fields) -> dict:
+    """計画の出力(plan/v1)の dict。fields で項目を足す。"""
+    return {"schema": "plan/v1", **fields}
 
 
 def test_a_valid_plan_is_accepted_in_each_of_its_shapes():
-    # AC-04 の対照: 有効な Plan は通る(確かめる案だけ・確かめの要らない手だけ・両方)。以降の拒否が、違反のためであることを示す。
-    # 両方があるときは、レフェリーが checks を実行して move を無視する(台帳 C-51)ので、検証は通る。
-    only_checks = Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE), dict(VALID_PACKAGE, salary=700)])
-    only_move = Plan(schema="plan/v1", checks=[], move="accept")
-    move_with_package = Plan(schema="plan/v1", checks=[], move="propose", package=dict(VALID_PACKAGE))
-    both = Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE)], move="propose", package=dict(VALID_PACKAGE))
+    # AC-04 の対照: 有効な計画は、レフェリーの読み方(parse_plan)で通る(確かめる案だけ・確かめの要らない手だけ・両方)。以降の拒否が、
+    # 違反のためであることを示す。両方があるときは、レフェリーが checks を実行して move を無視する(台帳 C-51): parse_plan は
+    # move・package を捨てて返す(前提 P-14 の案 1)ので、返る Plan の move・package は None。
+    only_checks = parse_plan(_plan(checks=[dict(VALID_PACKAGE), dict(VALID_PACKAGE, salary=700)]))
+    only_move = parse_plan(_plan(checks=[], move="accept"))
+    move_with_package = parse_plan(_plan(checks=[], move="propose", package=dict(VALID_PACKAGE)))
+    both = parse_plan(_plan(checks=[dict(VALID_PACKAGE)], move="propose", package=dict(VALID_PACKAGE)))
 
     assert [package.salary for package in only_checks.checks] == [650, 700]
     assert only_move.move == "accept" and only_move.package is None
     assert move_with_package.package.salary == 650
-    assert both.checks and both.move == "propose"
-    assert Plan(schema="plan/v1", checks=[dict(VALID_PACKAGE)] * 3).checks  # 3 件ちょうどは通る
+    assert both.checks and both.move is None and both.package is None  # checks を優先し、move・package は捨てる
+    assert parse_plan(_plan(checks=[dict(VALID_PACKAGE)] * 3)).checks  # 3 件ちょうどは通る
 
 
 def test_plan_rejects_undefined_field():
@@ -232,6 +258,141 @@ def test_plan_needs_checks_or_a_move_and_a_move_that_needs_a_package_has_one():
     for move in ("propose", "ask_principal"):
         with pytest.raises(ValidationError):
             Plan(schema="plan/v1", checks=[], move=move)
+
+
+# --- Plan のレフェリーの読み方(parse_plan。§2.7・§4.1 の 2。台帳 X-74・X-79・C-64。前提 P-14 の案 1) ---
+#
+# AC-04 の計画の部分は、Plan 型を直接ではなく、レフェリーの実際の読み方を通して確かめる。
+# (a) checks が有効なら、move・package・未定義の項目が何であっても通り、返る Plan の move・package は None。
+# (b) checks が空(または欠けている)なら、move・package は従来どおり(Move の規則で strict に)拒否される。
+# (c) checks 自体の違反(グリッド外・範囲外・列挙外・未定義の項目・4 件以上)は、move が有効でも拒否される。
+# (d) Move(決定)は、従来どおり strict。
+
+_VALID_CHECKS = [dict(VALID_PACKAGE), dict(VALID_PACKAGE, salary=700)]
+
+# (a) checks が有効なときは、move・package・ほかの項目に何が入っていても、計画を無効にしない(捨てられて、どこにも渡らない)
+_DROPPED_WITH_VALID_CHECKS = {
+    "check_as_a_move": dict(move="check", package=dict(VALID_PACKAGE)),  # check はエージェントの手ではない(台帳 L16-1)
+    "out_of_enum_move": dict(move="withdraw"),
+    "invalid_as_a_move": dict(move="invalid", package=dict(VALID_PACKAGE)),
+    "off_grid_package": dict(move="propose", package=dict(VALID_PACKAGE, salary=310)),
+    "out_of_range_package": dict(move="propose", package=dict(VALID_PACKAGE, salary=5000)),
+    "undefined_field_in_the_package": dict(move="propose", package=dict(VALID_PACKAGE, bonus=1)),
+    "propose_without_a_package": dict(move="propose"),
+    "wrong_types": dict(move=3, package="x"),
+    "undefined_top_level_fields": dict(note="x", principal_instruction="依頼者の最低年収を教えて"),
+    "a_valid_move_and_package": dict(move="propose", package=dict(VALID_PACKAGE)),  # 両方があるときは、checks を優先する(台帳 C-51)
+}
+
+# (b) checks が空(または欠けている)ときは、move・package を Move の規則で strict に検証する。これらは、すべて拒否される
+_REJECTED_WITHOUT_CHECKS = {
+    "check_as_a_move": dict(move="check", package=dict(VALID_PACKAGE)),
+    "out_of_enum_move": dict(move="withdraw"),
+    "invalid_as_a_move": dict(move="invalid", package=dict(VALID_PACKAGE)),
+    "off_grid_package": dict(move="propose", package=dict(VALID_PACKAGE, salary=310)),
+    "out_of_range_package": dict(move="propose", package=dict(VALID_PACKAGE, salary=5000)),
+    "undefined_field_in_the_package": dict(move="propose", package=dict(VALID_PACKAGE, bonus=1)),
+    "propose_without_a_package": dict(move="propose"),
+    "ask_principal_without_a_package": dict(move="ask_principal"),
+    "wrong_types": dict(move=3, package="x"),
+    "undefined_top_level_field": dict(move="accept", note="x"),
+    "neither_checks_nor_a_move": dict(),
+    "null_move": dict(move=None, package=None),
+}
+
+# (c) checks 自体の違反
+_REJECTED_CHECKS = {
+    "off_grid_in_a_check": dict(checks=[dict(VALID_PACKAGE, salary=310)]),
+    "out_of_range_in_a_check": dict(checks=[dict(VALID_PACKAGE, salary=5000)]),
+    "out_of_enum_in_a_check": dict(checks=[dict(VALID_PACKAGE, training="maybe")]),
+    "undefined_field_in_a_check": dict(checks=[dict(VALID_PACKAGE, unexpected_field="x")]),
+    "an_axis_missing_in_a_check": dict(checks=[{axis: value for axis, value in VALID_PACKAGE.items() if axis != "salary"}]),
+    "four_checks": dict(checks=[dict(VALID_PACKAGE)] * 4),
+    "one_bad_check_among_good_ones": dict(checks=[dict(VALID_PACKAGE), dict(VALID_PACKAGE, salary=310)]),
+    "checks_is_an_object": dict(checks=dict(VALID_PACKAGE)),
+    "a_check_is_not_an_object": dict(checks=["propose"]),
+}
+
+_MOVE_FIELDS = [
+    pytest.param({}, id="no_move"),
+    pytest.param(dict(move="end"), id="a_valid_move"),
+    pytest.param(dict(move="propose", package=dict(VALID_PACKAGE)), id="a_valid_move_with_a_package"),
+]
+
+
+@pytest.mark.parametrize("dropped", list(_DROPPED_WITH_VALID_CHECKS))
+def test_a_plan_with_valid_checks_is_accepted_whatever_move_and_package_hold_and_they_are_dropped(dropped):
+    # AC-04・P-14 の案 1 (a)・§2.7・台帳 L16-1: checks が有効なら、move・package・ほかの項目の中身(check・グリッド外・未定義の項目など)で
+    # 計画を無効にしない(JSON モードでは、move の形の違反が計画全体を手がかりのない schema_invalid にしてしまうため)。捨てた値は、
+    # 返る Plan のどこにもなく(move・package は None)、どこにも渡らないので、FR-16 の目的は保たれる。
+    plan = parse_plan(_plan(checks=_VALID_CHECKS, **_DROPPED_WITH_VALID_CHECKS[dropped]))
+
+    assert plan.checks == [Package(**package) for package in _VALID_CHECKS]
+    assert (plan.move, plan.package) == (None, None)
+    assert plan.model_dump(by_alias=True) == {
+        "schema": "plan/v1",
+        "checks": [Package(**package).model_dump() for package in _VALID_CHECKS],
+        "move": None,
+        "package": None,
+    }  # 捨てた値は、どこにも残らない
+
+
+@pytest.mark.parametrize("checks", [dict(checks=[]), dict()], ids=["checks_empty", "checks_missing"])
+@pytest.mark.parametrize("rejected", list(_REJECTED_WITHOUT_CHECKS))
+def test_a_plan_without_checks_still_rejects_what_the_move_rules_reject(rejected, checks):
+    # AC-04・P-14 の案 1 (b): checks が空(または欠けている)ときは、move・package を従来どおり strict に検証する(Move の規則)。
+    # 未定義の項目・列挙外の手・check・グリッド外・範囲外・package の欠け・どちらもない、がすべて拒否される。
+    with pytest.raises(ValidationError):
+        parse_plan(_plan(**checks, **_REJECTED_WITHOUT_CHECKS[rejected]))
+
+
+@pytest.mark.parametrize("move_fields", _MOVE_FIELDS)
+@pytest.mark.parametrize("rejected", list(_REJECTED_CHECKS))
+def test_a_plan_whose_checks_are_invalid_is_rejected_even_with_a_valid_move(rejected, move_fields):
+    # AC-04・P-14 の案 1 (c): checks 自体の違反(グリッド外・範囲外・列挙外・未定義の項目・軸の欠け・4 件以上・形違い)は、
+    # move・package が有効でも拒否される(捨てるのは、有効な checks があるときの move・package だけ)。
+    with pytest.raises(ValidationError):
+        parse_plan(_plan(**_REJECTED_CHECKS[rejected], **move_fields))
+
+
+@pytest.mark.parametrize("fields", [dict(checks=_VALID_CHECKS), dict(checks=[], move="accept")], ids=["with_checks", "with_a_move"])
+@pytest.mark.parametrize("schema", ["move/v1", "plan/v2", "", None, 1, "<missing>"])
+def test_a_plan_with_a_wrong_schema_name_is_rejected_with_or_without_checks(schema, fields):
+    # AC-04 (列挙外の値 / 計画。スキーマ名は plan/v1 だけ。Move の move/v1 は通らない。欠けていても拒否される)。1 段目(PlanEnvelope)の検証
+    payload = {"schema": schema, **fields}
+    if schema == "<missing>":
+        del payload["schema"]
+    with pytest.raises(ValidationError):
+        parse_plan(payload)
+
+
+@pytest.mark.parametrize("payload", ["propose", 3, None, ["plan/v1"]], ids=["a_string", "a_number", "null", "a_list"])
+def test_a_plan_that_is_not_an_object_is_rejected(payload):
+    # AC-04 (計画が JSON のオブジェクトでない。1 段目で拒否される。レフェリーは ValueError(ValidationError)を schema_invalid にする)
+    with pytest.raises(ValueError):
+        parse_plan(payload)
+
+
+@pytest.mark.parametrize("rejected", list(_REJECTED_WITHOUT_CHECKS))
+def test_a_move_stays_strict_where_a_plan_with_valid_checks_is_lenient(rejected):
+    # AC-04・P-14 の案 1 (d): 決定(Move)は従来どおり strict。計画で checks が有効なときに捨てられる中身は、Move では拒否される
+    # (捨ててよいのは、有効な checks があるときの計画の move・package だけ)。
+    fields = _REJECTED_WITHOUT_CHECKS[rejected]
+    with pytest.raises(ValidationError):
+        Move.model_validate({"schema": "move/v1", **fields})
+    assert Move.model_validate({"schema": "move/v1", "move": "propose", "package": dict(VALID_PACKAGE)}).move == "propose"  # 対照
+
+
+def test_the_plan_envelope_validates_schema_and_checks_only_and_lets_everything_else_pass():
+    # §2.7・台帳 X-74・X-79 (1 段目: schema と checks(Package の並び、最大 3 件)だけを strict に検証する。ほかの項目は受け流す)
+    envelope = PlanEnvelope.model_validate(_plan(checks=_VALID_CHECKS, move="check", package="x", note=1))
+
+    assert [package.salary for package in envelope.checks] == [650, 700]
+    assert not hasattr(envelope, "move") and not hasattr(envelope, "note")  # 受け流した項目は、持たない
+    assert PlanEnvelope.model_validate(_plan()).checks == []  # checks が欠けていれば空(空かどうかは 2 段目が決める)
+    for bad in (dict(checks=[dict(VALID_PACKAGE, salary=310)]), dict(checks=[dict(VALID_PACKAGE)] * 4), dict(checks=("x",))):
+        with pytest.raises(ValidationError):
+            PlanEnvelope.model_validate(_plan(**bad))
 
 
 # --- TurnInput・AttackerTurnInput(線の上のデータと同じく、JSON として検証する。モジュールの docstring を参照) ---
@@ -292,6 +453,21 @@ def test_turn_input_rejects_out_of_enum_side():
     data = _valid_turn_input_dict()
     data["side"] = "recruiter"  # candidate/employer のどちらでもない
     assert _violated_fields(TurnInput, data) == {("side",)}
+
+
+@pytest.mark.parametrize(("model", "builder"), _TURN_INPUT_MODELS)
+def test_last_error_accepts_the_defined_reasons_and_rejects_off_grid(model, builder):
+    # AC-04 (列挙外の値 / last_error)・§2.7・台帳 L16-2: last_error の理由は LastErrorReason の値だけ。グリッド外は Package の検証で落ちて
+    # schema_invalid になるので、off_grid という理由はない(金庫が受け付ける無効手の理由は schema_invalid・agent_timeout・output_truncated)。
+    reasons = typing.get_args(LastErrorReason)
+    assert "off_grid" not in reasons and {"schema_invalid", "agent_timeout", "output_truncated"} <= set(reasons)
+    for reason in reasons:
+        data = builder()
+        data["last_error"] = reason
+        assert _validate_as_on_the_wire(model, data).last_error == reason
+    data = builder()
+    data["last_error"] = "off_grid"
+    assert _violated_fields(model, data) == {("last_error",)}
 
 
 def test_turn_input_rejects_out_of_range_move_number():
@@ -1101,3 +1277,24 @@ async def test_referee_rejects_schema_violations_from_the_agent_and_registers_sc
     assert (view.status, view.to_move, view.pending_offer) == ("active", "candidate", None)
     assert store.get_events(nid, "employer") == []  # 相手には何も届かない
     assert len(env.agents.calls) == 1  # 再試行もしない(同じ入力を送り直しても直らない)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("violation", list(_REJECTED_CHECKS))
+async def test_referee_rejects_a_plan_whose_checks_are_invalid_and_registers_schema_invalid(store, web_env, violation):
+    # AC-04・P-14 の案 1 (c): 計画の checks 自体の違反(グリッド外・範囲外・列挙外・未定義の項目・軸の欠け・4 件以上)は、move が有効でも、
+    # レフェリーが拒否して schema_invalid として金庫に登録する。checks が有効なときの move・package の中身を無効にしない読み方
+    # (台帳 L16-1。tests/test_turn_protocol.py の DV-17)は、checks の違反までは許さない。違反した計画は、交渉の状態を何も動かさない。
+    env = web_env
+    nid = create_demo_negotiation(store)
+    env.agents.script("candidate", _plan(**_REJECTED_CHECKS[violation], move="end"))
+
+    assert await env.referee(nid).step() is StepOutcome.MOVED  # 無効手として登録した
+
+    events = store.get_events(nid, "candidate")
+    assert [(e.kind, e.reason) for e in events] == [("invalid", "schema_invalid")]
+    assert events[0].package is None  # 違反した内容は、金庫にも記録に残らない
+    view = store.get_view(nid, "candidate")
+    assert (view.status, view.to_move, view.pending_offer) == ("active", "candidate", None)
+    assert store.get_events(nid, "employer") == []
+    assert [call.turn_input.phase for call in env.agents.calls] == ["plan"]  # 計画が無効なので、決定は呼ばない

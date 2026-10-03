@@ -4,8 +4,8 @@
   差し込んで、アプリを作る。テストは、金庫の app と agents の app を ASGI のままつなぐ。
 - 起動時(lifespan)に、交渉の見回り・依頼者の見回りを動かす。レフェリーのタスクは、交渉の見回りと、
   交渉の作成のときに動く(RefereeManager)。止めるときは、見回りとレフェリーのタスクをすべて止める。
-- エージェントを呼ぶ関数は、agents.client.send_turn に、設定の base_url([agents] public_base_url)を
-  束ねたものを、レフェリーに差し込む。
+- エージェントを呼ぶ関数は、agents.client.send_turn に、設定の base_url([agents] public_base_url)と
+  設定([agents]。応答の usage の上限 max_prompt_tokens など。台帳 X-58)を束ねたものを、レフェリーに差し込む。
 - サービス間の認証(台帳 X-37): 金庫・agents を呼ぶときに、呼び先の URL を audience にした Google の ID トークンを
   `Authorization: Bearer` で付ける(web.service_auth)。環境変数 SERVICE_AUTH_ENABLED=false で切る(ローカル・テスト)。
 - 署名の鍵は環境変数 SESSION_SIGNING_KEY から読む。コードに鍵を書かず、既定値も持たない。鍵がなければ
@@ -34,7 +34,7 @@ from fastapi.responses import JSONResponse
 from google.cloud import firestore
 
 from agents.client import send_turn as agents_send_turn
-from agents.config import DEFAULT_AGENTS_CONFIG
+from agents.config import DEFAULT_AGENTS_CONFIG, AgentsConfig
 from negotiation_core.attestation import AttestationPolicy, SignerCerts, active_digests, load_releases
 from negotiation_core.log_privacy import mask_ids_in_logs
 from negotiation_core.tee_settings import load_tee_settings
@@ -71,14 +71,16 @@ GITHUB_REPO_URL_ENV = "GITHUB_REPO_URL"
 DEFAULT_RELEASES_PATH = Path(__file__).resolve().parents[2] / "deploy" / "vault-releases.json"
 
 
-def bind_agents_client(base_url: str, token_provider: IdTokenProvider | None = None) -> SendTurn:
-    """agents.client.send_turn に base_url を束ねる(レフェリーの SendTurn の形にする。§4.1)。
+def bind_agents_client(
+    base_url: str, token_provider: IdTokenProvider | None = None, config: AgentsConfig = DEFAULT_AGENTS_CONFIG
+) -> SendTurn:
+    """agents.client.send_turn に base_url と設定(config)を束ねる(レフェリーの SendTurn の形にする。§4.1)。
 
     token_provider を渡すと、agents を呼ぶたびに、base_url を audience にした ID トークンを付ける(台帳 X-37)。
-    渡さなければ、認証を付けない(ローカル・テスト)。
+    渡さなければ、認証を付けない(ローカル・テスト)。config は、応答の usage の検証の上限(max_prompt_tokens など。§10)。
     """
     auth = IdTokenAuth(token_provider, base_url) if token_provider is not None else None
-    return functools.partial(agents_send_turn, base_url, auth=auth)
+    return functools.partial(agents_send_turn, base_url, auth=auth, config=config)
 
 
 def create_app(

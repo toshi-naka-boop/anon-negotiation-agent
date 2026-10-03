@@ -7,6 +7,7 @@ DV-01・DV-16 が確かめる「ID の発行の条件」「クッキーの延長
 """
 
 import base64
+import dataclasses
 import datetime as dt
 import re
 import secrets
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import web.app as web_app_module
+from agents.config import DEFAULT_AGENTS_CONFIG
 from agents.wire import ROLES
 from web.app import bind_agents_client, create_app, create_app_from_env
 from web.config import DEFAULT_WEB_CONFIG, load_web_config
@@ -342,10 +344,11 @@ def test_the_production_entry_point_reads_the_key_and_the_vault_url_from_the_env
 async def test_the_agents_client_is_bound_to_the_configured_base_url(role, monkeypatch):
     # §4.1: agents.client.send_turn に、設定の base_url を束ねて、レフェリーに差し込む。
     # サービス間の認証を渡さなければ、認証は付かない(ローカル・テスト。台帳 X-37。付く場合は tests/test_service_auth.py)。
+    # 設定([agents]。応答の usage の上限 max_prompt_tokens など。§10)も束ねる。渡さなければ DEFAULT_AGENTS_CONFIG。
     calls = []
 
-    async def recorder(base_url, role_, turn_input, *, nid, timeout_s, auth=None):
-        calls.append((base_url, role_, nid, timeout_s, auth))
+    async def recorder(base_url, role_, turn_input, *, nid, timeout_s, auth=None, config=None):
+        calls.append((base_url, role_, nid, timeout_s, auth, config))
         return {"ok": True}
 
     monkeypatch.setattr(web_app_module, "agents_send_turn", recorder)
@@ -354,7 +357,11 @@ async def test_the_agents_client_is_bound_to_the_configured_base_url(role, monke
     result = await send_turn(role, object(), nid="0123456789abcdef", timeout_s=5)
 
     assert result == {"ok": True}
-    assert calls == [("http://agents.example", role, "0123456789abcdef", 5, None)]
+    assert calls == [("http://agents.example", role, "0123456789abcdef", 5, None, DEFAULT_AGENTS_CONFIG)]
+
+    custom = dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_prompt_tokens=1234)
+    await bind_agents_client("http://agents.example", config=custom)(role, object(), nid="0123456789abcdef", timeout_s=5)
+    assert calls[-1][-1] is custom  # 渡した設定が、そのまま send_turn に届く
 
 
 @pytest.mark.anyio

@@ -384,9 +384,10 @@ async def test_turn_input_shows_neither_the_version_nor_the_counterpartys_remain
     assert [(c.turn_input.phase, budget(c)) for c in employer_calls] == [("plan", (17, 6, 1)), ("decide", (16, 6, 1))]
 
     # 自分の手の数(own_move_number)は、金庫の通し番号(version)とは別物: 求人側の 1 回目は、候補者の
-    # 記録が 2 件あって version は 2 だが、自分の手は 0 回。
-    assert [c.turn_input.own_move_number for c in candidate_calls] == [0, 1]
-    assert [c.turn_input.own_move_number for c in employer_calls] == [0, 1]
+    # 記録が 2 件あって version は 2 だが、自分の手は 0 回。レフェリーの確かめは、エージェントの手ではないので数えない
+    # (決定の呼び出しでも 0。台帳 L15-2)。
+    assert [c.turn_input.own_move_number for c in candidate_calls] == [0, 0]
+    assert [c.turn_input.own_move_number for c in employer_calls] == [0, 0]
 
     for call in env.agents.calls:
         dumped = call.turn_input.model_dump(mode="json", by_alias=True)

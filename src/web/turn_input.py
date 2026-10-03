@@ -26,7 +26,8 @@ web はイベントを写さないので(§3.2)、履歴はこの関数に渡さ
   金庫の無効手の見え方(EventViewItem の attempted_move・package・own_evaluation)をそのまま詰める。
   レフェリーが登録した無効手(schema_invalid・agent_timeout・output_truncated)は、金庫には何を打とうとしたか分からないので、
   3 つとも None になる(last_invalid 自体は入る)。
-- own_move_number は、自分側が打った手(確認手・提案・断る・途中確認・無効手)の数。
+- own_move_number は、エージェント自身が出した手(提案・断る・途中確認・無効手)の数。レフェリーが計画の中で登録した確かめ
+  (check の記録。有効なものと、評価回数が尽きて無効になったもの)は数えない(台帳 L15-2)。
   手数の上限に数えるもの(有効な check と有効な ask_principal を除く。台帳 C-38)とは別の、単純な数え方にした。
 """
 
@@ -50,8 +51,9 @@ from negotiation_core import (
 
 from vault.api_models import EventViewItem, NegotiationViewResponse
 
-# 自分側が打った手として数えるイベントの種類。
-_OWN_MOVE_KINDS = frozenset({"check", "propose", "reject", "ask_principal", "invalid"})
+# エージェント自身の手のイベントの種類。レフェリーの確かめ(check)は、エージェントの手ではないので含めない(台帳 L15-2・X-51)。
+# 評価回数が尽きて無効になった確かめは invalid として記録されるので、_is_referee_check で別に除く。
+_OWN_MOVE_KINDS = frozenset({"propose", "reject", "ask_principal", "invalid"})
 # 「直前の手」を探すときに見るイベントの種類(自分の手と、相手の手)。
 _MOVE_LIKE_KINDS = _OWN_MOVE_KINDS | {"offer_received", "offer_rejected"}
 
@@ -146,8 +148,8 @@ def build_last_invalid(events: list[EventViewItem]) -> LastInvalid | None:
 
 
 def count_own_moves(events: list[EventViewItem]) -> int:
-    """自分側が打った手の数(own_move_number。§2.7)。"""
-    return sum(1 for event in events if event.kind in _OWN_MOVE_KINDS)
+    """エージェント自身が出した手の数(own_move_number。§2.7・台帳 L15-2)。無効手は数え、レフェリーの確かめは数えない。"""
+    return sum(1 for event in events if event.kind in _OWN_MOVE_KINDS and not _is_referee_check(event))
 
 
 def package_key(package: Package) -> tuple:

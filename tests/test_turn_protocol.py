@@ -10,6 +10,7 @@ LLM は、受けた TurnInput を記録するスタブ(tests/web_helpers.py の 
 | 見え方にある「受けられる」「受けられない」は金庫を呼ばずに埋まる。「本人確認が必要」は回答の後だけ確かめ直す | test_known_not_acceptable_and_needs_confirmation_records_are_filled_without_calling_the_vault・test_a_needs_confirmation_record_is_checked_again_after_this_side_answered_a_question |
 | 残りの評価が「残りの手数 ＋ 残りの途中確認数」以下なら確かめない。残りの手のすべてで提案のガードが通る | test_checks_stop_when_the_remaining_evaluations_only_cover_the_remaining_moves_and_the_question |
 | checks が空の手はそのまま登録・checks と move の両方は checks を実行して move を無視・どちらもない/move=check は schema_invalid | test_a_plan_without_checks_registers_its_move_as_it_is・test_a_plan_with_both_checks_and_a_move_runs_the_checks_and_ignores_the_move・test_a_plan_with_neither_checks_nor_a_move_and_a_check_as_a_move_are_schema_invalid |
+| checks が有効なら move・package の中身(check・グリッド外など)で schema_invalid にならず、checks だけが実行される。checks 自体の違反は schema_invalid(L16-1・X-74・X-79・P-14 の案 1) | test_a_plan_with_valid_checks_runs_only_the_checks_whatever_its_move_and_package_hold・test_a_plan_with_invalid_checks_is_schema_invalid_even_with_a_valid_move |
 | 計画が無効手の手番では決定を呼ばない。決定の無効手が 3 回続くと、間に確かめがあっても stopped_invalid | test_an_invalid_plan_does_not_call_the_decision・test_three_invalid_decisions_in_a_row_stop_the_negotiation_even_with_checks_between_them |
 | 決定の TurnInput は、確かめの後に読み直した view から作られ、checked が確かめた結果と順序どおりに一致する | test_the_decision_input_is_built_from_the_view_read_again_after_the_checks_and_carries_the_checked_results |
 | 確かめの途中の 409・レフェリーの作り直しでも、同じ手番から続き、済んだ確かめは重ねて消費しない | test_a_409_during_the_checks_restarts_the_turn_without_spending_a_finished_check_again・test_a_recreated_referee_does_not_spend_a_finished_check_again |
@@ -325,7 +326,8 @@ async def test_checks_stop_when_the_remaining_evaluations_only_cover_the_remaini
 
 # ----------------------------------------------------------------------
 # 項目: checks が空のときの手はそのまま登録され、checks と move の両方がある Plan は checks を実行して move を無視し、
-#       どちらもない Plan と move=check を出した Plan・Move は schema_invalid になる(C-51)
+#       どちらもない Plan と move=check を出した Plan・Move は schema_invalid になる(C-51)。checks が有効なら、move・package の中身
+#       (check・グリッド外・列挙外・未定義の項目)で計画を無効にせず、checks だけが実行される。checks 自体の違反は schema_invalid(L16-1)
 # ----------------------------------------------------------------------
 
 
@@ -379,6 +381,87 @@ async def test_a_plan_with_neither_checks_nor_a_move_and_a_check_as_a_move_are_s
 
     assert [(e.kind, e.reason) for e in store.get_events(nid, "candidate")] == [("invalid", "schema_invalid")]
     assert [c.turn_input.phase for c in env.agents.calls] == ["plan"]  # 無効な計画の後に、決定は呼ばない
+
+
+_A_JSON = A.model_dump(mode="json")
+_LEAK = "LEAKMARK"  # 捨てられるはずの値に入れる目印。どこにも渡らないことを確かめる
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "junk",
+    [
+        {"move": "check", "package": _A_JSON},  # check は手ではない(履歴の check はレフェリーの確かめ。L16-1)
+        {"move": "propose", "package": {**_A_JSON, "salary": 310, "memo": _LEAK}},  # グリッド外 + 未定義の項目
+        {"move": "propose", "package": {**_A_JSON, "salary": 5000}},  # 範囲外
+        {"move": "propose"},  # package がない
+        {"move": _LEAK},  # 列挙外の手
+        {"move": 3, "package": _LEAK},  # 型違い
+        {"note": _LEAK},  # 未定義の項目
+        {"move": "check", "package": None, "note": _LEAK},
+    ],
+    ids=["check_as_a_move", "off_grid_package", "out_of_range_package", "propose_without_a_package", "out_of_enum_move",
+         "wrong_types", "undefined_field", "check_with_a_null_package"],
+)
+async def test_a_plan_with_valid_checks_runs_only_the_checks_whatever_its_move_and_package_hold(store, web_env, junk):
+    # DV-17・§2.7・台帳 L16-1・X-74・X-79・前提 P-14 の案 1: checks が有効な計画は、move・package の中身(check・グリッド外・範囲外・列挙外・
+    # 型違い・未定義の項目)で schema_invalid にならない。checks だけが実行され、move・package は捨てられる(金庫にも、決定の TurnInput にも
+    # 渡らない)。JSON モードでは、move の形の違反が計画全体を手がかりのない schema_invalid にして、同じ計画を繰り返してしまうため。
+    env = web_env
+    spy = SpyVault(env.vault)
+    await env.restart(vault=spy)
+    nid = _threshold_negotiation(store)
+    env.agents.script("candidate", {"schema": "plan/v1", "checks": [_A_JSON], **junk}, move_dict("end"))
+
+    await drive(env.referee(nid))
+
+    assert [(r.move, r.package) for r in spy.move_requests] == [("check", A), ("end", None)]  # 確かめだけが実行され、計画の手は登録されない
+    assert [c.turn_input.phase for c in env.agents.calls] == ["plan", "decide"]  # schema_invalid にならず、決定まで進んだ
+    assert _kinds(store, nid) == ["check", "final_result"]  # 無効手の記録はない
+    decide = env.agents.calls[1].turn_input
+    assert (decide.last_error, decide.last_invalid) == (None, None)
+    assert [(c.package, c.evaluation) for c in decide.checked] == [(A, NOT)]
+    # 捨てた値は、どこにも渡らない
+    everything = " ".join(
+        [
+            decide.model_dump_json(),
+            str(spy.move_requests),
+            *(e.model_dump_json() for side in ("candidate", "employer") for e in store.get_events(nid, side)),
+        ]
+    )
+    assert _LEAK not in everything
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "plan",
+    [
+        {"schema": "plan/v1", "checks": [{**_A_JSON, "salary": 310}], "move": "end"},  # checks の中のグリッド外
+        {"schema": "plan/v1", "checks": [{**_A_JSON, "salary": 5000}], "move": "end"},  # 範囲外
+        {"schema": "plan/v1", "checks": [{**_A_JSON, "bonus": 1}], "move": "end"},  # 組み合わせの中の未定義の項目
+        {"schema": "plan/v1", "checks": [_A_JSON, {**_A_JSON, "salary": 310}], "move": "end"},  # 1 件でも違反があれば全体が無効
+        {"schema": "plan/v1", "checks": [_A_JSON] * 4, "move": "end"},  # 4 件(最大 3 件)
+        {"schema": "plan/v1", "checks": _A_JSON, "move": "end"},  # checks が並びでない
+        {"schema": "plan/v2", "checks": [_A_JSON]},  # スキーマ名が違う
+        {"checks": [_A_JSON]},  # スキーマ名がない
+    ],
+    ids=["off_grid_check", "out_of_range_check", "undefined_field_in_a_check", "one_bad_check_among_good_ones", "four_checks",
+         "checks_is_an_object", "wrong_schema_name", "no_schema_name"],
+)
+async def test_a_plan_with_invalid_checks_is_schema_invalid_even_with_a_valid_move(store, web_env, plan):
+    # DV-17・前提 P-14 の案 1・台帳 X-74: 捨てるのは、有効な checks があるときの move・package だけ。checks 自体と、スキーマ名の違反は、
+    # move が有効でも schema_invalid の無効手になり、確かめは 1 つも実行されず、決定も呼ばない。
+    env = web_env
+    spy = SpyVault(env.vault)
+    await env.restart(vault=spy)
+    nid = _threshold_negotiation(store)
+    env.agents.script("candidate", plan)
+
+    assert await env.referee(nid).step() is StepOutcome.MOVED
+
+    assert [(e.kind, e.reason) for e in store.get_events(nid, "candidate")] == [("invalid", "schema_invalid")]
+    assert [(r.move, r.reason) for r in spy.move_requests] == [("invalid", "schema_invalid")]  # 確かめは 1 つも登録されていない
+    assert [c.turn_input.phase for c in env.agents.calls] == ["plan"]
 
 
 @pytest.mark.anyio

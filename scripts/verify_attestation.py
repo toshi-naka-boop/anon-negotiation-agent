@@ -130,7 +130,7 @@ def _fetch_via_web(url: str, nonce: str, transport: httpx.BaseTransport | None) 
     except httpx.HTTPError as exc:
         raise _FetchError(f"could not call the web app ({type(exc).__name__})") from exc
     if response.status_code == 429:
-        raise _FetchError("the web app returned 429 (nonce つきの検証は 10 秒に 1 回まで。少し待ってから、もう一度)")
+        raise _FetchError("the web app returned 429 (nonce つきの検証は、同じ送信元から 10 秒に 1 回、全体で 2 秒に 1 回まで。少し待ってから、もう一度)")
     if response.status_code != 200:
         raise _FetchError(f"the web app returned {response.status_code}")
     return _token_from_json(response)

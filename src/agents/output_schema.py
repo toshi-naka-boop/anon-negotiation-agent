@@ -7,7 +7,8 @@
 レフェリーの 1 回の上限(45 秒)を超えて手番が落ちた(2026-10-03 の実測。JSON モードなら 2〜9 秒)。
 
 グリッド値・`check` という手がないこと・Plan.checks が最大 3 件・checks か move のどちらか、は指示文で伝え、
-negotiation_core.schema の Plan・Move でレフェリーが検証する(違反は schema_invalid・off_grid の無効手。§4.1)。
+negotiation_core.schema の Plan(計画は parse_plan で 2 段に読む)・Move でレフェリーが検証する(違反は schema_invalid の無効手。
+グリッド外も schema_invalid で、off_grid という理由はない。§4.1・台帳 L16-2)。
 JSON モードでも数値軸が文字列(例: "650")で返ることがあるので、受信口は restore_numeric_axes で整数に戻してから返す。
 """
 

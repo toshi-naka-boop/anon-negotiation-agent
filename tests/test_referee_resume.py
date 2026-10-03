@@ -74,7 +74,8 @@ async def test_recreated_referee_task_continues_from_the_same_turn(store, web_en
 
     replanned, resumed = env.agents.calls[2], env.agents.calls[3]
     assert (replanned.role, replanned.nid) == (interrupted.role, interrupted.nid)
-    assert replanned.turn_input.phase == "plan" and replanned.turn_input.own_move_number == 1  # 確かめ 1 回は登録済み
+    # 確かめ 1 回は登録済みだが、レフェリーの確かめは、エージェントの手に数えない(台帳 L15-2)
+    assert replanned.turn_input.phase == "plan" and replanned.turn_input.own_move_number == 0
     assert resumed.turn_input.phase == "decide"
     assert resumed.turn_input.model_dump() == interrupted.turn_input.model_dump()  # 同じ手番・同じ入力
     assert [e.kind for e in store.get_events(nid, "candidate")] == ["check", "propose", "final_result"]  # 確かめは重ならない

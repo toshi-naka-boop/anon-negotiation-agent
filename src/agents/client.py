@@ -8,9 +8,9 @@ decide なら Move の形)、usage はその呼び出しの使用量(`negotiatio
 - Agent Card は取りに行かない(受信口の場所は role から決まる)。Card は探索用に公開してある。
 - 応答の封筒の検証(§4.3・台帳 X-58。X-41 の検証を応答にも延ばしたもの)。完了したタスクが 1 件、artifact が 1 件、その parts は
   DataPart 1 件(data は JSON のオブジェクト)、artifact の metadata は `usage` だけで、usage は `Usage` として strict に
-  検証する(未知の項目・欠落・負の値・型違いは拒否)。トークン数は上限の範囲(prompt_tokens は MAX_PROMPT_TOKENS 以下、
+  検証する(未知の項目・欠落・負の値・型違いは拒否)。トークン数は上限の範囲(prompt_tokens は設定の max_prompt_tokens 以下、
   output_tokens ＋ thoughts_tokens は設定の max_output_tokens 以下、cached_tokens は prompt_tokens 以下)で、model は
-  設定のモデル名と一致すること。違えば ValueError。
+  設定のモデル名と一致すること。違えば ValueError。設定は、send_turn の config 引数(既定は DEFAULT_AGENTS_CONFIG)。
 - 失敗は、組み込みの例外(と、ValueError の派生の TruncatedOutputError)だけで伝える。
 
 | 起きたこと | 例外 |
@@ -50,7 +50,7 @@ from a2a.utils.errors import A2AError, InternalError, InvalidParamsError, Invali
 from google.protobuf.json_format import ParseError
 from pydantic import ValidationError
 
-from agents.config import DEFAULT_AGENTS_CONFIG
+from agents.config import DEFAULT_AGENTS_CONFIG, AgentsConfig
 from agents.wire import (
     DATA_MEDIA_TYPE,
     ROLES,
@@ -64,10 +64,6 @@ from agents.wire import (
     value_to_python,
 )
 from negotiation_core.schema import AttackerTurnInput, TurnInput, Usage
-
-# 応答の usage の prompt_tokens の上限(暫定)。入力は、前文(約 2,000 トークン)と、本文 32 KB の上限から多くても約 10,000
-# トークンの TurnInput(§8.2)なので、余裕を見て 20,000 にした。設定ファイルには値がないので、ここに置く(決まったら設定へ)。
-MAX_PROMPT_TOKENS = 20_000
 
 
 class TruncatedOutputError(ValueError):
@@ -104,8 +100,8 @@ def _card_for(url: str) -> AgentCard:
     )
 
 
-def _validated_usage(raw: object) -> Usage:
-    """応答の usage を Usage として strict に検証し、上限の範囲を確かめる。違えば ValueError(値は、メッセージに載せない)。"""
+def _validated_usage(raw: object, config: AgentsConfig) -> Usage:
+    """応答の usage を Usage として strict に検証し、設定(config)の上限の範囲を確かめる。違えば ValueError(値は、メッセージに載せない)。"""
     if not isinstance(raw, dict):
         raise ValueError("the agent response usage is not a JSON object")
     try:
@@ -120,11 +116,10 @@ def _validated_usage(raw: object) -> Usage:
             }
         )
         raise ValueError(f"the agent response usage is invalid (fields: {', '.join(fields)})") from None
-    config = DEFAULT_AGENTS_CONFIG
     if usage.model != config.model:
         raise ValueError("the agent response usage names a model other than the configured one")
-    if usage.prompt_tokens > MAX_PROMPT_TOKENS:
-        raise ValueError(f"the agent response usage has more than {MAX_PROMPT_TOKENS} prompt tokens")
+    if usage.prompt_tokens > config.max_prompt_tokens:
+        raise ValueError(f"the agent response usage has more than {config.max_prompt_tokens} prompt tokens")
     if usage.output_tokens + usage.thoughts_tokens > config.max_output_tokens:
         raise ValueError(f"the agent response usage has more than {config.max_output_tokens} output and thought tokens")
     if usage.cached_tokens > usage.prompt_tokens:
@@ -135,7 +130,7 @@ def _validated_usage(raw: object) -> Usage:
     return usage
 
 
-def _checked_response(responses: list[StreamResponse]) -> tuple[dict, Usage]:
+def _checked_response(responses: list[StreamResponse], config: AgentsConfig) -> tuple[dict, Usage]:
     """応答の封筒を検証し、DataPart の `data`(dict)と、その呼び出しの usage を返す(台帳 X-58)。
 
     A2A の形でない・完了していないタスクは ConnectionError、それ以外の封筒の違反は ValueError。
@@ -161,13 +156,13 @@ def _checked_response(responses: list[StreamResponse]) -> tuple[dict, Usage]:
     metadata = struct_to_python(artifact.metadata)
     if set(metadata) != {USAGE_KEY}:
         raise ValueError("the agent response artifact metadata must contain only usage")
-    return data, _validated_usage(metadata[USAGE_KEY])
+    return data, _validated_usage(metadata[USAGE_KEY], config)
 
 
-def _usage_in_error(data: dict) -> Usage | None:
+def _usage_in_error(data: dict, config: AgentsConfig) -> Usage | None:
     """切れた出力のエラー(truncated の印つき)の data にある usage を検証して返す。付いていない・不正なら None。"""
     try:
-        return _validated_usage(data.get(USAGE_KEY))
+        return _validated_usage(data.get(USAGE_KEY), config)
     except ValueError:
         return None
 
@@ -180,12 +175,14 @@ async def send_turn(
     nid: str,
     timeout_s: float,
     auth: httpx.Auth | None = None,
+    config: AgentsConfig = DEFAULT_AGENTS_CONFIG,
 ) -> tuple[dict, Usage]:
     """role の受信口へ turn_input を 1 回だけ送り、返ってきた DataPart の `data`(dict)と、その呼び出しの usage を返す。
 
     base_url は agents サービスの URL(例: `https://agents.example`)。送り先は `{base_url}/a2a/{role}`。
     `nid`(交渉 ID)は A2A のメッセージの metadata に載せる。LLM には渡らない(§2.7)。
     `auth` は、この呼び出しの HTTP クライアントに付ける認証(サービス間の ID トークン。台帳 X-37)。
+    config は、応答の usage の検証に使う設定(max_prompt_tokens・max_output_tokens・model。web.app.bind_agents_client が渡す)。
     返り値は `(payload, usage)`。応答の封筒の検証と、失敗の伝え方は、モジュールの docstring のとおり。
     """
     if role not in ROLES:
@@ -224,7 +221,7 @@ async def send_turn(
         if isinstance(exc, InternalError) and data.get(TRUNCATED_ERROR_KEY) == "true":
             # 出力が max_output_tokens で切れた(台帳 C-53)。一時的ではない。usage は、付いていて検証に通るときだけ載せる。
             raise TruncatedOutputError(
-                "the agent output was cut off at max_output_tokens", usage=_usage_in_error(data)
+                "the agent output was cut off at max_output_tokens", usage=_usage_in_error(data, config)
             ) from exc
         # 一時的と印のない失敗(LLM の出力が JSON でない・ADK の検証エラーなど)は、temperature 0 では送り直しても同じ
         # 失敗を繰り返す。ConnectionError(再試行する)にせず、ValueError(再試行しない)にする(台帳 L9-5)。
@@ -240,4 +237,4 @@ async def send_turn(
 
     if not responses:
         raise ConnectionError("the agent endpoint returned no response")
-    return _checked_response(responses)
+    return _checked_response(responses, config)

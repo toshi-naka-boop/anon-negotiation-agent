@@ -9,7 +9,7 @@ ID を実際に使う受信口・vault の API は、1a では作らないので
 
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints, model_validator
+from pydantic import ConfigDict, Field, StringConstraints, model_validator
 
 from negotiation_core.policy import Package, StrictModel, Verdict
 from negotiation_core.vocabulary import ExperienceBandValue, JobCategoryValue, RegionBlockValue, Side
@@ -26,8 +26,8 @@ AgentMoveType = Literal["propose", "accept", "reject", "ask_principal", "end"]
 # 呼び出しの種類(§4.1)。plan は計画(確かめたい案を出す)、decide は決定(確かめの結果を見て手を 1 つ出す)。
 Phase = Literal["plan", "decide"]
 
+# 直前の自分の手が無効だった理由(§2.7)。グリッド外の値は Package の検証で落ちるので schema_invalid になる(off_grid という理由はない。台帳 L16-2)。
 LastErrorReason = Literal[
-    "off_grid",
     "not_acceptable_to_own_principal",
     "no_pending_offer",
     "question_not_applicable",
@@ -185,6 +185,9 @@ class Plan(StrictModel):
     checks は、確かめたい組み合わせを出したい順に最大 3 つ。checks が空のときだけ、手(move・package)を出す。
     checks と move の両方があるときは、レフェリーが checks を実行して move を無視する(台帳 C-51)。
     どちらもないときは無効(schema_invalid。台帳 L12-3)。
+
+    レフェリーは、エージェントの出力をこの型で一括に検証せず、parse_plan で 2 段に読む(checks が有効なら、move・package は
+    型検証せずに捨てる。台帳 L16-1・X-74・X-79)。この型で検証するのは、parse_plan の 3 段目(checks が空のときの手)だけ。
     """
 
     schema_: Literal["plan/v1"] = Field(alias="schema")
@@ -201,3 +204,32 @@ class Plan(StrictModel):
             if self.move in _MOVES_REQUIRING_PACKAGE and self.package is None:
                 raise ValueError(f"move={self.move!r} requires a package")
         return self
+
+
+class PlanEnvelope(StrictModel):
+    """計画の出力の 1 段目の読み(§2.7・§4.1 の 2。台帳 X-74・X-79): schema と checks だけを持つ strict な型。
+
+    ほかの項目(move・package・未定義の項目)は受け流す(extra="ignore")。checks が空でなければ、それらは parse_plan が型検証せずに捨てる。
+    JSON モードでは、move の形の違反(check・グリッド外など)が計画全体を手がかりのない schema_invalid にしてしまうため、
+    checks が有効なら move・package の中身で計画を無効にしない(台帳 L16-1。履歴の check はレフェリーの確かめで、エージェントの手ではない)。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_: Literal["plan/v1"] = Field(alias="schema")
+    checks: list[Package] = Field(default_factory=list, max_length=MAX_PLANNED_CHECKS)
+
+
+def parse_plan(payload: dict) -> Plan:
+    """計画の出力(エージェントが返した dict)を 2 段で読んで Plan にする(§2.7・§4.1 の 2。台帳 X-74・X-79・L16-1)。
+
+    1. PlanEnvelope(schema と checks だけ。strict)で検証する。違反(スキーマ名・checks のグリッド外や未定義の項目・4 件以上)は ValueError。
+    2. checks が空でなければ、move・package は型検証せずに捨てて、move・package が None の Plan を返す(checks を優先する寛容な読み。
+       前提 P-14 の案 1: 捨てた値はどこにも渡らないので、AC-04 の目的(FR-16)は保たれる)。
+    3. checks が空なら、payload 全体を Plan(move・package は Move の規則。strict。未定義の項目も拒否)で検証する。違反は ValueError。
+    どちらの段の違反も、レフェリーは schema_invalid の無効手にする(pydantic の ValidationError は ValueError の一種)。
+    """
+    envelope = PlanEnvelope.model_validate(payload)
+    if envelope.checks:
+        return Plan(schema="plan/v1", checks=envelope.checks)
+    return Plan.model_validate(payload)

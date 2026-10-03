@@ -284,11 +284,12 @@ def test_the_turn_input_carries_last_invalid_next_to_last_error():
     }
 
 
-def test_own_move_number_counts_the_moves_this_side_made():
-    # 自分が打った手(確認手・提案・断る・途中確認・無効手)の数。相手の手・回答・一時停止は数えない。
+def test_own_move_number_counts_the_moves_the_agent_made_and_not_the_referees_checks():
+    # 台帳 L15-2: エージェント自身が出した手(提案・断る・途中確認・無効手)の数。相手の手・回答・一時停止は数えない。
+    # レフェリーが計画の中で登録した確かめ(check の記録)は、エージェントの手ではないので数えない。
     package = sample_package()
     events = [
-        _event(1, "check", package, "acceptable"),
+        _event(1, "check", package, "acceptable"),  # レフェリーの確かめ
         _event(2, "invalid", package, reason="schema_invalid"),
         _event(3, "propose", package),
         _event(4, "offer_rejected", package),  # 相手の手
@@ -299,7 +300,72 @@ def test_own_move_number_counts_the_moves_this_side_made():
         _event(9, "resume"),
         _event(10, "reject", package),
     ]
-    assert count_own_moves(events) == 5
+    assert count_own_moves(events) == 4
+
+
+@pytest.mark.parametrize(
+    ("kinds", "expected"),
+    [
+        ([], 0),
+        # 確かめだけの履歴は、エージェントの手が 0。何回入っても数えない。
+        ([("check", None, None)], 0),
+        ([("check", None, None)] * 3, 0),
+        # 確かめが、エージェントの手の前・後・間のどこに混ざっても、数は変わらない。
+        ([("propose", None, None)], 1),
+        ([("check", None, None), ("propose", None, None)], 1),
+        ([("propose", None, None), ("check", None, None)], 1),
+        (
+            [
+                ("check", None, None),
+                ("propose", None, None),
+                ("offer_rejected", None, None),  # 相手の手
+                ("check", None, None),
+                ("check", None, None),
+                ("reject", None, None),
+            ],
+            2,
+        ),
+        # 評価回数が尽きて無効になった確かめ(attempted_move が check の無効手)も、レフェリーの確かめ。
+        ([("invalid", "evaluation_budget_exhausted", "check")], 0),
+        ([("check", None, None), ("invalid", "evaluation_budget_exhausted", "check"), ("propose", None, None)], 1),
+        # エージェントの無効手は、数える(打とうとした手が check でないとき。レフェリーが登録した無効手は、何を打とうとしたか None)。
+        ([("invalid", "schema_invalid", None)], 1),
+        ([("invalid", "evaluation_budget_exhausted", "propose")], 1),
+        ([("invalid", "schema_invalid", None), ("invalid", "evaluation_budget_exhausted", "check")], 1),
+    ],
+    ids=[
+        "no_events",
+        "a_check_only",
+        "three_checks_only",
+        "a_proposal",
+        "check_before_a_proposal",
+        "check_after_a_proposal",
+        "checks_between_the_agents_moves",
+        "an_invalid_check_only",
+        "valid_and_invalid_checks_around_a_proposal",
+        "an_invalid_move_registered_by_the_referee",
+        "an_invalid_proposal",
+        "an_invalid_move_and_an_invalid_check",
+    ],
+)
+def test_the_referees_checks_never_change_own_move_number(kinds, expected):
+    # 台帳 L15-2: 確かめが混ざった履歴で、数が変わらない(有効な check も、評価回数が尽きて無効になった check も)。
+    # TurnInput の own_move_number も同じ数になる。
+    package = sample_package()
+    events = [
+        _event(
+            seq,
+            kind,
+            package,
+            "acceptable" if kind in ("check", "offer_received") else None,
+            reason=reason,
+            attempted_move=attempted_move,
+        )
+        for seq, (kind, reason, attempted_move) in enumerate(kinds, start=1)
+    ]
+
+    assert count_own_moves(events) == expected
+    assert build_turn_input(side="candidate", view=_view(), events=events, phase="plan").own_move_number == expected
 
 
 def test_turn_input_carries_the_views_own_side_values_and_never_the_version():
@@ -535,7 +601,7 @@ async def test_history_excludes_the_counterpartys_checks_principal_questions_and
     ]
     # 相手の確かめ・途中確認は、by=counterparty の手として現れない。
     assert {(e.by, e.move) for e in candidate_last.history if e.by == "counterparty"} == {("counterparty", "reject")}
-    assert candidate_last.own_move_number == 2  # 自分の手は check と propose
+    assert candidate_last.own_move_number == 1  # 自分の手は propose だけ(check はレフェリーの確かめ。台帳 L15-2)
     # 自分側の残りだけが見える: 求人側が途中確認を使っても、候補者の残りは減らない。
     assert candidate_last.budget.remaining_principal_checks == 1
 
@@ -545,7 +611,7 @@ async def test_history_excludes_the_counterpartys_checks_principal_questions_and
         ("self", "check", 600, Verdict.NEEDS_CONFIRMATION),
         ("self", "ask_principal", 700, Verdict.NEEDS_CONFIRMATION),
     ]
-    assert employer_last.own_move_number == 2  # 候補者の check(相手の手)は数えない
+    assert employer_last.own_move_number == 1  # 自分の手は ask_principal だけ(自分の check はレフェリーの確かめ。相手の手も数えない)
     assert employer_last.budget.remaining_principal_checks == 0
 
 

@@ -18,7 +18,7 @@
 
 # 入力（turn-input/v1 の JSON）
 - own_move_number・counterparty: あなたがこれまでに打った手の数、相手の候補者の属性帯（経験年数・地域・職種）。
-- history: これまでの手。by は self（あなた）か counterparty（相手）。result は、その組み合わせについてのあなたの側の評価。
+- history: これまでの手。by は self（あなた）か counterparty（相手）。result は、その組み合わせについてのあなたの側の評価。履歴の check はレフェリーの確かめで、あなたの手ではない。move に check を書かない。
 - pending_offer: 相手の、まだ答えていない提案と、あなたの側の評価（own_evaluation）。なければ null。
 - last_check: あなたが直前に確かめた組み合わせと、その評価。なければ null。
 - last_error・last_invalid: 直前のあなたの手が無効だったときの、その理由と手の中身。なければ null。
@@ -69,7 +69,7 @@
 - last_error と last_invalid があれば、その理由を直した手を打つ。同じ手（同じ move と package）を繰り返さない。
   - not_acceptable_to_own_principal: その組み合わせは受けられない。依頼者に有利な方向へ戻す。
   - question_not_applicable: その組み合わせは本人に聞く必要がない（評価がすでに決まっている）。
-  - off_grid・schema_invalid: 値をグリッドの中から選び、出力の形を直す。
+  - schema_invalid: 値をグリッドの中から選び、出力の形を直す。
   - no_pending_offer: 相手の提案がないときに accept・reject はできない。
   - evaluation_budget_exhausted: 評価の残りがない。確かめずに、確かめ済みで acceptable だった案を propose するか、accept・reject で答える。
   - question_budget_exhausted: 本人への確認の残りがない。needs_confirmation の案は出せないので、acceptable の案で進める。

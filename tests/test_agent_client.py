@@ -22,6 +22,8 @@ import asyncio
 import copy
 import dataclasses
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,8 +36,8 @@ from pydantic import ValidationError
 
 import agents.client as client_module
 from agents.app import create_app
-from agents.client import MAX_PROMPT_TOKENS, TruncatedOutputError, send_turn
-from agents.config import DEFAULT_AGENTS_CONFIG
+from agents.client import TruncatedOutputError, send_turn
+from agents.config import DEFAULT_AGENTS_CONFIG, load_agents_config
 from agents.wire import PHASES
 from agents_helpers import (  # noqa: F401  (フィクスチャは import して使う)
     BASE_URL,
@@ -56,6 +58,7 @@ pytestmark = pytest.mark.anyio
 
 MODEL = DEFAULT_AGENTS_CONFIG.model
 MAX_OUTPUT_TOKENS = DEFAULT_AGENTS_CONFIG.max_output_tokens
+MAX_PROMPT_TOKENS = DEFAULT_AGENTS_CONFIG.max_prompt_tokens
 
 
 def turn_input_for(role, phase="plan") -> TurnInput:
@@ -99,8 +102,10 @@ def recorded(use_transport, agents_app) -> RecordingTransport:
     return transport
 
 
-async def call_both(role="candidate", phase="plan", *, nid=NID, timeout_s=5.0) -> tuple[dict, Usage]:
-    return await send_turn(BASE_URL, role, turn_input_for(role, phase), nid=nid, timeout_s=timeout_s)
+async def call_both(
+    role="candidate", phase="plan", *, nid=NID, timeout_s=5.0, config=DEFAULT_AGENTS_CONFIG
+) -> tuple[dict, Usage]:
+    return await send_turn(BASE_URL, role, turn_input_for(role, phase), nid=nid, timeout_s=timeout_s, config=config)
 
 
 async def call(role="candidate", phase="plan", *, nid=NID, timeout_s=5.0) -> dict:
@@ -411,8 +416,9 @@ VALID_USAGE = {
         ({"truncated": "true", "usage": {**VALID_USAGE, "model": "another-model"}}, None),  # 設定と違うモデル ID
         ({"truncated": "true", "usage": {**VALID_USAGE, "note": "x"}}, None),  # 未知の項目
         ({"truncated": "true", "usage": {**VALID_USAGE, "thoughts_tokens": MAX_OUTPUT_TOKENS + 1}}, None),  # 上限超え
+        ({"truncated": "true", "usage": {**VALID_USAGE, "prompt_tokens": MAX_PROMPT_TOKENS + 1}}, None),  # 入力の上限超え
     ],
-    ids=["valid", "no_usage", "usage_not_an_object", "negative", "other_model", "extra_field", "over_the_limit"],
+    ids=["valid", "no_usage", "usage_not_an_object", "negative", "other_model", "extra_field", "over_the_limit", "prompt_over_the_limit"],
 )
 async def test_the_usage_in_a_truncated_error_is_kept_only_when_it_is_valid(data, expected_usage, use_transport):
     # §4.3・台帳 X-58・C-53 (truncated の印があれば、usage が不正でも TruncatedOutputError(一時的でない・無効手になる)。
@@ -600,30 +606,94 @@ async def test_an_envelope_violation_message_names_the_place_and_not_the_values(
     assert secret not in str(exc_info.value)  # usage の中の未知の項目名も、`<unknown>` に置き換える
 
 
-async def test_the_prompt_token_limit_is_the_provisional_twenty_thousand():
-    # §4.3・台帳 X-58 (入力のトークン数の上限は、本文 32 KB 相当として暫定 20,000。設定ファイルに値がないのでコードにある。
-    # 本文の上限(設定の max_request_body_bytes)から導いた約 10,000 トークンと前文約 2,000 トークンに、余裕を見た値)
-    assert MAX_PROMPT_TOKENS == 20_000
+async def test_the_prompt_token_limit_is_the_provisional_twenty_thousand_in_the_config():
+    # §4.3・§10・台帳 X-58 (入力のトークン数の上限は、本文 32 KB 相当として暫定 20,000。設定ファイルの [agents] max_prompt_tokens にあり、
+    # コードには置かない。本文の上限(設定の max_request_body_bytes)から導いた約 10,000 トークンと前文約 2,000 トークンに、余裕を見た値)
+    assert MAX_PROMPT_TOKENS == DEFAULT_AGENTS_CONFIG.max_prompt_tokens == 20_000
     assert DEFAULT_AGENTS_CONFIG.max_request_body_bytes == 32768
+    assert not hasattr(client_module, "MAX_PROMPT_TOKENS")  # 上限の置き場所は設定の 1 か所だけ
 
 
-async def test_the_limits_follow_the_agents_config(use_transport, monkeypatch):
-    # §4.3 (モデル ID と出力の上限は、設定ファイル(agents.config)の値。設定を変えると、検証の基準も変わる)
-    config = dataclasses.replace(DEFAULT_AGENTS_CONFIG, model="another-model", max_output_tokens=500)
-    monkeypatch.setattr(client_module, "DEFAULT_AGENTS_CONFIG", config)
+async def test_the_limits_follow_the_config_given_to_send_turn(use_transport):
+    # §4.3・§10 (モデル ID・出力の上限・入力の上限は、send_turn に渡す設定(web.app.bind_agents_client が渡す。既定は agents.config の
+    # DEFAULT_AGENTS_CONFIG)の値。設定を変えると、検証の基準も変わる)
+    config = dataclasses.replace(DEFAULT_AGENTS_CONFIG, model="another-model", max_output_tokens=500, max_prompt_tokens=900)
 
-    _respond_with(use_transport, _task([_artifact()]))  # 設定のモデル(gemini-3.5-flash)のままの usage
+    _respond_with(use_transport, _task([_artifact()]))  # 既定の設定のモデル(gemini-3.5-flash)のままの usage
     with pytest.raises(ValueError, match="model"):
-        await call_both("candidate")
+        await call_both("candidate", config=config)
 
-    usage = {**VALID_USAGE, "model": "another-model", "output_tokens": 200, "thoughts_tokens": 300}
+    usage = {**VALID_USAGE, "model": "another-model", "prompt_tokens": 900, "output_tokens": 200, "thoughts_tokens": 300}
     _respond_with(use_transport, _task([_artifact(metadata={"usage": usage})]))
-    assert (await call_both("candidate"))[1] == Usage(**usage)
+    assert (await call_both("candidate", config=config))[1] == Usage(**usage)  # 設定の上限ちょうどは通る
+    with pytest.raises(ValueError, match="model"):
+        await call_both("candidate")  # 設定を渡さなければ、既定の設定で検証する(別のモデル)
 
-    usage = {**usage, "thoughts_tokens": 301}
-    _respond_with(use_transport, _task([_artifact(metadata={"usage": usage})]))
+    over_output = {**usage, "thoughts_tokens": 301}
+    _respond_with(use_transport, _task([_artifact(metadata={"usage": over_output})]))
     with pytest.raises(ValueError, match="output and thought"):
+        await call_both("candidate", config=config)
+
+    over_prompt = {**usage, "prompt_tokens": 901}
+    _respond_with(use_transport, _task([_artifact(metadata={"usage": over_prompt})]))
+    with pytest.raises(ValueError, match="more than 900 prompt tokens"):
+        await call_both("candidate", config=config)
+
+    # 同じ設定の上限が、既定の設定の上限(20,000)より小さくても大きくても効く: 上限を上げれば、既定では断る値が通る
+    roomy = dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_prompt_tokens=MAX_PROMPT_TOKENS + 1)
+    over_default = {**VALID_USAGE, "prompt_tokens": MAX_PROMPT_TOKENS + 1}
+    _respond_with(use_transport, _task([_artifact(metadata={"usage": over_default})]))
+    assert (await call_both("candidate", config=roomy))[1] == Usage(**over_default)
+    with pytest.raises(ValueError, match="prompt tokens"):
         await call_both("candidate")
+
+
+async def test_the_usage_in_a_truncated_error_is_checked_against_the_config_given_to_send_turn(use_transport):
+    # §4.3・§10・台帳 C-53 (切れた出力のエラーに付いた usage も、send_turn に渡した設定の上限で検証する。超えていれば載せない)
+    config = dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_prompt_tokens=900)
+    for usage, expected in ((VALID_USAGE, None), ({**VALID_USAGE, "prompt_tokens": 900}, Usage(**{**VALID_USAGE, "prompt_tokens": 900}))):
+        use_transport(mock_transport(lambda request, usage=usage: _truncated_error({"truncated": "true", "usage": usage})))
+        with pytest.raises(TruncatedOutputError) as exc_info:
+            await call_both("candidate", config=config)
+        assert exc_info.value.usage == expected
+
+
+def _params_text_with(tmp_path: Path, transform) -> Path:
+    """config/params.toml を写して、transform で書き換えた設定ファイルを作る(書き換えが効いたことも確かめる)。"""
+    source = Path(__file__).resolve().parents[1] / "config" / "params.toml"
+    text = source.read_text(encoding="utf-8")
+    changed = transform(text)
+    assert changed != text
+    path = tmp_path / "params.toml"
+    path.write_text(changed, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("bad", [0, -1, -20_000])
+def test_a_max_prompt_tokens_below_one_is_rejected_at_startup(tmp_path, bad):
+    # §10 (入力のトークン数の上限は、起動のときに 1 以上を検証する。0 以下では、実際の応答がすべて封筒の検証で断られる)
+    with pytest.raises(ValueError, match="max_prompt_tokens"):
+        dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_prompt_tokens=bad)
+    assert dataclasses.replace(DEFAULT_AGENTS_CONFIG, max_prompt_tokens=1).max_prompt_tokens == 1
+
+    path = _params_text_with(
+        tmp_path, lambda text: re.sub(r"^max_prompt_tokens = \d+", f"max_prompt_tokens = {bad}", text, flags=re.MULTILINE)
+    )
+    with pytest.raises(ValueError, match="max_prompt_tokens"):
+        load_agents_config(path)
+
+
+def test_the_config_file_must_have_max_prompt_tokens_and_it_is_read_from_there(tmp_path):
+    # §10 (上限の値は、設定ファイルの [agents] max_prompt_tokens から読む。キーがなければ、起動のときに ValueError)
+    assert load_agents_config().max_prompt_tokens == DEFAULT_AGENTS_CONFIG.max_prompt_tokens == 20_000
+    changed = _params_text_with(
+        tmp_path, lambda text: re.sub(r"^max_prompt_tokens = \d+", "max_prompt_tokens = 12345", text, flags=re.MULTILINE)
+    )
+    assert load_agents_config(changed).max_prompt_tokens == 12345
+
+    removed = _params_text_with(tmp_path, lambda text: re.sub(r"^max_prompt_tokens = \d+\n", "", text, flags=re.MULTILINE))
+    with pytest.raises(ValueError, match="max_prompt_tokens"):
+        load_agents_config(removed)
 
 
 # --- 受信口が入力を拒否した(ValueError) ---

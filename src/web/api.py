@@ -29,7 +29,8 @@
 
 TEE モード(build_router に tee を渡したときだけ。契約 research/tee-spike-contract.md §8): GET /api/tee/attestation?nonce= が、
 金庫の attestation の検証結果(検証したか・理由・claims・GitHub のコミット・トークン)を返す。公開情報だけなので、セッションを
-見ない。TEE モードでなければ、このルートはなく、404。
+見ない。nonce つきの転送は、クライアント IP(web.client_ip)ごとに 10 秒に 1 回 ＋ 全体で 2 秒に 1 回に制限する(契約 §19・台帳 L18-5)。
+TEE モードでなければ、このルートはなく、404。
 
 ログには、例外の型名だけを書く(組み合わせの値・クッキー・依頼者の入力は書かない)。
 """
@@ -79,6 +80,7 @@ from web.api_models import (
     PrincipalAnswerBody,
 )
 from web.attested_transport import AttestationSource
+from web.client_ip import client_ip
 from web.deletion import DeletionOutcome
 from web.llm_budget import LlmBudgetUnavailable
 from web.referee import NegotiationContext
@@ -95,8 +97,13 @@ DEMO_PATH_PREFIX = "/v1/demo/"
 TEE_PATH_PREFIX = "/api/tee/"
 TEE_ATTESTATION_PATH = "/api/tee/attestation"
 _NONCE_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,74}")  # 契約 §2。launcher の制限(1 個 10〜74 バイト)に収まる
-# nonce を指定した要求を、金庫へ転送する最短の間隔。金庫の発行枠(毎秒 1 回。web の検証し直しなどと共有)を、匿名の利用者が使い切れないように、長くしてある。
-_FORWARD_INTERVAL = dt.timedelta(seconds=10)
+# nonce を指定した要求を、金庫へ転送する最短の間隔(契約 §19・台帳 L18-5)。金庫の発行枠(毎秒 1 回。web の検証し直しなどと共有)を、
+# 匿名の利用者が使い切れないように、クライアント IP ごとに 10 秒に 1 回 ＋ 全体で 2 秒に 1 回にする。全体の枠だけだと、匿名の 1 人が
+# 枠を独占して、審査員の確認(scripts/verify_attestation.py --web。AC-23)が 429 になってしまう。
+_FORWARD_INTERVAL_PER_CLIENT = dt.timedelta(seconds=10)
+_FORWARD_INTERVAL_OVERALL = dt.timedelta(seconds=2)
+# 金庫に届かず、トークンが取れなかった(nonce なしの)結果を、返し続ける時間。金庫が応えない間に、匿名の要求が次々と金庫の発行枠を使わないように。
+_UNAVAILABLE_RESULT_LIFETIME = dt.timedelta(seconds=10)
 _RESULT_LIFETIME = dt.timedelta(minutes=5)  # nonce なしの要求に返す、直近の結果を覚えておく時間(Google の 5 QPS 制限を守る)
 
 
@@ -117,10 +124,12 @@ class TeeAttestationConfig:
 class _TeeAttestationEndpoint:
     """GET /api/tee/attestation の中身(契約 §8)。転送の間隔の制限と、nonce なしの結果の保持を持つ。
 
-    - nonce あり(契約 §2 の形。違えば 400): 金庫へ転送して検証する。前回の転送から 10 秒未満なら 429(拒否した要求は、転送に数えない)。
-    - nonce なし: 直近 5 分以内の結果があれば、それを返す。なければ、新しい nonce で 1 回だけ検証する(同時の要求は 1 回にまとめる)。
-      金庫に届かず、トークンが取れなかった結果は、短く(転送の最短の間隔と同じ 10 秒だけ)覚える: 金庫が応えない間に、匿名の要求が
-      次々と金庫の発行枠を使わないように。
+    - nonce あり(契約 §2 の形。違えば 400): 金庫へ転送して検証する。同じクライアント IP の前回の転送から 10 秒未満、または、全体の前回の
+      転送から 2 秒未満なら 429(契約 §19・台帳 L18-5。拒否した要求は、どちらの枠にも数えない)。クライアント IP は web.client_ip.client_ip
+      (X-Forwarded-For の最後の要素)。状態はメモリに持つ(web は 1 インスタンス)。
+    - nonce なし: 直近 5 分以内の結果があれば、それを返す。なければ、新しい nonce で 1 回だけ検証する(同時の要求は 1 回にまとめる。
+      この転送は、全体の枠の時刻だけを進める)。金庫に届かず、トークンが取れなかった結果は、短く(10 秒だけ)覚える: 金庫が応えない間に、
+      匿名の要求が次々と金庫の発行枠を使わないように。
     失敗のときも、取れた範囲で claims を返す(verified=false、reason)。digest が表(releases)にない・失効(status=revoked)しているものは、
     検証が通っていても verified=false(reason=image_digest)にする。release は、検証が通ったときと、reason=image_digest のとき
     (署名・期限・本番かどうかなどは通った後なので、claims は信用できる)だけ、表から引く(失効は release.status で分かる)。
@@ -131,18 +140,17 @@ class _TeeAttestationEndpoint:
         self._releases = config.releases
         self._repo_url = config.github_repo_url.rstrip("/") if config.github_repo_url else None
         self._clock = clock
-        self._forwarded_at: dt.datetime | None = None
+        self._forwarded_at: dt.datetime | None = None  # 全体の、金庫への前回の転送の時刻(nonce なしの転送も含む)
+        self._forwarded_by_client: dict[str, dt.datetime] = {}  # クライアント IP ごとの、nonce つきの前回の転送の時刻
         self._cached: tuple[dt.datetime, dict[str, Any]] | None = None
         self._lock = asyncio.Lock()
 
-    async def respond(self, nonce: str | None) -> dict[str, Any]:
+    async def respond(self, nonce: str | None, client: str) -> dict[str, Any]:
+        """nonce つき(client は、要求を送ってきたクライアントの IP)は、制限を通れば金庫へ転送する。nonce なしは、保持した結果を返す。"""
         if nonce is not None:
             if not _NONCE_PATTERN.fullmatch(nonce):
                 raise HTTPException(status_code=400, detail="invalid_nonce")
-            now = self._clock.now()
-            if self._forwarded_at is not None and now - self._forwarded_at < _FORWARD_INTERVAL:
-                raise HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": "10"})
-            self._forwarded_at = now
+            self._admit_forward(client)
             return (await self._check(nonce))[1]
         async with self._lock:
             now = self._clock.now()
@@ -153,10 +161,28 @@ class _TeeAttestationEndpoint:
             self._cached = (checked_at, body)
             return body
 
+    def _admit_forward(self, client: str) -> None:
+        """nonce つきの要求を金庫へ転送してよいか。クライアントごとに 10 秒に 1 回 ＋ 全体で 2 秒に 1 回(契約 §19)。だめなら 429。
+
+        通すときだけ、転送の時刻を両方の枠に記録する(拒否した要求は、数えない)。確かめから記録まで await をはさまないので、同時の要求が
+        同じ枠を二重に通ることはない。
+        """
+        now = self._clock.now()
+        # 10 秒たったクライアントの記録は消す(全体で 2 秒に 1 回なので、残るのは多くても 5 件)
+        self._forwarded_by_client = {
+            address: at for address, at in self._forwarded_by_client.items() if now - at < _FORWARD_INTERVAL_PER_CLIENT
+        }
+        if client in self._forwarded_by_client:
+            raise HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": "10"})
+        if self._forwarded_at is not None and now - self._forwarded_at < _FORWARD_INTERVAL_OVERALL:
+            raise HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": "2"})
+        self._forwarded_by_client[client] = now
+        self._forwarded_at = now
+
     @staticmethod
     def _lifetime(body: dict[str, Any]) -> dt.timedelta:
-        """結果を返し続ける時間。トークンが取れた結果は 5 分。金庫に届かなかった結果は、転送の最短の間隔だけ。"""
-        return _RESULT_LIFETIME if body["token"] is not None else _FORWARD_INTERVAL
+        """結果を返し続ける時間。トークンが取れた結果は 5 分。金庫に届かなかった結果は、10 秒だけ。"""
+        return _RESULT_LIFETIME if body["token"] is not None else _UNAVAILABLE_RESULT_LIFETIME
 
     async def _check(self, nonce: str) -> tuple[dt.datetime, dict[str, Any]]:
         verified: VerifiedAttestation | None = None
@@ -460,8 +486,8 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
         endpoint = _TeeAttestationEndpoint(tee, services.clock)
 
         @router.get(TEE_ATTESTATION_PATH)
-        async def tee_attestation(nonce: str | None = Query(default=None)) -> dict[str, Any]:
-            """金庫の attestation を検証した結果。nonce を渡すと、その nonce で金庫に確かめさせる(10 秒に 1 回まで)。"""
-            return await endpoint.respond(nonce)
+        async def tee_attestation(request: Request, nonce: str | None = Query(default=None)) -> dict[str, Any]:
+            """金庫の attestation を検証した結果。nonce を渡すと、その nonce で金庫に確かめさせる(クライアントごとに 10 秒に 1 回まで)。"""
+            return await endpoint.respond(nonce, client_ip(request))
 
     return router
