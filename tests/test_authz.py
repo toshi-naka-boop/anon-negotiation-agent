@@ -11,6 +11,9 @@ GET でしか発行されない。
 
 「メーターの区間の API は、本物の利用者の交渉の ID を拒否する」は ③(推定区間メーター)なので、ここでは確かめない。
 
+段階開示の経路(④。段の状態・「会う」・「承認」・開示台帳)も同じ権限で確かめる(末尾の試験)。デモ用の段の状態(/v1/demo/negotiations/{nid}/stage)
+も、本物の交渉には触れない(金庫のデモ用の口が正本、web の段の状態が補助)。
+
 金庫は本物の vault の app を ASGI のままつなぎ、web の app へは Browser(クッキーを持つ httpx のクライアント)
 から入る。負の確認(403・401)だけだと、何でも断る実装でも通ってしまうので、本人の操作が通ることも確かめる。
 """
@@ -21,6 +24,7 @@ import pytest
 from pydantic import ValidationError
 
 from vault.api_models import CandidateParticipantRequest, CreateNegotiationRequest, EmployerParticipantRequest, MoveRequest
+from test_stages import agree
 from vault_helpers import new_id, put_candidate_and_employer_templates, sample_package
 from web.session import SESSION_COOKIE_NAME
 from web.vault_client import VaultNotFoundError, VaultUnavailableError
@@ -569,3 +573,90 @@ async def test_demo_endpoints_do_not_use_or_extend_the_principal_session(web_app
     assert (read.status_code, created.status_code) == (200, 200)
     assert "set-cookie" not in read.headers and "set-cookie" not in created.headers
     assert web_app.default_db.collection("principals_meta").document(pid).get().to_dict() == before
+
+
+# ----------------------------------------------------------------------
+# 段階開示の経路(④。design.md §6.2・§6.3): 段の状態・「会う」・「承認」・開示台帳。デモ用の段の状態は、本物の依頼者に触れない
+# ----------------------------------------------------------------------
+
+_MEET_BODY = dict(job_summary="Web サービスの運用と開発に約 8 年従事。")
+
+
+async def _agreed_negotiation_of(web_app, browser, request_id: str = "request-0001") -> tuple[str, str]:
+    """面談を送った依頼者が、交渉を作って合意で終わらせる。(依頼者 ID, 交渉 ID)。"""
+    pid = await browser.register()
+    nid = await browser.create_negotiation(pid, web_app.put_employer_template(), request_id)
+    agree(web_app.store, nid)
+    return pid, nid
+
+
+@pytest.mark.anyio
+async def test_stage_routes_need_a_session_and_the_custom_header_and_the_demo_route_does_not(web_app):
+    # DV-01: セッションがなければ 401(依頼者 ID は発行しない)。状態を変える POST は、独自ヘッダがなければ 403(クッキーにも触れない)。
+    # デモ用の段の状態は、セッションを見ない(クッキーのない訪問者が、デモの交渉を見られる)。
+    browser = web_app.browser()
+    pid, nid = await _agreed_negotiation_of(web_app, browser)
+    visitor = web_app.browser()  # クッキーのない訪問者
+    demo_nid = create_demo_negotiation(web_app.store)
+    await web_app.services.sweeper.sweep_once()  # 架空の候補者の交渉にも、段の状態を作る(§6.2)
+
+    responses = [
+        await visitor.get(f"/v1/negotiations/{nid}/stage"),
+        await visitor.post(f"/v1/negotiations/{nid}/stage/meet", _MEET_BODY),
+        await visitor.post(f"/v1/negotiations/{nid}/stage/approve"),
+        await visitor.get(f"/v1/principals/{pid}/ledger"),
+    ]
+    assert [(r.status_code, r.json()) for r in responses] == [(401, dict(detail="no_session"))] * 4
+    assert visitor.cookie is None  # ID を発行していない
+    no_header = [
+        await browser.post(f"/v1/negotiations/{nid}/stage/meet", _MEET_BODY, requested_with=False),
+        await browser.post(f"/v1/negotiations/{nid}/stage/approve", requested_with=False),
+    ]
+    assert [r.status_code for r in no_header] == [403, 403]
+    assert web_app.default_db.collection("stages").document(nid).get().to_dict()["meet"] == dict(candidate=False, employer=False)
+    assert (await visitor.get(f"/v1/demo/negotiations/{demo_nid}/stage")).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_other_principals_negotiation_and_ledger_are_forbidden_on_the_stage_routes_and_change_nothing(web_app):
+    # DV-01: 他人の交渉 ID(と、存在しない・デモの・形の違う交渉 ID)を指定した、段の状態・「会う」・「承認」がすべて 403。他人の台帳も 403。
+    # 他人の段の状態にも台帳にも、何も書かない。デモ用の口に本物の交渉 ID を渡しても、同じ。
+    browser_a, browser_b = web_app.browser(), web_app.browser()
+    pid_a, _ = await _agreed_negotiation_of(web_app, browser_a)
+    pid_b, nid_b = await _agreed_negotiation_of(web_app, browser_b, "request-0002")
+    demo_nid = create_demo_negotiation(web_app.store)
+    stages = web_app.default_db.collection("stages")
+    assert (await browser_b.get(f"/v1/negotiations/{nid_b}/stage")).status_code == 200  # 本人なら通る(判定の記録まで進む)
+    before = (stages.document(nid_b).get().to_dict(), len(list(web_app.default_db.collection("principals").document(pid_b).collection("ledger").stream())))
+
+    for nid in (nid_b, demo_nid, "0123456789abcdef", "not-a-negotiation-id"):
+        responses = [
+            await browser_a.get(f"/v1/negotiations/{nid}/stage"),
+            await browser_a.post(f"/v1/negotiations/{nid}/stage/meet", _MEET_BODY),
+            await browser_a.post(f"/v1/negotiations/{nid}/stage/approve"),
+        ]
+        assert [(r.status_code, r.json()) for r in responses] == [(403, dict(detail="forbidden"))] * 3, nid
+    assert (await browser_a.get(f"/v1/principals/{pid_b}/ledger")).status_code == 403
+    assert (await browser_a.get("/v1/principals/not-a-principal-id/ledger")).status_code == 403
+    assert (await browser_a.get(f"/v1/demo/negotiations/{nid_b}/stage")).status_code == 403  # デモ用の口は、本物の交渉に触れない
+
+    after = (stages.document(nid_b).get().to_dict(), len(list(web_app.default_db.collection("principals").document(pid_b).collection("ledger").stream())))
+    assert after == before
+    assert (await browser_a.get(f"/v1/principals/{pid_a}/ledger")).status_code == 200  # 自分の台帳は読める(負の確認だけで通らないように)
+
+
+@pytest.mark.anyio
+async def test_own_stage_routes_are_allowed(web_app):
+    # DV-01(本人の操作の確認): 自分の交渉なら、段の状態の閲覧・「会う」・「承認」が通る(権限の 403 ではない)。フィクスチャを持たない組み立てでは、
+    # 求人側の自動応答がないので、段は 0 のまま。「承認」は段 1 が開いてからなので、409(権限の 403 ではない)。
+    browser = web_app.browser()
+    pid, nid = await _agreed_negotiation_of(web_app, browser)
+
+    view = await browser.get(f"/v1/negotiations/{nid}/stage")
+    met = await browser.post(f"/v1/negotiations/{nid}/stage/meet", _MEET_BODY)
+    approved = await browser.post(f"/v1/negotiations/{nid}/stage/approve")
+
+    assert (view.status_code, view.json()["stage"]) == (200, 0)
+    assert (met.status_code, met.json()["meet"]) == (200, dict(candidate=True, employer=False))
+    assert (approved.status_code, approved.json()) == (409, dict(detail="stage_not_open"))
+    assert (await browser.get(f"/v1/principals/{pid}/ledger")).status_code == 200

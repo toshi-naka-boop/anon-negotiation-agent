@@ -52,6 +52,7 @@ from vault_helpers import (
     put_candidate_policy,
     sample_package,
 )
+from test_stages import EMPLOYER_TEMPLATE_ID, agree, approve, meet, stage_env  # noqa: F401  (stage_env はフィクスチャ)
 from web import ledger as ledger_module
 from web import stages as stages_module
 from web_app_helpers import CANARY, DeletionProbe, documents_mentioning, interview_body, plant_canaries
@@ -575,6 +576,10 @@ async def test_web_operations_of_a_deleting_principal_are_rejected_on_every_rout
         ("GET", f"/v1/negotiations/{nids[1]}/events", None),
         ("POST", f"/v1/negotiations/{nids[1]}/control", {"action": "pause"}),
         ("POST", f"/v1/negotiations/{nids[1]}/principal-answer", {"package": sample_package().model_dump(), "answer": "accept"}),
+        ("GET", f"/v1/negotiations/{nids[1]}/stage", None),  # 段階開示(④)の経路も、削除中は拒否する
+        ("POST", f"/v1/negotiations/{nids[1]}/stage/meet", {"job_summary": CANARY}),
+        ("POST", f"/v1/negotiations/{nids[1]}/stage/approve", None),
+        ("GET", f"/v1/principals/{pid}/ledger", None),
         ("POST", f"/v1/principals/{pid}/delete", None),
     ]
     for method, path, body in requests:
@@ -688,3 +693,44 @@ async def test_web_deletion_removes_more_documents_than_one_batch_holds(web_app,
 
     assert response.status_code == 200
     assert documents_mentioning(web_app.default_db, pid, CANARY) == {}
+
+
+# ----------------------------------------------------------------------
+# DV-06(段階開示 ④ の実経路): カナリアは、段 1 の職務要約と、面談の入力の両方に入れる。ここは、段 1 の「会う」の API で書いた要約と、
+# 段の遷移で書いた台帳(plant_canaries が直接置く文書ではない)が、削除の連鎖で残らないことを確かめる。
+# ----------------------------------------------------------------------
+
+
+async def _principal_who_disclosed_through_the_stage_api(env, browser, canary: str, request_id: str = "request-0001"):
+    """面談を送り、合意で終わった交渉の段 1 で、要約(カナリア)を書いて、段 2 まで進めた依頼者。(pid, nid) を返す。"""
+    pid = await browser.register()
+    nid = await browser.create_negotiation(pid, EMPLOYER_TEMPLATE_ID, request_id)
+    agree(env.store, nid)
+    assert (await meet(browser, nid, canary)).json()["stage"] == 1
+    assert (await approve(browser, nid)).json()["stage"] == 2
+    return pid, nid
+
+
+@pytest.mark.anyio
+async def test_web_deletion_leaves_no_summary_or_ledger_that_was_written_through_the_stage_api(stage_env):
+    # DV-06: 削除の後、(default) に、その依頼者の段の状態(段 1 の職務要約を含む)・台帳・カナリアが残らない(vault-db にも残らない)。
+    # ほかの依頼者の段の状態・台帳は、そのまま残る。要約の本文があるのは、削除の前は段の状態だけ(台帳には書かない)。
+    env = stage_env()
+    browser, other_browser = env.browser(), env.browser()
+    pid, nid = await _principal_who_disclosed_through_the_stage_api(env, browser, CANARY)
+    other_pid, other_nid = await _principal_who_disclosed_through_the_stage_api(env, other_browser, _CANARY_OTHER)
+    assert set(documents_mentioning(env.default_db, CANARY)) == {f"stages/{nid}"}  # 置いたカナリアが、削除の前は見つかる(確認の前提)
+    ledger_paths = {path for path in documents_mentioning(env.default_db, pid) if "/ledger/" in path}
+    assert len(ledger_paths) == 7  # 段 0〜2 の出来事(段の遷移で書いた台帳)
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert (response.status_code, response.json()) == (200, {"status": "deleted"})
+    assert documents_mentioning(env.default_db, pid, CANARY, nid) == {}
+    assert documents_mentioning(env.store._db, pid, CANARY) == {}
+    assert not env.default_db.collection("stages").document(nid).get().exists
+    # ほかの依頼者は、何も消えていない。
+    other_stage = env.default_db.collection("stages").document(other_nid).get().to_dict()
+    assert (other_stage["candidate_principal_id"], other_stage["job_summary"], other_stage["stage"]) == (other_pid, _CANARY_OTHER, 2)
+    assert len(list(env.default_db.collection("principals").document(other_pid).collection("ledger").stream())) == 7
+    assert (await other_browser.get(f"/v1/principals/{other_pid}/ledger")).status_code == 200

@@ -214,6 +214,14 @@ interval_seconds = 600
 # Firestore の TTL ポリシー自体の設定はデプロイの段で行う。本物の利用者の段の状態には付けない。
 fictional_stage_ttl_seconds = 345600
 
+[web.stages]
+# 段階開示(design.md §6.2・台帳 C-35)。web.stages が読む。
+# 段 1 の匿名職務要約(候補者本人が「会う」のときに書く)の最大の文字数(前後の空白を除いて数える)。暫定(§6.2: 400 文字まで)。
+job_summary_max_chars = 400
+# 段階開示の API が受け付けるリクエスト本文の上限(バイト。32 KB。本文の上限は、面談の LLM 入力・生メッセージと同じ。§8.2・C-49)。
+# 超えたら、本文を読み切らずに 413 で断る。
+max_request_body_bytes = 32768
+
 [web.vault_client]
 # web から金庫を呼ぶ HTTP の時間切れ(秒)。本番の AsyncClient を作るときだけ使う(設計書に値がなく、実装時に置いた暫定値)。
 timeout_seconds = 30

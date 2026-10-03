@@ -24,7 +24,11 @@ from web_app_helpers import (
     interview_body,
     plant_canaries,
 )
-from test_principal_deletion import _write_live_negotiation_with_real_counterpart
+from test_principal_deletion import (
+    _principal_who_disclosed_through_the_stage_api,
+    _write_live_negotiation_with_real_counterpart,
+)
+from test_stages import stage_env  # noqa: F401  (フィクスチャ)
 
 _MINUTE = dt.timedelta(minutes=1)
 _HOUR = dt.timedelta(hours=1)
@@ -378,3 +382,38 @@ async def test_the_principal_sweeper_run_loop_sweeps_at_startup_and_then_every_i
     await web_app.sleep.wait_for_calls(2)  # 次の見回り
     run_task.cancel()
     await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_a_summary_and_a_ledger_written_through_the_stage_api_are_deleted_after_30_days_even_after_a_failure(stage_env):
+    # DV-16(段階開示 ④ の実経路): 最後に使ってから 30 日たった依頼者の、段 1 の「会う」の API で書いた職務要約(カナリア)と、段の遷移で書いた台帳が、
+    # 依頼者の見回りで消える。段の状態の段で失敗させても、次の見回りが消し切り、principals_meta は最後に消える。まだ 30 日たたない依頼者は残る。
+    env = stage_env()
+    browser, other_browser = env.browser(), env.browser()
+    pid, nid = await _principal_who_disclosed_through_the_stage_api(env, browser, CANARY)
+    assert set(documents_mentioning(env.default_db, CANARY)) == {f"stages/{nid}"}  # 置いたカナリアが、削除の前は見つかる(確認の前提)
+    env.clock.advance(10 * _DAY)
+    other_pid, other_nid = await _principal_who_disclosed_through_the_stage_api(env, other_browser, _OTHER_CANARY, "request-0002")
+    probe = DeletionProbe(env)
+    probe.fail_once_at("stages")  # 金庫・開示台帳の削除は済み、段の状態の段で失敗する(要約が残る)
+    env.clock.advance(20 * _DAY + _MINUTE)  # 最初の依頼者の最終利用から 30 日と 1 分。もう一方はまだ 20 日
+
+    first = await env.services.principal_sweeper.sweep_once()
+
+    assert (first.due, first.completed, first.incomplete) == (1, 0, 1)
+    remaining = documents_mentioning(env.default_db, pid, CANARY)
+    assert set(remaining) == {f"stages/{nid}", f"principals_meta/{pid}"}  # 台帳は消え、要約を持つ段の状態と、削除中の印が残っている
+    assert _meta(env, pid)["deletion_state"] == "deleting"
+
+    second = await env.services.principal_sweeper.sweep_once()
+
+    assert (second.due, second.deleting, second.completed) == (0, 1, 1)
+    assert documents_mentioning(env.default_db, pid, CANARY, nid) == {}
+    assert documents_mentioning(env.store._db, pid, CANARY) == {}
+    assert _meta(env, pid) is None
+    assert [step for step, _ in probe.steps] == ["vault", "ledger", "stages", "vault", "ledger", "stages", "meta"]
+    assert all(state == "deleting" for _, state in probe.steps)  # どの段の直前にも、印は残っていた(最後に消える)
+    other_stage = env.default_db.collection("stages").document(other_nid).get().to_dict()
+    assert (other_stage["job_summary"], other_stage["stage"]) == (_OTHER_CANARY, 2)  # まだ期限が来ていない依頼者は、何も消えていない
+    assert len(list(env.default_db.collection("principals").document(other_pid).collection("ledger").stream())) == 7
+    assert _meta(env, other_pid)["deletion_state"] == "active"

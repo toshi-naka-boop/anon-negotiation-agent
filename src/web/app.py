@@ -8,6 +8,8 @@
   設定([agents]。応答の usage の上限 max_prompt_tokens など。台帳 X-58)を束ねたものを、レフェリーに差し込む。
 - サービス間の認証(台帳 X-37): 金庫・agents を呼ぶときに、呼び先の URL を audience にした Google の ID トークンを
   `Authorization: Bearer` で付ける(web.service_auth)。環境変数 SERVICE_AUTH_ENABLED=false で切る(ローカル・テスト)。
+- 架空人物の自動応答(途中確認の回答・段階開示の「会う」「承認」。design.md §4.4・§6.2)は、fixtures に渡すフィクスチャ(FixtureCatalog)から動かす。
+  本番の起動口(create_app_from_env)は、fixtures/case*.toml を読んで渡す。渡さなければ(テスト)、自動応答はない。
 - 署名の鍵は環境変数 SESSION_SIGNING_KEY から読む。コードに鍵を書かず、既定値も持たない。鍵がなければ
   起動を拒否する(MissingSessionKeyError)。base64url として読めて 32 バイト以上でなければ、これも起動を拒否する
   (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
@@ -46,6 +48,7 @@ from web.attack import RawMessageSender, bind_raw_sender
 from web.attested_transport import AttestedVaultTransport
 from web.config import DEFAULT_WEB_CONFIG, WebConfig
 from web.limits import DEFAULT_RATE_LIMIT_CONFIG, RateLimitConfig
+from web.fictional_answerer import FixtureCatalog
 from web.referee import FictionalAnswerer, SendTurn, Sleep
 from web.service_auth import IdTokenAuth, IdTokenProvider, id_token_provider_from_env
 from web.services import build_services
@@ -99,6 +102,7 @@ def create_app(
     sleep: Sleep = asyncio.sleep,
     config: WebConfig = DEFAULT_WEB_CONFIG,
     answerer: FictionalAnswerer | None = None,
+    fixtures: FixtureCatalog | None = None,
     token_provider: IdTokenProvider | None = None,
     tee: TeeAttestationConfig | None = None,
     send_raw: RawMessageSender | None = None,
@@ -123,6 +127,7 @@ def create_app(
         answerer=answerer,
         send_raw=send_raw if send_raw is not None else bind_raw_sender(agents_base_url, token_provider),
         rate_limits=rate_limits,
+        fixtures=fixtures,
     )
 
     @asynccontextmanager
@@ -297,6 +302,7 @@ def create_app_from_env(environ: Mapping[str, str] | None = None) -> FastAPI:
         vault=VaultClient(http),
         default_db=_create_default_db(),
         session_key=session_key,
+        fixtures=FixtureCatalog.load(),  # 架空人物の自動応答(途中確認の回答・段階開示の「会う」「承認」)の元。fixtures/case*.toml
         token_provider=token_provider,
         tee=tee,
     )

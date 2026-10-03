@@ -197,6 +197,7 @@ def build_web_env(
     startup_sweep_done: bool = True,
     send_raw=None,
     rate_limits=None,
+    fixtures=None,
 ) -> WebAppEnv:
     """web の app を組み立てる。vault には、金庫のクライアントを包んだもの(止める仕掛けなど)も渡せる。
 
@@ -208,6 +209,8 @@ def build_web_env(
     web.limits)。
     startup_sweep_done の既定は True: テストの app は lifespan(起動時の見回り)を動かさないので、起動時の見回りが終わるまで
     新規の作成を断る仕組み(§8.2・台帳 X-53)を、既定では済ませたことにする(その仕組みを確かめるテストだけ False にする)。
+    fixtures を渡すと(web.fictional_answerer.FixtureCatalog)、本番の組み立てと同じく、架空人物の自動応答(途中確認の回答・段階開示の
+    「会う」「承認」)が動く。渡さなければ、フィクスチャを持たない(自動応答なし)。
     """
     agents = IdleAgents()
     sleep = FakeSleep(clock)
@@ -222,6 +225,8 @@ def build_web_env(
         kwargs["send_raw"] = send_raw
     if rate_limits is not None:
         kwargs["rate_limits"] = rate_limits
+    if fixtures is not None:
+        kwargs["fixtures"] = fixtures
     app = create_app(
         vault=vault,
         default_db=default_db,

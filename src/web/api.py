@@ -16,6 +16,9 @@
   だけ。読み出しは、web の段の状態(stages。補助)と、金庫のデモ用の読み出しの口(正本。台帳 X-38)の両方で確かめ、
   どちらかが断れば 403。金庫の側でも、demo・attack の交渉は本物の依頼者を持てない(作成の検証)。
 
+段階開示の経路(段の状態・「会う」「承認」・開示台帳。デモ用の段の状態も)は、別の APIRouter(web.stages_api)で、build_router が include する。
+画面で交渉を開いたとき(活動ログの読み出し・段の状態)に、段の状態がなければ作る(台帳 L9-4)。
+
 金庫に書く前に、利用記録 principals_meta がなければならない(面談の送信が作る。§5 の手順 9)。
 ブロックリストの登録と交渉の作成は、面談を送っていない(利用記録がない)依頼者には 409 で断る。
 
@@ -89,6 +92,7 @@ from web.llm_budget import LlmBudgetUnavailable
 from web.referee import NegotiationContext
 from web.services import WebServices
 from web.session import PrincipalSession
+from web.stages_api import build_stages_router
 from web.vault_client import VaultNotFoundError
 
 _log = logging.getLogger(__name__)
@@ -272,16 +276,33 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
         if not session.registered:
             raise HTTPException(status_code=409, detail="interview_not_submitted")
 
-    async def register_created_negotiation(nid: str, mode: NegotiationMode, principal_id: str | None) -> None:
+    async def register_created_negotiation(
+        nid: str,
+        mode: NegotiationMode,
+        principal_id: str | None,
+        templates: dict[str, str] | None = None,
+    ) -> None:
         """作った交渉の段の状態(段 0)を作り、レフェリーのタスクを動かす(どちらも冪等)。
 
+        templates は、デモの交渉のフィクスチャのテンプレート ID(employer_template_id・candidate_template_id)。段の状態に控え、
+        架空人物の自動応答がフィクスチャを引く元にする(§6.2。本物の候補者の求人は、金庫の job_id から引く)。
         段の状態を作れなくても、交渉の作成は成功として返す(見回りが、なければ作る。§6.2)。
         """
         try:
-            await services.stages.ensure(nid, principal_id)
+            await services.stages.ensure(nid, principal_id, **(templates or {}))
         except Exception as exc:
             _log.error("stage creation failed after negotiation creation error=%s", type(exc).__name__)
         services.referees.start(NegotiationContext(nid=nid, mode=mode, candidate_principal_id=principal_id))
+
+    def demo_templates(body: DemoCreateBody) -> dict[str, str]:
+        return dict(employer_template_id=body.employer_template_id, candidate_template_id=body.candidate_template_id)
+
+    async def ensure_stage_when_opened(nid: str, principal_id: str) -> None:
+        """画面で交渉を開いたとき、段の状態がなければ作る(台帳 L9-4。冪等)。判定の後に作り損ねた段も、ここで直る。作れなくても読み出しは続ける。"""
+        try:
+            await services.stages.ensure(nid, principal_id)
+        except Exception as exc:
+            _log.error("stage creation failed when the negotiation was opened error=%s", type(exc).__name__)
 
     async def admit_new_negotiation() -> None:
         """新しい交渉(ライブ・デモ)を受け付けてよいか(入場の制限。§8.2)。受け付けられなければ HTTPException。"""
@@ -390,9 +411,12 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
 
     @router.get("/v1/negotiations/{nid}/events", response_model=list[EventViewItem])
     async def negotiation_events(
-        nid: str = Depends(require_own_negotiation), after_seq: int = Query(default=0, ge=0)
+        nid: str = Depends(require_own_negotiation),
+        after_seq: int = Query(default=0, ge=0),
+        session: PrincipalSession = Depends(require_session),
     ) -> list[EventViewItem]:
         """活動ログ(FR-37): イベント列の、本人の側(候補者側)の見え方だけ。相手の側は読めない。"""
+        await ensure_stage_when_opened(nid, session.principal_id)
         return await vault.get_events(nid, "candidate", after_seq)
 
     @router.post("/v1/negotiations/{nid}/principal-answer")
@@ -453,7 +477,7 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
         request_id = f"demo:{body.request_id}"
         known = await vault.get_negotiation_by_request(request_id)
         if known is not None:  # 同じ request_id の再送。入場の制限を通さずに、同じ交渉を返す(台帳 X-57)
-            await register_created_negotiation(known, "demo", None)
+            await register_created_negotiation(known, "demo", None, demo_templates(body))
             return {"nid": known}
         await admit_new_negotiation()
         created = await vault.create_negotiation(
@@ -466,7 +490,7 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
         )
         if created.status == "refused" or created.nid is None:
             raise HTTPException(status_code=409, detail=created.reason or "refused")
-        await register_created_negotiation(created.nid, "demo", None)
+        await register_created_negotiation(created.nid, "demo", None, demo_templates(body))
         return {"nid": created.nid}
 
     @router.get("/v1/demo/negotiations/{nid}/events", response_model=list[EventViewItem])
@@ -489,6 +513,7 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
 
     # 攻撃モードと 3 枚の壁(/v1/demo/attack/...。web.attack.router)。入場の制限と、段の状態・レフェリーの起動は、上と共通のものを使う
     router.include_router(build_attack_router(services, admit_new_negotiation, register_created_negotiation))
+    router.include_router(build_stages_router(services))  # 段階開示(段の状態・会う・承認・開示台帳。デモ用の段の状態も。web.stages_api)
 
     # ------------------------------------------------------------------
     # TEE モード: 金庫の attestation の検証結果(セッションを見ない。公開情報だけ。契約 §8)

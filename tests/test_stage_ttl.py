@@ -9,6 +9,7 @@ web の stages/{nid} に TTL も削除もなければ、デモと攻撃モード
 import datetime as dt
 
 import pytest
+from test_stages import approve, demo_negotiation, live_negotiation, meet, stage_env  # noqa: F401  (stage_env はフィクスチャ)
 from vault.config import DEFAULT_VAULT_CONFIG
 from vault_helpers import put_candidate_and_employer_templates
 from web.config import DEFAULT_WEB_CONFIG
@@ -91,3 +92,28 @@ async def test_a_real_principals_stage_created_with_the_negotiation_has_no_ttl(w
     assert "ttl_at" not in stage
     web_app.clock.advance(dt.timedelta(days=10))  # 時間がたっても付かない(段の状態を作り直さない)
     assert "ttl_at" not in _stage(web_app.default_db, nid)
+
+
+@pytest.mark.anyio
+async def test_stage_transitions_neither_add_nor_change_the_ttl(stage_env):
+    # I-6(段階開示 ④): 段の遷移(架空の求人の自動応答・「会う」「承認」・デモの架空の候補者の自動応答)の書き込みは、期限の項目に触れない。
+    # デモの段の状態の期限(96 時間)は、段 2 まで進めても作成のときのまま(金庫の交渉と同じ時刻)。本物の利用者の段の状態には、期限が付かない。
+    env = stage_env()
+    browser, visitor = env.browser(), env.browser()
+    pid, live_nid = await live_negotiation(env, browser)
+    demo_nid = await demo_negotiation(env, visitor)
+    created = _stage(env.default_db, demo_nid)["ttl_at"]
+    assert created == env.clock.now() + _TTL
+    env.clock.advance(dt.timedelta(hours=5))
+
+    await meet(browser, live_nid)
+    await approve(browser, live_nid)
+    demo_view = (await visitor.get(f"/v1/demo/negotiations/{demo_nid}/stage")).json()
+
+    assert demo_view["stage"] == 2
+    demo_stage = _stage(env.default_db, demo_nid)
+    assert demo_stage["ttl_at"] == created  # 自動で押しても、作り直さない・延ばさない
+    assert demo_stage["ttl_at"] == env.store._negotiation_ref(demo_nid).get().to_dict()["ttl_at"]
+    live_stage = _stage(env.default_db, live_nid)
+    assert live_stage["stage"] == 2 and live_stage["candidate_principal_id"] == pid
+    assert "ttl_at" not in live_stage
