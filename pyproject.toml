@@ -4,8 +4,10 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "a2a-sdk[http-server]>=1.2.0",
+    "cryptography>=50.0.1",
     "fastapi>=0.141.1",
     "google-adk>=2.10.0",
+    "google-auth>=2.58.1",
     "google-cloud-firestore>=2.32.0",
     "httpx>=0.28.1",
     "itsdangerous>=2.2.0",
