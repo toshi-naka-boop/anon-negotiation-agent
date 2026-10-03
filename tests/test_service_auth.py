@@ -13,6 +13,8 @@
 - 台帳 X-42: キャッシュする前に、トークンの `aud` が要求どおりで、`exp` が有限かつ未来であることを確かめる(合わなければ
   キャッシュせず、取れなかったものとして扱う)。呼び先が 401・403 で断ったら、その audience のキャッシュを捨て、取り直して、
   1 回だけ送り直す(2 回目も断られたら、それ以上は送り直さない)。金庫の呼び出しにも、agents の呼び出しにも効く。
+- TEE 版の金庫(design.md §9): IdTokenAuth に固定の audience を渡すと、URL からではなく、その値を audience にする(取り直しも同じ)。
+  メタデータサーバへの要求には、常に format=full を付ける(ないと Cloud Run のトークンに email が入らない)。
 """
 
 import asyncio
@@ -846,3 +848,74 @@ async def test_send_turn_stops_after_the_second_rejection_as_a_connection_error(
     assert len(agents_calls.requests) == 2
     assert metadata.audiences == [AGENTS_URL, AGENTS_URL]
     assert stub_llm.requests == []
+
+
+# --- TEE 版の金庫: 固定の audience と、format=full(design.md §9、契約 research/tee-spike-contract.md §7) ---
+
+TEE_VAULT_URL = "https://10.10.0.10:8443"  # TEE 版の金庫は、VPC 内の IP アドレスで呼ぶ(URL から audience は作れない)
+FIXED_AUDIENCE = "https://vault.anon-nego.internal"  # 設定 [vault.tee] caller_audience
+
+
+def test_a_fixed_audience_is_used_instead_of_the_one_made_from_the_service_url():
+    fixed = IdTokenAuth(IdTokenProvider(), TEE_VAULT_URL, audience=FIXED_AUDIENCE)
+
+    assert fixed.audience == FIXED_AUDIENCE
+    assert IdTokenAuth(IdTokenProvider(), TEE_VAULT_URL).audience == TEE_VAULT_URL  # 渡さなければ、従来どおり URL から
+    assert IdTokenAuth(IdTokenProvider(), TEE_VAULT_URL, audience=None).audience == TEE_VAULT_URL
+
+
+@pytest.mark.parametrize("empty", ["", "  ", "\n"])
+def test_an_empty_fixed_audience_is_refused(empty):
+    with pytest.raises(ValueError, match="must not be empty"):
+        IdTokenAuth(IdTokenProvider(), TEE_VAULT_URL, audience=empty)
+
+
+@pytest.mark.anyio
+async def test_a_vault_call_carries_the_token_for_the_fixed_audience_and_the_token_is_reused(provider, metadata):
+    vault = RecordingTransport(body=_EXPIRE_BODY)
+    auth = IdTokenAuth(provider, TEE_VAULT_URL, audience=FIXED_AUDIENCE)
+    client = VaultClient(httpx.AsyncClient(transport=vault, base_url=TEE_VAULT_URL, auth=auth))
+
+    await client.expire(_EXPIRE_PATH_NID)
+    await client.expire(_EXPIRE_PATH_NID)
+
+    tokens = {_bearer(request) for request in vault.requests}
+    assert len(vault.requests) == 2 and len(tokens) == 1 and None not in tokens
+    (token,) = tokens
+    assert _claims(token)["aud"] == FIXED_AUDIENCE
+    assert metadata.audiences == [FIXED_AUDIENCE]  # URL(IP アドレス)を audience にして聞かない。取ったトークンは使い回す
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_rejected_token_is_renewed_for_the_same_fixed_audience(status, provider, metadata):
+    # X-42 の取り直しは、固定の audience でも同じ: キャッシュを捨て、同じ audience でトークンを取り直して、1 回だけ送り直す。
+    vault = RecordingTransport(body=_MOVE_BODY, reject_first=1, reject_status=status)
+    auth = IdTokenAuth(provider, TEE_VAULT_URL, audience=FIXED_AUDIENCE)
+    client = VaultClient(httpx.AsyncClient(transport=vault, base_url=TEE_VAULT_URL, auth=auth))
+
+    response = await client.post_move(_EXPIRE_PATH_NID, MoveRequest(expected_version=0, side="employer", move="accept"))
+
+    assert response.valid is True and len(vault.requests) == 2
+    assert [_claims(_bearer(request))["n"] for request in vault.requests] == [1, 2]
+    assert metadata.audiences == [FIXED_AUDIENCE, FIXED_AUDIENCE]
+
+
+@pytest.mark.anyio
+async def test_the_metadata_request_always_asks_for_the_full_format(provider, metadata):
+    # format=full がないと、Cloud Run のトークンに email が入らず、TEE 版の金庫が全呼び出しを 403 にするおそれがある。
+    await provider.token(VAULT_URL)
+    await provider.token(AGENTS_URL)  # どの audience にも付ける
+
+    assert [request.url.params["format"] for request in metadata.requests] == ["full", "full"]
+    assert all(set(request.url.params) == {"audience", "format"} for request in metadata.requests)
+    assert all(str(request.url.copy_with(query=None)) == METADATA_IDENTITY_URL for request in metadata.requests)
+
+
+@pytest.mark.anyio
+async def test_the_production_entry_asks_the_metadata_server_for_the_full_format_too(production_entry, metadata):
+    app = production_entry()
+
+    await app.state.services.vault.expire(_EXPIRE_PATH_NID)
+
+    assert [request.url.params["format"] for request in metadata.requests] == ["full"]

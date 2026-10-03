@@ -27,14 +27,34 @@
    (画面は「本日の上限に達しました」と出す)。数えられないとき(Firestore の失敗)は 503(閉じる側)。
 入場の制限は読むだけで、何も書かない(予約の記録を持たない)。二度押し・再送・金庫の拒否(already_active など)は、枠を消費しない。
 
+TEE モード(build_router に tee を渡したときだけ。契約 research/tee-spike-contract.md §8): GET /api/tee/attestation?nonce= が、
+金庫の attestation の検証結果(検証したか・理由・claims・GitHub のコミット・トークン)を返す。公開情報だけなので、セッションを
+見ない。TEE モードでなければ、このルートはなく、404。
+
 ログには、例外の型名だけを書く(組み合わせの値・クッキー・依頼者の入力は書かない)。
 """
 
+import asyncio
+import datetime as dt
 import logging
+import re
+import secrets
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from negotiation_core import Side
+from negotiation_core.attestation import (
+    UNAVAILABLE,
+    AttestationError,
+    VerifiedAttestation,
+    decode_claims_unverified,
+    release_for_digest,
+    summarize_claims,
+)
 
 from vault.api_models import (
     CandidateParticipantRequest,
@@ -58,6 +78,7 @@ from web.api_models import (
     InterviewSubmitRequest,
     PrincipalAnswerBody,
 )
+from web.attested_transport import AttestationSource
 from web.deletion import DeletionOutcome
 from web.llm_budget import LlmBudgetUnavailable
 from web.referee import NegotiationContext
@@ -70,9 +91,126 @@ _log = logging.getLogger(__name__)
 # デモ用のエンドポイントのパス。ミドルウェアは、ここでは依頼者のセッションを見ない(§6.3)。
 DEMO_PATH_PREFIX = "/v1/demo/"
 
+# TEE モードの attestation の口(契約 §8)。公開情報だけなので、ミドルウェアは、ここでも依頼者のセッションを見ない。
+TEE_PATH_PREFIX = "/api/tee/"
+TEE_ATTESTATION_PATH = "/api/tee/attestation"
+_NONCE_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,74}")  # 契約 §2。launcher の制限(1 個 10〜74 バイト)に収まる
+# nonce を指定した要求を、金庫へ転送する最短の間隔。金庫の発行枠(毎秒 1 回。web の検証し直しなどと共有)を、匿名の利用者が使い切れないように、長くしてある。
+_FORWARD_INTERVAL = dt.timedelta(seconds=10)
+_RESULT_LIFETIME = dt.timedelta(minutes=5)  # nonce なしの要求に返す、直近の結果を覚えておく時間(Google の 5 QPS 制限を守る)
 
-def build_router(services: WebServices) -> APIRouter:
-    """services の部品を使うルートを作る。"""
+
+@dataclass(frozen=True)
+class TeeAttestationConfig:
+    """TEE モードの設定(create_app・build_router に渡す)。
+
+    transport: 金庫の attestation を、ピン留めした接続で検証する口(本番は web.attested_transport.AttestedVaultTransport)。
+    releases: digest → コミットの表(deploy/vault-releases.json。negotiation_core.attestation.load_releases)。
+    github_repo_url: コミットのリンクの土台(例 https://github.com/<owner>/<repo>)。なければ、リンクは null。
+    """
+
+    transport: AttestationSource
+    releases: Sequence[Mapping[str, Any]]
+    github_repo_url: str | None = None
+
+
+class _TeeAttestationEndpoint:
+    """GET /api/tee/attestation の中身(契約 §8)。転送の間隔の制限と、nonce なしの結果の保持を持つ。
+
+    - nonce あり(契約 §2 の形。違えば 400): 金庫へ転送して検証する。前回の転送から 10 秒未満なら 429(拒否した要求は、転送に数えない)。
+    - nonce なし: 直近 5 分以内の結果があれば、それを返す。なければ、新しい nonce で 1 回だけ検証する(同時の要求は 1 回にまとめる)。
+      金庫に届かず、トークンが取れなかった結果は、短く(転送の最短の間隔と同じ 10 秒だけ)覚える: 金庫が応えない間に、匿名の要求が
+      次々と金庫の発行枠を使わないように。
+    失敗のときも、取れた範囲で claims を返す(verified=false、reason)。digest が表(releases)にない・失効(status=revoked)しているものは、
+    検証が通っていても verified=false(reason=image_digest)にする。release は、検証が通ったときと、reason=image_digest のとき
+    (署名・期限・本番かどうかなどは通った後なので、claims は信用できる)だけ、表から引く(失効は release.status で分かる)。
+    """
+
+    def __init__(self, config: TeeAttestationConfig, clock) -> None:
+        self._transport = config.transport
+        self._releases = config.releases
+        self._repo_url = config.github_repo_url.rstrip("/") if config.github_repo_url else None
+        self._clock = clock
+        self._forwarded_at: dt.datetime | None = None
+        self._cached: tuple[dt.datetime, dict[str, Any]] | None = None
+        self._lock = asyncio.Lock()
+
+    async def respond(self, nonce: str | None) -> dict[str, Any]:
+        if nonce is not None:
+            if not _NONCE_PATTERN.fullmatch(nonce):
+                raise HTTPException(status_code=400, detail="invalid_nonce")
+            now = self._clock.now()
+            if self._forwarded_at is not None and now - self._forwarded_at < _FORWARD_INTERVAL:
+                raise HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": "10"})
+            self._forwarded_at = now
+            return (await self._check(nonce))[1]
+        async with self._lock:
+            now = self._clock.now()
+            if self._cached is not None and now - self._cached[0] < self._lifetime(self._cached[1]):
+                return self._cached[1]
+            self._forwarded_at = now
+            checked_at, body = await self._check(secrets.token_urlsafe(32))
+            self._cached = (checked_at, body)
+            return body
+
+    @staticmethod
+    def _lifetime(body: dict[str, Any]) -> dt.timedelta:
+        """結果を返し続ける時間。トークンが取れた結果は 5 分。金庫に届かなかった結果は、転送の最短の間隔だけ。"""
+        return _RESULT_LIFETIME if body["token"] is not None else _FORWARD_INTERVAL
+
+    async def _check(self, nonce: str) -> tuple[dt.datetime, dict[str, Any]]:
+        verified: VerifiedAttestation | None = None
+        token: str | None = None
+        reason: str | None = None
+        try:
+            token, verified = await self._transport.attest(nonce)
+        except AttestationError as exc:
+            token, reason = exc.token, exc.reason
+        except (httpx.HTTPError, OSError):  # 金庫に届かない(トークンなし)
+            reason = UNAVAILABLE
+        claims = summarize_claims(_claims_for_display(token, verified))
+        release = None
+        if claims["image_digest"] is not None and (verified is not None or reason == "image_digest"):
+            release = release_for_digest(list(self._releases), claims["image_digest"])
+        if verified is not None and (release is None or release.get("status", "active") != "active"):
+            # 金庫の許可リストと表が食い違っても、表にない・失効した digest は「検証した」と言わない
+            verified, reason = None, "image_digest"
+        checked_at = self._clock.now()
+        return checked_at, {
+            "verified": verified is not None,
+            "reason": reason,
+            "checked_at": checked_at.isoformat(),
+            "nonce": nonce,
+            "certificate_sha256": self._transport.certificate_sha256,
+            "claims": claims,
+            "release": self._release_view(release) if release is not None else None,
+            "token": token,
+        }
+
+    def _release_view(self, release: Mapping[str, Any]) -> dict[str, Any]:
+        commit = release["commit"]
+        return {
+            "commit": commit,
+            "url": f"{self._repo_url}/commit/{commit}" if self._repo_url else None,
+            "built_at": release.get("built_at"),
+            "status": release.get("status", "active"),
+        }
+
+
+def _claims_for_display(token: str | None, verified: VerifiedAttestation | None) -> Mapping[str, Any]:
+    """画面に出す claims の元。検証が通れば検証済みの claims、通らなければ(署名を確かめていない)トークンの本文、読めなければ空。"""
+    if verified is not None:
+        return verified.claims
+    if token is None:
+        return {}
+    try:
+        return decode_claims_unverified(token)
+    except AttestationError:
+        return {}
+
+
+def build_router(services: WebServices, tee: TeeAttestationConfig | None = None) -> APIRouter:
+    """services の部品を使うルートを作る。tee を渡すと(TEE モード)、GET /api/tee/attestation も作る。"""
     router = APIRouter()
     vault = services.vault
 
@@ -313,5 +451,17 @@ def build_router(services: WebServices) -> APIRouter:
             return await vault.get_demo_events(nid, side, after_seq)
         except VaultNotFoundError:
             raise HTTPException(status_code=403, detail="forbidden") from None
+
+    # ------------------------------------------------------------------
+    # TEE モード: 金庫の attestation の検証結果(セッションを見ない。公開情報だけ。契約 §8)
+    # ------------------------------------------------------------------
+
+    if tee is not None:
+        endpoint = _TeeAttestationEndpoint(tee, services.clock)
+
+        @router.get(TEE_ATTESTATION_PATH)
+        async def tee_attestation(nonce: str | None = Query(default=None)) -> dict[str, Any]:
+            """金庫の attestation を検証した結果。nonce を渡すと、その nonce で金庫に確かめさせる(10 秒に 1 回まで)。"""
+            return await endpoint.respond(nonce)
 
     return router

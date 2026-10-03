@@ -6,8 +6,9 @@ agents のクライアント(agents.client.send_turn)は、呼び先のサービ
 受け取る側(金庫・agents)のアプリの中では、トークンの検証をしない(IAM に任せる)。
 
 - トークンは、Cloud Run のメタデータサーバから、httpx で取る(新しい依存は要らない)。
-  `GET http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>`
-  で、ヘッダ `Metadata-Flavor: Google` が必須。
+  `GET http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>&format=full`
+  で、ヘッダ `Metadata-Flavor: Google` が必須。`format=full` を常に付ける: ないと、Cloud Run のトークンに `email` が入らず、
+  TEE 版の金庫(呼び出し元の email を確かめる。design.md §9)が、すべての呼び出しを断るおそれがある。
 - トークンは audience ごとに持ち、期限(JWT の exp)の少し前(既定 5 分前)まで使い回す。署名は確かめない(受け取る側が確かめる)。
 - キャッシュする前に、トークンの未署名の claim(本文を base64url で読む)を確かめる(台帳 X-42): `aud` が要求した audience と
   完全に一致すること、`exp` が有限で未来であること。合わなければキャッシュせず、取れなかったもの(ServiceAuthError)として扱う。
@@ -19,6 +20,8 @@ agents のクライアント(agents.client.send_turn)は、呼び先のサービ
 - 使い方: 金庫は、`httpx.AsyncClient(base_url=..., auth=IdTokenAuth(provider, 金庫の URL))`。agents は、
   `send_turn(..., auth=IdTokenAuth(provider, agents の URL))`(web.app.bind_agents_client が束ねる)。audience は
   呼び先の URL から作るので、呼び先ごとに正しい値になる。
+- TEE 版の金庫(Confidential Space の VM。URL は VPC 内の IP アドレス)には、URL から作れる audience がない。IdTokenAuth に
+  `audience=` を渡すと、URL ではなく、その固定の文字列(設定 [vault.tee] caller_audience)を audience にする(design.md §9)。
 
 トークンの値は、ログにもエラーの文にも書かない。
 """
@@ -159,7 +162,7 @@ class IdTokenProvider:
                 transport=self._transport, timeout=httpx.Timeout(_METADATA_TIMEOUT_SECONDS), trust_env=False
             ) as http:
                 response = await http.get(
-                    METADATA_IDENTITY_URL, params={"audience": audience}, headers=_METADATA_HEADERS
+                    METADATA_IDENTITY_URL, params={"audience": audience, "format": "full"}, headers=_METADATA_HEADERS
                 )
         except httpx.HTTPError as exc:
             raise ServiceAuthError(
@@ -175,8 +178,9 @@ class IdTokenProvider:
 class IdTokenAuth(httpx.Auth):
     """httpx の認証: リクエストのたびに、呼び先の audience の ID トークンを `Authorization: Bearer` で付ける。
 
-    service_url は、呼び先のサービスの URL(audience はこの URL から作る。audience_for)。AsyncClient 用
-    (async_auth_flow だけを持つ)。トークンを取れなければ ServiceAuthError(通信エラーとして伝わる)。
+    service_url は、呼び先のサービスの URL(audience はこの URL から作る。audience_for)。audience を渡すと、URL から作らずに、
+    その固定の文字列を使う(TEE 版の金庫。service_url は使わない)。AsyncClient 用(async_auth_flow だけを持つ)。
+    トークンを取れなければ ServiceAuthError(通信エラーとして伝わる)。
 
     呼び先が 401・403 で断ったら(Cloud Run の IAM は、アプリに届く前に断る)、その audience のキャッシュを捨て、
     トークンを取り直して、同じリクエストを 1 回だけ送り直す(台帳 X-42)。2 回目も断られたら、そのトークンもキャッシュ
@@ -184,9 +188,14 @@ class IdTokenAuth(httpx.Auth):
     送り直しは、1 つのリクエストにつき 1 回までで、繰り返さない。
     """
 
-    def __init__(self, provider: IdTokenProvider, service_url: str) -> None:
+    def __init__(self, provider: IdTokenProvider, service_url: str, audience: str | None = None) -> None:
         self._provider = provider
-        self.audience = audience_for(service_url)
+        if audience is None:
+            self.audience = audience_for(service_url)
+        elif audience.strip():
+            self.audience = audience
+        else:
+            raise ValueError("a fixed audience must not be empty")
 
     async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
         await request.aread()  # 送り直しのために、本文を読み込んでおく(ストリームの本文は、1 回しか送れない)
