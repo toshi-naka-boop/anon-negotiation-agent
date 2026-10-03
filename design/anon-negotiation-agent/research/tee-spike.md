@@ -229,7 +229,7 @@ assertion.swname == 'CONFIDENTIAL_SPACE'
 - 権限: `principalSet://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/vault-tee-pool/attribute.image_digest/<DIGEST>` に `roles/cloudkms.cryptoKeyEncrypterDecrypter` [S2]【原文】。公式は decrypter だけだが、初回に DEK を包む（encrypt）のも金庫なので両方要る。
 - digest が変わるたびに、新しい digest の principalSet を足し、古いものを外す。外し忘れると古いイメージにも鍵が出る。
 - VM の SA には KMS の権限を付けない。
-- 運営者の限界: プロジェクトのオーナーは、鍵の IAM（`SetIamPolicy`）を書き換えて、自分や別のイメージに復号権を付けられる。`SetIamPolicy` は Admin Activity 監査ログに必ず残る。暗号操作（Decrypt など）の記録は Data Access ログで、既定では無効 [S18]【要約】。設計書 §9 の「鍵は、そのコードを動かすワークロードにしか渡らない」は、「IAM を変えない限り」という前提つきで書く。
+- 運営者の限界: プロジェクトのオーナーは、基本ロール `roles/owner` に `cloudkms.cryptoKeyVersions.useToDecrypt`・`useToEncrypt` を含むので、IAM を変えずに KEK で DEK を復号できる（批評 C-58。公式の IAM 権限表）。さらに、鍵の IAM（`SetIamPolicy`）を書き換えて、自分や別のイメージに復号権を付けられる。`SetIamPolicy` は Admin Activity 監査ログに必ず残る。暗号操作（Decrypt など）の記録は Data Access ログで、既定では無効 [S18]【要約】。設計書 §9 の「鍵は、そのコードを動かすワークロードにしか渡らない」は、「IAM を変えない限り」という前提つきで書く。
 
 #### 2-4 ワークロードの中から KMS を呼ぶ（Python。擬似コード・未検証）
 
@@ -299,7 +299,7 @@ dek = base64.b64decode(r.json()["plaintext"])
 
 #### 2-8 合否・代替
 
-- 合格: (a) 本番イメージの VM の金庫が、DEK を unwrap でき、封印した試験文書を Firestore に書いて読み戻せる。(b) 負の試験 3 つ: debug イメージの VM → STS で拒否／digest の違うイメージ（試験用に 1 行変えて作る）→ KMS が 403／手元（オーナー権限）から `gcloud kms decrypt` → 403（オーナーに復号権は無い。【推測】基本ロールに復号権が含まれないという一般的な理解）。(c) 手元で Firestore の文書を読むと暗号文になっている。
+- 合格: (a) 本番イメージの VM の金庫が、DEK を unwrap でき、封印した試験文書を Firestore に書いて読み戻せる。(b) 負の試験 3 つ: debug イメージの VM → STS で拒否／digest の違うイメージ（試験用に 1 行変えて作る）→ KMS が 403／オーナーでない主体（金庫の VM の SA を impersonate）から `gcloud kms decrypt` → 403（VM の SA に復号権がないことの確認）。オーナー自身は復号できる（基本ロールに復号権が含まれる。C-58。構造的な限界なので、Cloud KMS の Data Access 監査ログに主体が残ることを確かめる）。(c) 手元で Firestore の文書を読むと暗号文になっている。
 - 不合格の目安: 本番イメージで STS の交換が 3 時間通らない。負の試験で鍵が漏れる（これは即、中止）。
 - 代替: テスト用の条件（swname のみ）で debug の VM だけで確かめ、本番条件は 10/5〜6 に回す。それでも鍵の解放が成立しなければ、TEE は設計書だけにする（spec の縮退順）。
 
@@ -801,6 +801,14 @@ gcloud iam service-accounts add-iam-policy-binding "$WEB_SA" --member="user:$(gc
 gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountOpenIdTokenCreator
 ```
 
+負の試験 3（オーナーでない主体は 403）のために、自分のユーザーに金庫の SA を impersonate する権限を付ける（アクセストークンの作成。検証が終わったら F で外す）。
+
+```
+gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
+```
+
+Cloud KMS の Data Access 監査ログを有効にする（オーナーが復号したときに主体と時刻が残るように。批評 C-58）: コンソールの「IAM と管理」→「監査ログ」で「Cloud Key Management Service (KMS) API」を選び、「データ読み取り」「データ書き込み」にチェックを入れて保存する（コマンドは使わない。`set-iam-policy` でポリシー全体を上書きしないため）。
+
 予算アラートの引き上げ: コンソールの「お支払い」→「予算とアラート」で、閾値を想定費用（上の「費用」）に合わせて引き上げる（コマンドは使わない）。
 
 ### B. イメージを作る（Cloud Build。無料枠内）
@@ -920,6 +928,18 @@ gcloud compute instances delete vault-tee --zone="$ZONE"
 mkdir -p tmp/tee_spike && curl -sS -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/vault-db/documents/_tee/dek" -o tmp/tee_spike/old_dek.json && head -c 300 tmp/tee_spike/old_dek.json
 ```
 
+debug の間に出た連携トークン・attestation トークン（最長 1 時間）が使えなくなるまで、KMS の権限を外して待つ（批評 C-59。待たないと、debug の VM で得たトークンで新しい版に自分の DEK を包める）。まず権限を外す。
+
+```
+gcloud kms keys remove-iam-policy-binding vault-kek --location="$REGION" --keyring=vault-tee --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/vault-tee-pool/attribute.image_digest/${IMAGE_DIGEST}" --role=roles/cloudkms.cryptoKeyEncrypterDecrypter
+```
+
+**65 分以上待つ**（この間に手順 E の準備（アプリのイメージのビルド）を進めてよい）。待ったら、権限を付け直す。
+
+```
+gcloud kms keys add-iam-policy-binding vault-kek --location="$REGION" --keyring=vault-tee --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/vault-tee-pool/attribute.image_digest/${IMAGE_DIGEST}" --role=roles/cloudkms.cryptoKeyEncrypterDecrypter
+```
+
 KEK の新しい版を作って primary にする（debug の間に作った DEK の包みを、運営者が本番に持ち込めないようにする）。
 
 ```
@@ -993,7 +1013,7 @@ gcloud builds submit --region="$REGION" --tag="${REPO}/app:spike" .
 Direct VPC egress つきの Cloud Run Job（検証用のクライアント）を作る（web の SA で動く。`scripts/tee_probe_client.py` は Claude が作る）。
 
 ```
-gcloud run jobs create tee-probe --region="$REGION" --image="${REPO}/app:spike" --service-account="$WEB_SA" --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --command=python --args=scripts/tee_probe_client.py --set-env-vars="VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_AUDIENCE=${VAULT_AUDIENCE}" --max-retries=0 --task-timeout=600
+gcloud run jobs create tee-probe --region="$REGION" --image="${REPO}/app:spike" --service-account="$WEB_SA" --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --command=python --args=scripts/tee_probe_client.py --set-env-vars="VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},GOOGLE_CLOUD_PROJECT=${PROJECT_ID}" --max-retries=0 --task-timeout=600
 ```
 
 Job を実行して、終わるまで待つ（Direct VPC egress の起動遅延で、最初の接続に 1 分以上かかることがある）。
@@ -1017,7 +1037,7 @@ gcloud compute instances describe vault-tee --zone="$ZONE" --format="value(netwo
 web の Cloud Run サービスができた後に、Direct VPC egress をつなぐ（これは web をデプロイした後の手順。設定の値は、デプロイの段で確定する）。
 
 ```
-gcloud run services update web --region="$REGION" --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --update-env-vars="VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_AUDIENCE=${VAULT_AUDIENCE}"
+gcloud run services update web --region="$REGION" --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --update-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"
 ```
 
 ### F. 毎日の止め方と片付け
@@ -1143,7 +1163,7 @@ gcloud kms keys remove-iam-policy-binding vault-kek --location="$REGION" --keyri
 | # | 合格（すべて満たす） | 縮退（判断が要る） | 不合格 |
 |---|---|---|---|
 | 1 | 本番イメージの VM が起動し、Cloud Logging に launcher のログが出る。トークンに `swname=CONFIDENTIAL_SPACE`・`dbgstat=disabled-since-boot`・`hwmodel` が期待どおり・`image_digest` がビルドと一致。停止→開始と `OnFailure` の再起動が動く | — | 本番イメージで 2 時間デバッグしても起動しない |
-| 2 | 本番条件の VM の金庫が DEK を復号でき、封印した試験文書を Firestore に書いて読み戻せる。負の試験 3 つ（debug の VM・digest 違い・手元のオーナー）が拒否される。手元から文書を読むと暗号文 | 本番の条件が間に合わず、テスト条件（`swname` のみ）で鍵の解放が成立。本番条件は 10/5〜6 | 負の試験で鍵が漏れる。3 時間で STS の交換が通らない |
+| 2 | 本番条件の VM の金庫が DEK を復号でき、封印した試験文書を Firestore に書いて読み戻せる。負の試験 3 つ（debug の VM・digest 違い・オーナーでない主体）が拒否され、オーナーの復号は Data Access 監査ログに残る。手元から文書を読むと暗号文 | 本番の条件が間に合わず、テスト条件（`swname` のみ）で鍵の解放が成立。本番条件は 10/5〜6 | 負の試験で鍵が漏れる。3 時間で STS の交換が通らない |
 | 3 | 正常系（手元の検証スクリプトと Cloud Run の probe）でピン留めして通る。異常系 6 つ（nonce 違い・ハッシュ違い・署名破損・debug・digest 不許可・期限切れ）が自動試験で拒否。金庫の再起動の後に再検証して復帰 | 証明書の固定（設定）で TLS はつなぐが、attestation との結び付けはスクリプトだけ。画面と文書に弱い版だと明記 | トークンが取れない／VM に届かない |
 | 4 | 401 が 2 通り（トークンなし・audience 違い）、403 が 1 通り（別の SA）、web の SA は通る（手元の IAP 経由と、Cloud Run の probe の両方）。Cloud Run のトークンの claim（`email`・`azp`）を確認。形式不正・署名不正・期限切れの 401 は pytest で確かめる | `email` が無く `azp` で照合 | 署名の検証ができない |
 | 5 | VM に外部 IP なし。image の pull と STS・KMS・Firestore・Logging が通る。Cloud Run Job から金庫に 200。手元から直接は届かない | Cloud NAT かコネクタを足して通る（費用の増を許容する場合）| どの代替でも届かない |
@@ -1169,7 +1189,7 @@ gcloud kms keys remove-iam-policy-binding vault-kek --location="$REGION" --keyri
 | R4 | Direct VPC egress の起動遅延（1 分以上）と接続切断 | 中 | web の起動の不安定。デモ中の瞬断 | E の最初の接続時間を測る | startup probe と再試行。コネクタ（+ $0.0215/h）[S23][S24] |
 | R5 | 東京ゾーンの在庫・クォータ不足 | 中 | VM が作れない | A のクォータ確認。作成時のエラー | 別ゾーン（SEV は a・b・c）、別の機密技術、別リージョン |
 | R6 | 鍵の条件の組み立て（debug は STABLE を満たさない・digest の付け替え・IAM の反映待ち・条件の書き間違い） | 中 | 点 2 の遅れ | 2-7 の切り分け表 | テスト用の条件で先に鍵の解放を確かめる |
-| R7 | 運営者＝鍵の所有者＝プロジェクトのオーナー。IAM を書き換えれば、鍵を別のイメージに渡せる | 構造上、必ずある | 「運営者から隠せる」の主張の強さ | — | 説明文に書く。IAM の書き換えは Admin Activity ログに残る [S18]。KMS の Data Access ログを有効にすれば、復号した主体を残せる（任意）|
+| R7 | 運営者＝鍵の所有者＝プロジェクトのオーナー。IAM を書き換えれば、鍵を別のイメージに渡せる。基本ロールに復号権を含むので、IAM を変えずに KEK を使える（C-58。抑止は Data Access 監査ログ） | 構造上、必ずある | 「運営者から隠せる」の主張の強さ | — | 説明文に書く。IAM の書き換えは Admin Activity ログに残る [S18]。KMS の Data Access ログを有効にすれば、復号した主体を残せる（任意）|
 | R8 | digest↔コミットの結び付けが、運営者の申告（対応表）のまま | 必ずある（再現ビルドが無い間）| 「公開コードで動いている」の検証力 | — | L1（GitHub の証明つきビルド）または L2（再現ビルド）を 10/7 以降の任意課題に |
 | R9 | `store.py` の封印の統合が大きい（約 40 か所） | 中 | 10/5 以降の工数 | スパイクでは試験文書の往復だけにする | 範囲を live の項目だけに絞る。間に合わなければ、「鍵の解放」までで TEE を出し、封印は後 |
 | R10 | 費用が予算アラート 3,000 円を超える | 必ずある | 通知（上限ではない）| — | 10/3 に引き上げる。夜間は VM を停止 |

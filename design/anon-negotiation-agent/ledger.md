@@ -33,34 +33,11 @@
 - 問い: 直接 import するので `pyproject.toml` に明示してよいか（新しいライブラリではない。ルール上の承認が要る）。
 - 推奨: 明示する。`cryptography` 50.0.1（Apache-2.0 OR BSD-3-Clause。AES-256-GCM と X.509 の生成。標準ライブラリにはどちらもない。google-auth・Authlib が推移的に使っている）、`google-auth` 2.58.1（Apache-2.0。`google.auth.jwt` で RS256 の検証。自前の JWT 検証は危ない。Firestore のクライアントが推移的に使っている）。研究報告が挙げた `requests` は、STS と KMS を httpx で直接呼ぶ設計にしたので要らない。承認までは `pyproject.toml` を変えず、実装は進める（どちらも uv.lock にあり、テストは動く）。
 
-### X-70（批評 17 巡目・codex / 設計 / high）鍵の版の切り替えの順序で、金庫が再起動できなくなる
+### P-13（前提 / TEE / 2026-10-03。ユーザーの確認待ち。既定は「記録による抑止」）オーナーの復号を、拒否ポリシーで拒むか
 
-- §9 は `_tee/dek.kek_version == primary` を起動の条件にしながら、本番イメージへ切り替えた「直後」に primary を更新する。本番の金庫が旧版 V1 で DEK を包んで起動した後に V2 を primary にして V1 を無効化すると、稼働中はメモリの DEK で動くが、次の起動で止まる。DEK を作り直すと既存の封印済みデータが開けなくなる。契約 §5 にも `kek_version` の保存・照合がなく、AC-22 も `_tee/dek` と再起動を検査しない。
-- 案: live のデータを入れる前に「debug 停止 → V2 を primary → V1 無効化 → debug の DEK 削除 → 本番を初回起動」の順にする。`kek_version == V2`、強制再起動、既存の暗号文の開封を AC-22 に加える。live 後の版の更新は DEK の再生成ではなく、同じ DEK の包み直しの手順を定める。
-- 原文: reviews/round-17-codex.md
-
-### X-71（批評 17 巡目・codex / 設計 / high）deploy_check は「ほかの主体に復号権がない」を証明しない
-
-- §10 の (b) は KEK 自身の IAM、(c) は `web`・VM の SA のロールだけを見る。WIF の attribute mapping、key ring や folder・organization からの継承、custom role を含む実効的な KMS 権限は照合しない。上位の階層で別の主体に復号権が付いていても (a)〜(f) は合格し、その主体は TEE を経由せずに KEK を使える。
-- 案: attribute mapping と condition を組で完全一致検査し、`cloudkms.cryptoKeyVersions.useToDecrypt/useToEncrypt` の実効権限を全階層・custom role 込みで列挙して、期待する principalSet 以外が 1 件でもあれば失敗にする。そこまで検査しないなら、主張を「CryptoKey 直下の binding が一致する」まで弱める。
-- 原文: reviews/round-17-codex.md
-
-### X-72（批評 17 巡目・codex / 設計 / medium）失効と定期の再検証が、実装の契約に存在しない
-
-- v16 §9 は `status=revoked` と 10 分ごとの再検証を要求するが、契約（ファイル）の §10・§13 の形には `status` がなく、§8 は接続エラーのときしか再検証しない。`format=full` も契約に固定されていない。許可表の版と再読込の方法も未定。
-- 原文: reviews/round-17-codex.md
-
-### X-73（批評 17 巡目・codex / 設計 / medium）AC-23 の `--web` は金庫の証明書を独立に照合できない
-
-- AC-23 は `--web`・`--direct` の双方で証明書のハッシュを照合するとするが、`--web` は公開の web API を呼ぶだけで金庫の TLS 証明書を観測できない（契約 §10 では `certificate_sha256=None` で飛ばす）。受入条件だけ読むと、通信経路まで結び付いたように誤認される。
-- 案: `--web` は nonce・署名・claims・active なダイジェストの検証だけ、`--direct` だけが証明書との結合を検証する、と分ける。
-- 原文: reviews/round-17-codex.md
-
-### X-74（批評 17 巡目・codex / 設計 / medium）`checks` 優先の寛容な読みが、strict な Plan の検証より後にある
-
-- §2.7 は `Plan` を strict な pydantic 型で検証するとしながら、有効な `checks` があれば列挙外の `move="check"` やグリッド外の `package` も無視するとする。通常のモデル検証では無視する前に Plan 全体が失敗する。§4.1 にも `checks` を先に取り出す手順がない。`off_grid` も残っている。
-- 案: JSON object と `schema`・`checks` を先に検証し、空でなければ raw の `move`・`package` を型検証せずに捨てる 2 段の読み方にする。`checks=[]` のときだけ `Move` の規則で strict に検証する。`off_grid` を本文・型・試験から除く。
-- 原文: reviews/round-17-codex.md
+- 背景（C-58）: プロジェクトのオーナーは基本ロールに KMS の復号権を含むので、IAM を変えずに KEK で DEK を復号できる。既定の対処は Cloud KMS の Data Access 監査ログ（復号の主体と時刻が残る）。
+- 問い: プロジェクト `anon-nego`（ユーザー作成）は Google Cloud の組織の配下か。配下なら、IAM の拒否ポリシー（`cloudkms.cryptoKeyVersions.useToDecrypt` をダイジェストの principalSet 以外に拒否）で、オーナーの復号を「記録」から「拒否」に強められる（拒否ポリシーの変更も Admin Activity に残る）。`roles/iam.denyAdmin` の付与には組織の管理者が要る。
+- 推奨: 組織の配下でなければ既定のまま（説明文に「運営者が復号すれば記録に残る」と書く）。配下なら拒否ポリシーを足す（スパイクの後、10/5 以降）。
 
 ## 解決済み（一行索引）
 
@@ -251,3 +228,13 @@
 | C-56 | debug の間の DEK を、鍵の版を変えずに本番へ持ち込める | 受理。v16 §9・手順 D: `_tee/dek` に鍵の版を記録し primary と違えば起動しない。切り替え直後に版を回す。テスト用の WIF 条件にもプロジェクトと SA |
 | C-57 | 失効の扱いがない（追記だけの許可リスト、接続エラーのときしか再検証しない） | 受理。v16 §9: 対応表に `status`、`web` は 10 分ごとにも再検証し失敗したらピンを外す |
 | L16-1〜6 | JSON モードでの寛容な読み・`off_grid`・`last_check` の代償・AC-22 と §3.3・`format=full`・AC-23 の照合 | 受理。v16 に反映（archive に内訳。L16-1 の実装は ③） |
+| X-70 | 鍵の版の切り替えの順序で、金庫が再起動できなくなる | 受理。v17 §9・手順 D: 版を回し古い版を無効化し DEK を消してから本番を初回起動。live 後は包み直し（10/5 以降）。自己試験は作る／開く |
+| X-71 | deploy_check は「ほかの主体に復号権がない」を証明しない | 受理。v17 §10 (b): Policy Analyzer で全階層・custom role 込みに列挙し、期待は principalSet とオーナーだけ。(a) に attribute mapping |
+| X-72 | 失効と定期の再検証が実装の契約に存在しない | 受理。契約 §16 に C-57・L16-5・L16-6 を明文化。許可表はイメージに焼き、失効は再デプロイ（v17 §9） |
+| X-73 | AC-23 の `--web` は金庫の証明書を独立に照合できない | 受理。v17 AC-23・契約 §16: `--web` は証明書との結び付きを確かめない。`--direct` だけが照合 |
+| X-74 | `checks` 優先の寛容な読みが strict な Plan 検証より後にある | 受理。v17 §2.7: 2 段で読む（③ で実装）。`off_grid` は型と試験からも除く |
+| C-58 | プロジェクトのオーナーは IAM を変えずに KEK で復号できる | 受理。v17 §9: 鍵の排他性を「オーナー以外」に限り、オーナーには Data Access 監査ログで記録。負の試験 3 を替えた。拒否ポリシーは P-13 |
+| C-59 | debug の VM の連携トークンが条件の切り替え後も期限まで使え、版を回しても効かない | 受理。v17 §9・手順 D: 権限を外して 65 分以上待ってから版を回し、本番を初回起動 |
+| C-60 | primary を `GET cryptoKeys` で読む権限がない。案内に従うと live のデータを失う | 受理。1 バイトの探りの encrypt で primary を知る（契約 §17。実装済み）。固定文を「live のデータがあれば DEK を消すな」に |
+| C-61 | 10 分ごとの再検証が 429・503 でもピンを外し、外した後の再検証の時期がない | 受理。v17 §9・契約 §17: 否定の結果だけで外す。2 秒間隔で再検証して復帰。nonce の転送は 10 秒に 1 回 |
+| L17-1〜2 | 平文で残るメタデータの列挙・手順 E の環境変数 | 受理。v17 §9 の列挙を直し、手順 E と手順書を契約 §7 の名前に |

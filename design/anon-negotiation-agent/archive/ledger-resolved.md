@@ -1407,3 +1407,67 @@ codex は high 2・medium 3。design-critic は high 1・medium 1 と low のメ
 - L16-4: AC-22 の「3 サービスの /healthz」、§10 の金庫の起動コマンドと Cloud Run IAM、§3.3 の見出しが TEE の構成と合わない。→ 3 つとも直した。
 - L16-5: `web` の ID トークンを `format=full` なしで取ると `email` が入らず、金庫が全呼び出しを 403 にするおそれ。→ 契約 §7 と §9 の 4 に `format=full` を明記（実装者 B に伝えた）。
 - L16-6: AC-23 のスクリプトが引数なしではプロジェクトと SA を照合せず、第三者の検証が web より弱い。`--direct` も控えた証明書だけを信用する接続で呼ぶべき。→ `--project`・`--service-account` を必須にし、AC-23 に書いた。
+
+## 批評 17 巡目（v16 → v17、2026-10-03。codex: gpt-5.6-sol xhigh、reviews/round-17-codex.md／design-critic: claude/claude-opus-5-5、reviews/round-17.md）
+
+codex は high 2・medium 3（X-70〜X-74）。design-critic は high 2・medium 2（C-58〜C-61）と low 2（L17-1・L17-2）。すべて v17 で直した。
+
+### X-70（批評 17 巡目・codex / 設計 / high）鍵の版の切り替えの順序で、金庫が再起動できなくなる
+
+- §9 は `_tee/dek.kek_version == primary` を起動の条件にしながら、本番イメージへ切り替えた「直後」に primary を更新する。本番の金庫が旧版 V1 で DEK を包んで起動した後に V2 を primary にして V1 を無効化すると、稼働中はメモリの DEK で動くが、次の起動で止まる。DEK を作り直すと既存の封印済みデータが開けなくなる。契約 §5 にも `kek_version` の保存・照合がなく、AC-22 も `_tee/dek` と再起動を検査しない。
+- 案: live のデータを入れる前に「debug 停止 → V2 を primary → V1 無効化 → debug の DEK 削除 → 本番を初回起動」の順にする。`kek_version == V2`、強制再起動、既存の暗号文の開封を AC-22 に加える。live 後の版の更新は DEK の再生成ではなく、同じ DEK の包み直しの手順を定める。
+- 原文: reviews/round-17-codex.md
+
+### X-71（批評 17 巡目・codex / 設計 / high）deploy_check は「ほかの主体に復号権がない」を証明しない
+
+- §10 の (b) は KEK 自身の IAM、(c) は `web`・VM の SA のロールだけを見る。WIF の attribute mapping、key ring や folder・organization からの継承、custom role を含む実効的な KMS 権限は照合しない。上位の階層で別の主体に復号権が付いていても (a)〜(f) は合格し、その主体は TEE を経由せずに KEK を使える。
+- 案: attribute mapping と condition を組で完全一致検査し、`cloudkms.cryptoKeyVersions.useToDecrypt/useToEncrypt` の実効権限を全階層・custom role 込みで列挙して、期待する principalSet 以外が 1 件でもあれば失敗にする。そこまで検査しないなら、主張を「CryptoKey 直下の binding が一致する」まで弱める。
+- 原文: reviews/round-17-codex.md
+
+### X-72（批評 17 巡目・codex / 設計 / medium）失効と定期の再検証が、実装の契約に存在しない
+
+- v16 §9 は `status=revoked` と 10 分ごとの再検証を要求するが、契約（ファイル）の §10・§13 の形には `status` がなく、§8 は接続エラーのときしか再検証しない。`format=full` も契約に固定されていない。許可表の版と再読込の方法も未定。
+- 原文: reviews/round-17-codex.md
+
+### X-73（批評 17 巡目・codex / 設計 / medium）AC-23 の `--web` は金庫の証明書を独立に照合できない
+
+- AC-23 は `--web`・`--direct` の双方で証明書のハッシュを照合するとするが、`--web` は公開の web API を呼ぶだけで金庫の TLS 証明書を観測できない（契約 §10 では `certificate_sha256=None` で飛ばす）。受入条件だけ読むと、通信経路まで結び付いたように誤認される。
+- 案: `--web` は nonce・署名・claims・active なダイジェストの検証だけ、`--direct` だけが証明書との結合を検証する、と分ける。
+- 原文: reviews/round-17-codex.md
+
+### X-74（批評 17 巡目・codex / 設計 / medium）`checks` 優先の寛容な読みが、strict な Plan の検証より後にある
+
+- §2.7 は `Plan` を strict な pydantic 型で検証するとしながら、有効な `checks` があれば列挙外の `move="check"` やグリッド外の `package` も無視するとする。通常のモデル検証では無視する前に Plan 全体が失敗する。§4.1 にも `checks` を先に取り出す手順がない。`off_grid` も残っている。
+- 案: JSON object と `schema`・`checks` を先に検証し、空でなければ raw の `move`・`package` を型検証せずに捨てる 2 段の読み方にする。`checks=[]` のときだけ `Move` の規則で strict に検証する。`off_grid` を本文・型・試験から除く。
+- 原文: reviews/round-17-codex.md
+
+- **X-70 の解決**: 手順 D を「debug の VM を消す → 権限を外して待つ → 付け直す → 新しい版を primary → 古い版を無効化 → DEK を消す → 本番を初回起動」に直し、本番の起動後に版を回さない。live 後の版の更新は、動いている金庫が起動時に開いた DEK を包み直す（契約 §16。10/5 以降）。自己試験 `_tee/selftest` は作る／開くにして、再起動後に既存の暗号文が開くことを確かめる（AC-22 の (h)）。
+- **X-71 の解決**: §10 (b) を Policy Analyzer の列挙に替え、期待する集合を「`active` なダイジェストの principalSet とプロジェクトのオーナー」にした（オーナーは C-58 の限界として明記）。(a) に attribute mapping。
+- **X-72 の解決**: 契約 §16 に C-57・L16-5・L16-6・single-flight をまとめ、許可表はイメージに焼いて失効は再デプロイと決めた。
+- **X-73 の解決**: AC-23 と契約 §16 で、`--web` は証明書との結び付きを確かめないと明記し、`--direct` だけが照合する。
+- **X-74 の解決**: §2.7 に 2 段の読み方（`schema`・`checks` → `checks` が空でなければ `move`・`package` を捨てる → 空なら `Move` の規則）を書いた。③ で実装。`off_grid` は型と試験からも除く。
+
+### C-58（批評 17 巡目・design-critic / 設計 / high）プロジェクトのオーナーは IAM を変えずに KEK で DEK を復号できる
+
+- 公式の IAM 権限表で、`cloudkms.cryptoKeyVersions.useToDecrypt`・`useToEncrypt` は `roles/owner` に含まれる。§9 の 2 段目（鍵の排他性）と「封印が守るもの」は、この前提が崩れると成り立たない。スパイクの負の試験 3（手元のオーナーは 403）は失敗し、研究報告の基準では「即、中止」になる。Policy Analyzer の照合もオーナーが必ず列挙されて常に失敗する。
+- **解決**: 鍵の排他性の主張を「オーナー以外の主体について」に限り、オーナーに対しては Cloud KMS の Data Access 監査ログ（Decrypt の主体と時刻）による記録と、Admin Activity の監査ログ（IAM・版・監査設定の変更）による抑止、と書いた（§9）。負の試験 3 を「金庫の VM の SA を impersonate → 403」と「オーナーの復号が Data Access ログに残る」に替えた（手順 A で監査ログを有効にし、impersonate の権限を付ける）。Policy Analyzer の期待値にオーナーを列挙する（§10）。組織の配下なら拒否ポリシーで「拒否」に強められるので、P-13 としてユーザーに聞く。
+
+### C-59（批評 17 巡目・design-critic / 設計 / high）C-56 の直し（版を回す）が効かない
+
+- debug の VM で得た STS の連携トークン（と attestation トークン）は、プロバイダの条件を本番に変えた後も期限（最長 1 時間）まで使える。手順 D では条件の切り替えから十数分で新しい版 V2 を作るので、運営者は V2 で自分の選んだ DEK を包み、本番の金庫に使わせられる。
+- **解決**: 手順 D に「debug の VM を消したら KMS の権限を外し、65 分以上待ってから付け直す」を入れ、版を回すのと本番の初回起動はその後にした（§9・契約 §17）。
+
+### C-60（批評 17 巡目・design-critic / 設計 / medium）primary の版を `GET cryptoKeys` で読む権限がない
+
+- `cloudkms.cryptoKeys.get` は `cryptoKeyEncrypterDecrypter` に含まれず、本番の金庫は 403 を受けて起動を繰り返す。primary の変更の反映が遅れると最初の DEK が古い版で包まれうる。止まったときの案内（「rotate the DEK」）に従うと live のデータを失う。
+- **解決**: 1 バイトの探りを encrypt した応答の `name` で primary を知る（追加の IAM なし。実装済み）。古い版を無効化してから本番を起動する順序なので、最初の DEK が古い版で包まれることはない。固定文を「live のデータがあれば DEK を消すな。保管された版を有効に戻すか包み直す」に替えた（契約 §17）。
+
+### C-61（批評 17 巡目・design-critic / 設計 / medium）10 分ごとの再検証は 429・503 でもピンを外す
+
+- 金庫の発行枠は公開の nonce の転送と共有しているので、匿名の利用者が 2 秒ごとに転送させると、全交渉の金庫の呼び出しを周期的に落とせる。外した後にいつ検証し直すかも書かれていない。
+- **解決**: ピンを外すのは、トークンを検証した結果が否定のときだけ（`attest()` の確定した否定を含む）。一時的な失敗では外さずに今の接続を使い続け、2 秒間隔で再検証をやり直す。外した後も 2 秒間隔で再検証して通ったら復帰する。nonce の転送は 10 秒に 1 回（§9・契約 §17。実装者 B に伝達）。
+
+### L17-1〜L17-2（批評 17 巡目・design-critic / low のメモ）
+
+- L17-1: 平文で残るメタデータの列挙が実際より少ない（`end_reason` など）。→ §9 の列挙に `end_reason`・`to_move`・`paused`・`paused_at`・`version`・`request_id` を足し、DV-19 の期待値とした。
+- L17-2: 手順 E の環境変数が契約と合っていない。→ 手順 E と手順書を契約 §7・§12 の名前（`VAULT_TEE`・`VAULT_SERVICE_ACCOUNT`・`GOOGLE_CLOUD_PROJECT`）に直した。

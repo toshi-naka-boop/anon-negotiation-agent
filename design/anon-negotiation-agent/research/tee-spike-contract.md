@@ -229,3 +229,13 @@ def release_for_digest(releases: list[dict], digest: str) -> dict | None
 - **(L16-5) §7**: `web` の ID トークンは、メタデータサーバから `format=full` で取る（`identity?audience=...&format=full`。これがないと `email` が入らない）。
 - **(L16-6・X-73) §12**: `scripts/verify_attestation.py` は `--project`・`--service-account` を必須にする。`--direct` は、控えた証明書だけを信用する接続で `/v1/attestation` を呼び、自分で計算した証明書ハッシュで `eat_nonce` を照合する。`--web` は金庫の証明書を観測できないので、nonce・署名・claims・`active` なダイジェストまでを確かめる（証明書との結び付きは確かめない。設計書 AC-23 もそう書く）。
 - **(X-71) deploy_check（スパイクの後）**: KEK の実効権限は、Cloud Asset の Policy Analyzer（`gcloud asset analyze-iam-policy --full-resource-name=//cloudkms.googleapis.com/<鍵の名前> --permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt`）で全階層・custom role 込みで列挙し、`active` なダイジェストの principalSet 以外が 1 件でもあれば失敗にする。WIF プロバイダは attribute mapping と condition を組で完全一致で照合する。
+
+## 17. 追記（2026-10-03。批評 17 巡目の受理分。実装者 A・B に個別に伝達済み）
+
+- **(C-60) §5**: primary の版は、鍵の GET ではなく、1 バイトの探りを `:encrypt` した応答の `name` で知る（`cryptoKeyEncrypterDecrypter` に `cloudkms.cryptoKeys.get` は含まれない）。一致しないときの固定文は `DEK was wrapped by a non-primary key version; refusing to start. If live data exists do NOT reset the DEK: re-enable and re-promote the stored version, or re-wrap the DEK.`
+- **(C-59) 手順**: debug の VM を消したら、KMS の権限を外して 65 分以上待ち、付け直してから新しい版を primary にする（debug の間に出た連携トークン・attestation トークンの期限切れを待つ）。本番の VM の初回起動はその後。
+- **(C-58) 主張と確認**: プロジェクトのオーナーは基本ロールで KEK を使える。負の試験 3 は「オーナーでない主体（金庫の VM の SA を impersonate）→ 403」と「オーナーの復号が Data Access 監査ログに残る」に替える。Cloud KMS の Data Access 監査ログを手順 A で有効にする。
+- **(C-61) §8**: ピンを外すのは、トークンを検証した結果が否定のときだけ（`attest()` の確定した否定を含む）。一時的な失敗（429・503・接続・タイムアウト・形違い = reason `unavailable`）では外さず、今の接続を使い続けて 2 秒間隔で再検証をやり直す。外した後も 2 秒間隔で再検証して通ったら復帰する。`GET /api/tee/attestation` の `nonce` ありの転送は 10 秒に 1 回。
+- **(X-72) 許可表**: イメージに焼く。失効は表を直して `web` を再デプロイ。
+- **(L17-2) 環境変数**: probe の Job は `VAULT_BASE_URL`・`VAULT_SERVICE_ACCOUNT`・`GOOGLE_CLOUD_PROJECT`（`VAULT_AUDIENCE` は読まない。audience は設定の `caller_audience`）。`web` は `VAULT_TEE=true`・`VAULT_BASE_URL`・`VAULT_SERVICE_ACCOUNT`・`GOOGLE_CLOUD_PROJECT`（任意: `VAULT_RELEASES_FILE`・`VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE`・`GITHUB_REPO_URL`）。
+- **(X-74) ③ の実装**: `Plan` は 2 段で読む（`schema`・`checks` を strict に → `checks` が空でなければ `move`・`package` を捨てる → 空なら `Move` の規則で strict に）。スパイクの範囲外。

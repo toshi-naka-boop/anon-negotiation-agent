@@ -221,6 +221,7 @@ uv run pytest tests/test_tee_key_release.py tests/test_tee_sealing.py -q
 1. プロバイダの条件を本番用に更新する(研究報告 D の 1 つ目)。
 2. 負の試験 1: debug の VM がまだあるうちに、停止して開始する(研究報告 F のコマンド)。シリアル出力の末尾(研究報告 C の `get-serial-port-output`)に STS の 4xx のステータスが出て、金庫が終了していること(debug イメージは `STABLE` を持たず、本番条件で落ちる)。
 3. debug の VM を削除する(破壊的な操作。名前を確かめてから実行する)。
+3-2. KMS の権限を外し(研究報告 D の `remove-iam-policy-binding`)、**65 分以上待って**から付け直す(debug の間に出た連携トークン・attestation トークンの期限切れを待つ。批評 C-59)。
 4. 古い `_tee/dek` を手元に控える(研究報告 D の `curl`。`tmp/tee_spike/old_dek.json` に `wrapped_dek`・`kek`・`kek_version` の項目が見えること。平文の DEK は含まれない)。
 5. KEK の新しい版を作って primary にし、`versions list` で古い版の番号(`ENABLED` で primary でないもの)を確かめ、古い版を無効化する。
 6. `uv run python scripts/tee_reset_dek.py --yes`(手元の ADC。無ければ先に `gcloud auth application-default login`)。接続先の表示が本物の Firestore とこのプロジェクトであること。`_tee/dek` と `_tee/selftest` の 2 件を消したと出ること。
@@ -251,7 +252,7 @@ gcloud compute instances create vault-tee-negative --zone="$ZONE" --machine-type
 gcloud compute instances delete vault-tee-negative --zone="$ZONE"
 ```
 
-**負の試験 3(手元のオーナー権限では復号できない)**(研究報告に手順がないので追加)。ダミーの暗号文を使う(本物の包まれた DEK は使わない。権限があっても平文が出ないようにするため)。
+**負の試験 3(オーナーでない主体は復号できない。オーナーは復号できるが記録に残る)**(研究報告 2-8 の (b)。批評 C-58)。ダミーの暗号文を使う(本物の包まれた DEK は使わない。権限があっても平文が出ないようにするため)。
 
 (追加)ダミーの暗号文のファイルを作る。
 
@@ -259,10 +260,22 @@ gcloud compute instances delete vault-tee-negative --zone="$ZONE"
 printf 'dummy' > tmp/tee_spike/dummy.bin
 ```
 
-(追加)手元の gcloud(オーナー)で復号を試みる。
+(追加)金庫の VM の SA を impersonate して復号を試みる(手順 A で付けた `serviceAccountTokenCreator` を使う)。`PERMISSION_DENIED`(403)が合格(VM の SA に復号権がない)。
+
+```
+gcloud kms decrypt --location="$REGION" --keyring=vault-tee --key=vault-kek --ciphertext-file=tmp/tee_spike/dummy.bin --plaintext-file=- --impersonate-service-account="$VAULT_SA"
+```
+
+(追加)自分(オーナー)で復号を試みる。基本ロールに復号権が含まれるので権限の検査は通り、ダミーの暗号文なので `INVALID_ARGUMENT` で終わる(これが期待どおり。構造的な限界の確認)。
 
 ```
 gcloud kms decrypt --location="$REGION" --keyring=vault-tee --key=vault-kek --ciphertext-file=tmp/tee_spike/dummy.bin --plaintext-file=-
+```
+
+(追加)その試みが Cloud KMS の Data Access 監査ログに残っていることを確かめる(手順 A で有効にしたもの。自分のメールと `Decrypt` が出る)。
+
+```
+gcloud logging read 'protoPayload.serviceName="cloudkms.googleapis.com" AND protoPayload.methodName="Decrypt"' --freshness=15m --limit=5 --format="value(timestamp,protoPayload.authenticationInfo.principalEmail,protoPayload.status.code)"
 ```
 
 **手元から文書を読むと暗号文**(研究報告に手順がないので追加)
@@ -280,7 +293,7 @@ curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://fi
 - KEK の入れ替え: `describe` の出力が、新しい版の番号(例 `.../cryptoKeyVersions/2`)で終わる。旧版で包んだ `_tee/dek` が残ったまま再起動すると、金庫は起動せず、launcher のログに `non-primary key version` が出て、`OnFailure` の再起動を繰り返す。旧版を無効化したあとは、KMS が旧版の包みの復号そのものを拒むので、古い `_tee/dek` を書き戻されても金庫は起動しない(そのときのログは、`non-primary key version` ではなく KMS のステータスになる)。
 - DEK の作り直し: `tee_reset_dek.py` が `削除した: _tee/dek` と `削除した: _tee/selftest` を出力する(`もともと無かった` が出たら、`--project` が違うかもしれない)。VM の開始のあと、`sealing self-test ok` が出る(新しい DEK が、新しい primary の版で包まれて作られた)。
 - 負の試験 2: 別 digest の VM の launcher のログに KMS の 403 が出て、金庫が終了する(VM が止まる)。
-- 負の試験 3: `gcloud kms decrypt` が `PERMISSION_DENIED`(403)で終わる。**`INVALID_ARGUMENT` など、権限の検査を通った応答が返ったら不合格**(オーナーに復号権があることになる)。
+- 負の試験 3: impersonate した `gcloud kms decrypt` が `PERMISSION_DENIED`(403)で終わる。オーナー自身は権限の検査を通る(`INVALID_ARGUMENT`。これは期待どおりで、C-58 の構造的な限界)。Data Access ログに、その試みの主体(自分のメール)と `Decrypt` が出る。**impersonate で権限の検査を通ったら不合格**(VM の SA に復号権があることになる)。
 - Firestore の REST の応答で、`fields.probe` が `bytesValue`(base64 の塊)で、読める文字列(`stringValue`)ではない。
 - 縮退: 本番の条件が間に合わず、テスト用の条件(`swname` のみ)で鍵の解放が成立する。本番の条件は 10/5〜6 に回す。
 - 不合格: 負の試験で鍵が漏れる(これは即、中止)。または 3 時間で STS の交換が通らない。または、旧版で包んだ `_tee/dek` で金庫が起動してしまう(本物のデータを入れない)。
@@ -293,7 +306,7 @@ curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://fi
 - KEK の入れ替え: `versions list` の出力(作る前と、無効化したあと)、`describe` の出力、旧版の包みで金庫が起動しなかったときの launcher のログ(`non-primary key version` の行を含む範囲)。
 - `tee_reset_dek.py` の出力の全文と、そのあとの launcher のログ(`sealing self-test ok` の行)。
 - 負の試験 2: 別 digest の VM の launcher のログ(KMS 403 の行を含む範囲)。
-- 負の試験 3: `gcloud kms decrypt` のエラーの全文。
+- 負の試験 3: impersonate での `gcloud kms decrypt` のエラーの全文、オーナーでの応答、Data Access ログの行(メールは自分のもの)。
 - `curl` の応答の `fields` の部分(`probe` が `bytesValue` であること)。ID やトークンは含まれない。
 
 ### 不合格のときの代替
@@ -539,7 +552,7 @@ curl -sk -o /dev/null -w "%{http_code}\n" --connect-timeout 5 https://10.10.0.10
 Direct VPC egress をつなぐ(研究報告 E の最後。web の Cloud Run サービスができた後)。
 
 ```
-gcloud run services update web --region="$REGION" --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --update-env-vars="VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_AUDIENCE=${VAULT_AUDIENCE}"
+gcloud run services update web --region="$REGION" --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --update-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"
 ```
 
 (追加)GitHub のリポジトリの URL を変数に入れる(コミットのリンクの土台。`<owner>/<repo>` を置き換える)。
