@@ -15,7 +15,8 @@ LLM の呼び出し(交渉エージェントと同じ土台。agents.llm_agents.
   Vertex AI の一時的なエラー(429・5xx・通信・時間切れ)を、待ち時間を空けて最大 agent_max_retries 回、全体で agent_call_timeout_seconds の中で。
 - 送る前に、物理の呼び出し数を 1 日の枠で数える(web.llm_budget.reserve(None)。再試行も 1 回と数え、429・5xx でも戻さない。台帳 X-56)。
   1 日の上限に達していれば、送らずに断る(daily_limit_reached)。カウンタに書けないときは LlmBudgetUnavailable(送らない)。
-  あわせて、依頼者ごとの窓(プロセスのメモリ上)で、短い間の連打を断る(rate_limited。§8.2 の面談の枠を、IP が決まるまで暫定で依頼者ごとに)。
+  短い間の連打(§8.2 の面談の枠)は、ここでは断らない。HTTP の入口の枠(web.limits の interview_llm。クライアント IP ごと。web.interview.api が
+  LLM を呼ぶ 3 つの API に guard を付ける)が、この呼び出しの手前で断る(台帳 I-26。以前は、依頼者 ID ごとのメモリの窓をここに暫定で置いていた)。
 - ログには、種類と例外の型名だけを書く(入力・出力・依頼者 ID は書かない。§3.8・§7)。トレースのメッセージ内容のキャプチャは、環境変数
   ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false で切る(本番の必須設定。§10)。ADK の既定は「載せる」なので、このモジュールを読み込むと
   き、未設定なら false にする(明示の設定は尊重する)。このクラス自身はスパンを作らない(ADK が作るスパンの中身を、これで絞る)。
@@ -26,7 +27,6 @@ import json
 import logging
 import os
 import uuid
-from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import aclosing
 from pathlib import Path
@@ -72,7 +72,7 @@ Sleep = Callable[[float], Awaitable[None]]
 
 # 失敗の理由(InterviewLlmFailure.code。API の detail に使う)
 DAILY_LIMIT_REACHED = "daily_limit_reached"  # 1 日の物理の呼び出し数の上限に達している(送っていない)
-RATE_LIMITED = "rate_limited"  # 依頼者ごとの窓の上限に達している(送っていない)
+RATE_LIMITED = "rate_limited"  # 以前の、依頼者ごとの窓の上限(いまは出さない。面談の枠は web.limits の入口 interview_llm)。service.py の対応表が参照する
 LLM_UNAVAILABLE = "llm_unavailable"  # 一時的なエラーが続いた・時間切れ(再試行を使い切った)
 LLM_FAILED = "llm_failed"  # 一時的でない失敗(権限・要求の誤り・ADK の失敗など)
 OUTPUT_TRUNCATED = "output_truncated"  # 出力が max_output_tokens で切れた
@@ -168,7 +168,6 @@ class InterviewAgent:
         self._agents_config = agents_config
         self._model = model
         self._runners: dict[AgentKind, Runner] = {}
-        self._windows: dict[str, deque] = {}
 
     def use_model(self, model: BaseLlm) -> None:
         """使うモデルを差し替える(テストが、スタブの LLM を差し込む口)。作ってある Runner は捨てる。"""
@@ -187,11 +186,14 @@ class InterviewAgent:
     # ------------------------------------------------------------------
 
     async def extract_salary_basis(self, owner: str, answers: Sequence[tuple[str, str]]) -> SalaryBasis:
-        """年収の正規化の 3 問の (質問, 回答) から、SalaryBasis を取り出す。owner は、依頼者ごとの窓の鍵(LLM には渡さない)。"""
+        """年収の正規化の 3 問の (質問, 回答) から、SalaryBasis を取り出す。
+
+        owner は呼んだ依頼者の ID(LLM には渡さない)。いまは使わない: 以前の依頼者ごとの窓の鍵で、呼び出し側(service.py)の形を変えないために残した。
+        """
         llm_input = json.dumps(
             {"task": "salary_basis", "qa": [{"question": q, "answer": a} for q, a in answers]}, ensure_ascii=False
         )
-        payload = _load_json_object(await self._call(owner, "salary", llm_input))
+        payload = _load_json_object(await self._call("salary", llm_input))
         try:  # 知らない項目は無視し、知っている項目の型・範囲・列挙が違えば、出力を使わない
             return SalaryBasis.model_validate(
                 coerce_numeric_fields(known_fields_only(payload, SalaryBasis.model_fields), _SALARY_NUMBER_KEYS)
@@ -200,9 +202,9 @@ class InterviewAgent:
             raise InterviewLlmFailure(OUTPUT_INVALID) from None
 
     async def extract_constraints(self, owner: str, kind: ExtractionKind, text: str) -> tuple[ConstraintList, int]:
-        """自由コメント・辞めた理由の文章から、発言を取り出す。返り値は (発言の並び, 検証に通らず捨てた発言の数)。"""
+        """自由コメント・辞めた理由の文章から、発言を取り出す。返り値は (発言の並び, 検証に通らず捨てた発言の数)。owner は extract_salary_basis と同じ(使わない)。"""
         llm_input = json.dumps({"task": kind, "text": text}, ensure_ascii=False)
-        payload = _load_json_object(await self._call(owner, "constraints", llm_input))
+        payload = _load_json_object(await self._call("constraints", llm_input))
         try:
             return parse_constraint_list(payload, max_statements=self._config.max_statements_per_extraction)
         except ValueError:
@@ -235,23 +237,13 @@ class InterviewAgent:
             )
         return runner
 
-    async def _admit(self, owner: str) -> None:
-        """LLM に 1 回送る前の計上: 依頼者ごとの窓、1 日の物理の数(Firestore のトランザクション)。断るなら InterviewLlmFailure。"""
-        now = self._clock.now()
-        window = self._windows.setdefault(owner, deque())
-        while window and (now - window[0]).total_seconds() >= self._config.llm_window_seconds:
-            window.popleft()
-        if len(window) >= self._config.llm_calls_per_window:
-            raise InterviewLlmFailure(RATE_LIMITED)
+    async def _admit(self) -> None:
+        """LLM に 1 回送る前の計上: 1 日の物理の数(Firestore のトランザクション)。断るなら InterviewLlmFailure。"""
         reservation = await self._budget.reserve(None)  # 書けないときは LlmBudgetUnavailable(送らない)
         if not reservation.granted:
             raise InterviewLlmFailure(DAILY_LIMIT_REACHED)
-        window.append(now)
-        if len(self._windows) > 2 * self._config.max_active_interviews:  # 窓の外に出た依頼者を掃除する(メモリの上限)
-            span = self._config.llm_window_seconds
-            self._windows = {key: dq for key, dq in self._windows.items() if dq and (now - dq[-1]).total_seconds() < span}
 
-    async def _call(self, owner: str, kind: AgentKind, llm_input: str) -> str:
+    async def _call(self, kind: AgentKind, llm_input: str) -> str:
         """kind のエージェントを 1 回呼ぶ(物理の送信は、再試行を含めて、1 回ごとに計上する)。LLM の出力の文字列を返す。
 
         上限(agent_call_timeout_seconds)は、再試行の待ち時間を含む(§4.1)。一時的なエラーは、待ち時間を空けて最大
@@ -267,7 +259,7 @@ class InterviewAgent:
             remaining = self._retry.agent_call_timeout_seconds - elapsed()
             if remaining <= 0:
                 raise InterviewLlmFailure(LLM_UNAVAILABLE)
-            await self._admit(owner)
+            await self._admit()
             try:
                 return await asyncio.wait_for(self._run_once(kind, llm_input), timeout=remaining)
             except _OutputTruncated:

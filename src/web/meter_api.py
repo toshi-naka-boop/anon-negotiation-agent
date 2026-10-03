@@ -1,12 +1,16 @@
 """推定区間メーターの API(design.md §8.3。FR-45・AC-12。台帳 L8-2・L7-3・P-16)。画面は含まない。
 
-| メソッド・パス | 呼べる人 | 返すもの |
-|---|---|---|
-| POST /v1/demo/meter | 誰でも(セッションを見ない。X-Requested-With は要る) | 交渉 ID の一覧から作った、年収の境目の推定区間(防御あり) |
-| GET /v1/demo/meter/simulation?value= | 誰でも(セッションを見ない) | 防御なしのシミュレーション: 二分探索の手の列と手数 |
+| メソッド・パス | 呼べる人 | 返すもの | 入口の枠(web.limits) |
+|---|---|---|---|
+| POST /v1/demo/meter | 誰でも(セッションを見ない。X-Requested-With は要る) | 交渉 ID の一覧から作った、年収の境目の推定区間(防御あり) | meter |
+| GET /v1/demo/meter/simulation?value= | 誰でも(セッションを見ない) | 防御なしのシミュレーション: 二分探索の手の列と手数 | なし(純粋な計算) |
 
 防御あり(POST /v1/demo/meter。本文は {"negotiation_ids": [...]} の 1〜20 件)
-- 画面は交渉 ID の一覧を渡すだけ。web は一覧を覚えず、その場で金庫を読んで計算し、何も書かない(訪問者を見分ける ID も作らない。L7-3)。
+- 入口の枠(web.limits の meter。クライアント IP ごと・暫定 10 分に 60 回): 1 回で最大 20 件の交渉について金庫と Firestore を読むので、
+  読む前に数える。超えたら 429(Retry-After つき。本文は {"detail": {"code": "rate_limited", "entrance": "meter", ...}})、数えられなければ
+  503。どちらも金庫には触れない。本文を検証する前に数えるので、形が違って 422 になる要求も、403 になる要求も 1 回に数える。
+- 画面は交渉 ID の一覧を渡すだけ。web は一覧を覚えず、その場で金庫を読んで計算し、何も書かない(入口の回数を rate_limits に数える以外は。
+  訪問者を見分ける ID も作らない。L7-3)。
 - 渡された ID は、すべて架空人物の交渉(デモ・攻撃)でなければならない。確かめ方は activity_api と同じ 2 段(web の段の状態〔補助〕と、
   金庫のデモ用の読み出しの口〔正本〕。台帳 X-38)。1 件でも本物の利用者の交渉(存在しない交渉・交渉 ID の形でない値も同じ)が混ざっていれば、
   何も返さずに全体を 403 にする(交渉があるかどうかは知らせない)。21 件以上・0 件は、金庫に触れる前に 422。
@@ -24,7 +28,7 @@
 - 純粋な計算だけ。「防御なしの金庫」に当たるものはコードになく、金庫も Firestore も呼ばない。応答には simulation: true と注記を付ける
   (画面は「シミュレーション」と明示する)。
 
-ログには何も書かない(組み合わせの値・評価・交渉 ID を、ここから出さない)。
+ログには、ここからは何も書かない(組み合わせの値・評価・交渉 ID を出さない。入口の枠で断ったときのログは、web.limits が入口と枠の名前だけを書く)。
 """
 
 import asyncio
@@ -32,7 +36,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from negotiation_core import AXES, AXIS_KEYS
@@ -191,7 +195,7 @@ def build_meter_router(services: WebServices) -> APIRouter:
             raise HTTPException(status_code=403, detail="forbidden") from None
 
     @router.post("/v1/demo/meter", response_model=MeterResponse)
-    async def meter(body: MeterRequest) -> MeterResponse:
+    async def meter(body: MeterRequest, _limit: None = Depends(services.limiter.guard("meter"))) -> MeterResponse:
         """推定区間メーター(防御あり): 渡された交渉の、候補者側の金庫の答えから、組ごとの区間を返す。"""
         negotiation_ids = list(dict.fromkeys(body.negotiation_ids))  # 同じ ID が重なっても、1 回だけ読む
         # 待ち時間を短くするため並行して読む。1 件でも断られたら全体を断る(最初に断られた ID の順に決まる)。

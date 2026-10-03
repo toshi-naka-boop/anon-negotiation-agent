@@ -7,7 +7,8 @@ Firestore エミュレータ(`(default)` の代わり)と、注入した時計�
 - 再起動(新しいリミッター)しても、数えた回数が残る。文書には TTL を付け、IP をそのまま入れない。
 - カウンタに書けない・読めない・壊れているときは、通さない(閉じる側)。回復すれば続く。
 - FastAPI の依存(guard)は、超えたら 429(Retry-After と、理由の本文)、数えられなければ 503。クライアントは X-Forwarded-For の末尾の IP。
-HTTP の入口(攻撃モード・デモ・ライブ)で枠が効くことは tests/test_attack_mode.py で確かめる。
+HTTP の入口(攻撃モード・デモ・ライブ)で枠が効くことは tests/test_attack_mode.py、面談の LLM を呼ぶ API は tests/test_interview_api.py、
+推定区間メーターは tests/test_meter.py で確かめる。
 """
 
 import asyncio
@@ -57,7 +58,7 @@ async def _admit_many(limiter: RateLimiter, entrance, client: str, count: int) -
 
 def test_the_config_holds_the_design_limits():
     # §8.2 の表(暫定): 面談 30・デモの実行 10・ライブ交渉の作成 10・攻撃モードの指示 30・壁 1 の生メッセージ 20(10 分)と、全体 300。
-    # 設計書の表にない攻撃モードの交渉の作成は、デモの実行と同じ 10。
+    # 設計書の表にない攻撃モードの交渉の作成は、デモの実行と同じ 10。同じく表にない推定区間メーター(1 回で最大 20 件を読む)は 60。
     config = DEFAULT_RATE_LIMIT_CONFIG
     assert config.window_seconds == 600
     assert config.overall_limit == 300
@@ -68,6 +69,7 @@ def test_the_config_holds_the_design_limits():
         "attack_create": 10,
         "attack_instruction": 30,
         "raw_message": 20,
+        "meter": 60,
     }
     assert set(config.per_client) == set(ENTRANCES)
 
@@ -86,10 +88,14 @@ def _broken_config(tmp_path: Path, edit) -> Path:
         lambda text: re.sub(r"^demo_run = \d+", "demo_run = 0", text, flags=re.MULTILINE),
         lambda text: re.sub(r"^demo_run = \d+", "demo_run = 1.5", text, flags=re.MULTILINE),
         lambda text: re.sub(r"^raw_message = \d+\n", "", text, flags=re.MULTILINE),  # 足りない入口
+        lambda text: re.sub(r"^meter = \d+\n", "", text, flags=re.MULTILINE),  # 足りない入口(あとから足したメーター)
         lambda text: text.replace("raw_message = 20\n", "raw_message = 20\nraw_mesage = 5\n"),  # 打ち間違いの入口
         lambda text: re.sub(r"^rate_counter_ttl_seconds = \d+\n", "", text, flags=re.MULTILINE),  # 足りない項目
     ],
-    ids=["overall_zero", "window_zero", "entrance_zero", "entrance_float", "missing_entrance", "unknown_entrance", "missing_key"],
+    ids=[
+        "overall_zero", "window_zero", "entrance_zero", "entrance_float", "missing_entrance", "missing_meter_entrance", "unknown_entrance",
+        "missing_key",
+    ],
 )
 def test_the_config_rejects_values_that_do_not_make_sense(tmp_path, edit):
     # 枠が 0 だと入口が黙って閉じる・足りない入口が枠なしで通る・打ち間違いが黙って無視される。読み込みで拒否する。

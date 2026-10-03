@@ -1,9 +1,10 @@
 """入口ごとのレート制限(design.md §8.2「レート制限」。台帳 L4-2・C-3・X-10・X-30。調査事項 R-7)。
 
-LLM を呼ぶか交渉を作るすべての入口に、クライアントごと・入口ごとの回数の上限を掛け、全入口の合計にも上限を掛ける。
-入口は ENTRANCES の 6 つ: 面談の LLM 呼び出し・デモの実行・ライブ交渉の作成・攻撃モードの交渉の作成・攻撃モードの指示(攻撃の手)・
-壁 1 の生メッセージ。枠は入口ごとに別なので、ある入口の枠を使い切っても、別の入口は使える(台帳 L4-2)。上限は
-config/params.toml の [web.limits](rate_*・per_client)。発表の日は設定で上げる(そこに運用メモがある)。
+LLM を呼ぶか交渉を作るか、1 回で金庫を何件も読むすべての入口に、クライアントごと・入口ごとの回数の上限を掛け、全入口の合計にも上限を掛ける。
+入口は ENTRANCES の 7 つ: 面談の LLM 呼び出し・デモの実行・ライブ交渉の作成・攻撃モードの交渉の作成・攻撃モードの指示(攻撃の手)・
+壁 1 の生メッセージ・推定区間メーター(POST /v1/demo/meter。1 回で金庫と Firestore を最大 20 件ずつ読む)。枠は入口ごとに別なので、
+ある入口の枠を使い切っても、別の入口は使える(台帳 L4-2)。上限は config/params.toml の [web.limits](rate_*・per_client)。
+発表の日は設定で上げる(そこに運用メモがある)。
 
 - 回数は、`(default)` の Firestore の時間窓カウンタに、トランザクションで数える(台帳 X-10)。再起動や新しいリビジョンでも消えない。
   窓は固定の区切り(UNIX 時刻を窓の長さで割った商が同じ間。暫定 10 分)。窓の境目の前後で短い間に最大 2 倍通ることは、固定の窓の
@@ -19,7 +20,8 @@ config/params.toml の [web.limits](rate_*・per_client)。発表の日は設定
 
 使い方: `Depends(services.limiter.guard("demo_run"))`。超えたら 429(Retry-After は窓の終わりまでの秒数。本文は
 {"detail": {"code": "rate_limited", "entrance", "scope", "limit", "window_seconds", "retry_after_seconds"}}。画面が「実演」として
-理由を出せるように)。面談の LLM 呼び出しは、面談の実装が `guard("interview_llm")` を面談の入口に付ける。
+理由を出せるように)。面談の LLM 呼び出し(3 問・自由コメント・辞めた理由)は web.interview.api が `guard("interview_llm")` を、
+メーターの POST は web.meter_api が `guard("meter")` を付ける(LLM も金庫も呼ばない GET .../meter/simulation には付けない)。
 
 Firestore(同期クライアント)の呼び出しは別スレッドで行う(web.llm_budget と同じ)。
 """
@@ -61,6 +63,7 @@ Entrance = Literal[
     "attack_create",
     "attack_instruction",
     "raw_message",
+    "meter",
 ]
 ENTRANCES: tuple[Entrance, ...] = get_args(Entrance)
 

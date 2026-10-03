@@ -163,7 +163,6 @@ def test_the_interview_config_is_read_from_params_toml_and_validated():
         {"net_to_gross_ratio": 1.5},
         {"experience_band_upper_bounds": (3.0, 5.0)},
         {"experience_band_upper_bounds": (5.0, 3.0, 10.0)},
-        {"llm_calls_per_window": 0},
     ):
         with pytest.raises(ValueError):
             dataclasses.replace(CONFIG, **changes)

@@ -259,10 +259,8 @@ max_request_body_bytes = 32768
 max_output_tokens = 2048
 # 面談エージェントの思考の量(MINIMAL / LOW / MEDIUM / HIGH)。決まった形に読み替えるだけなので低くする
 thinking_level = "LOW"
-# 依頼者ごとの LLM 呼び出しの窓(プロセスのメモリ上)。§8.2 の「面談の LLM 呼び出し 30 回／10 分」を、クライアント IP の取り方(R-7)が
-# 決まるまでの間、依頼者 ID ごとに暫定で掛ける(再試行を含む。1 日の物理の数の上限は web.llm_budget が別に受け持つ)
-llm_calls_per_window = 30
-llm_window_seconds = 600
+# 面談の LLM 呼び出しの回数の枠(§8.2「面談の LLM 呼び出し 30 回／10 分」)は、ここではなく [web.limits.per_client] の interview_llm
+# (クライアント IP ごと。web.limits)。1 日の物理の数の上限は [web.llm_budget] が別に受け持つ
 # 面談の途中の状態(サーバのメモリ)。最後に使ってからこの秒数でメモリから消す。同時に持てる面談の数の上限
 state_idle_ttl_seconds = 3600
 max_active_interviews = 500
@@ -291,6 +289,9 @@ attack_create = 10
 attack_instruction = 30
 # 壁 1 の生メッセージ(POST /v1/demo/attack/walls/1)
 raw_message = 20
+# 推定区間メーター(POST /v1/demo/meter。1 回で金庫と Firestore を最大 20 件ずつ読むので、1 要求の重みが大きい。GET .../meter/simulation は
+# 純粋な計算なので掛けない)
+meter = 60
 
 # --- 攻撃モード(design.md §8.2・§3.7。台帳 P-17) ---
 [web.attack]

@@ -10,10 +10,12 @@ stop_cost_limit・by-request)は、偽の金庫(CostLimitVault)で代用する: 
 - 計画・決定・面談・壁 1 の生メッセージのすべてで、送る前に数が 1 進む。再試行も 1 回と数え、429・5xx でも戻らない
   → test_the_counters_advance_before_each_send_of_the_plan_and_the_decision・
   test_a_retry_counts_once_more_and_a_429_or_a_5xx_never_rolls_the_count_back・
-  test_the_interview_and_raw_message_paths_count_only_the_daily_number(それらの経路そのものは後の段。数える関数は共通)
+  test_the_interview_and_raw_message_paths_count_only_the_daily_number(面談の経路は web.interview.agent、生メッセージの経路は web.attack の
+  壁 1 にある。数える関数 reserve(None) は共通で、経路ごとの確認は tests/test_interview_agent.py・tests/test_attack_walls.py)
 - 金庫の作成の直後に web が落ちても、同じ request_id の再送は同じ交渉を返す
   → test_a_resend_after_the_vault_created_the_negotiation_but_web_fell_returns_the_same_negotiation
-- 面談の入力が 32 KB を超えると拒否され、面談エージェントの要求に max_output_tokens が付く → 面談の経路がまだないので、ここでは確かめない
+- 面談の入力が 32 KB を超えると拒否され、面談エージェントの要求に max_output_tokens が付く → 面談の経路(web.interview)の側で確かめる
+  (tests/test_interview_api.py の 413・tests/test_interview_agent.py の max_output_tokens)。ここでは確かめない
 - 交渉ごとの上限(44)で、次の呼び出しは送られず、control{stop_cost_limit} で「なし」になり、ログに残る。直前の操作が 409 になった後・
   途中確認中・一時停止中に 1 日の上限に達した交渉(再開後の最初の送信の前)でも止まり、最終記録は 1 件
   → test_a_negotiation_stops_at_the_per_negotiation_limit_and_the_stop_is_logged・test_the_stop_works_after_a_409・
@@ -285,8 +287,8 @@ async def test_a_retry_counts_once_more_and_a_429_or_a_5xx_never_rolls_the_count
 
 @pytest.mark.anyio
 async def test_the_interview_and_raw_message_paths_count_only_the_daily_number(store, web_env):
-    # 面談の LLM 呼び出しと壁 1 の生メッセージは、交渉を持たない。経路そのものは後の段で作るが、数える関数(reserve(None))は共通で、
-    # 1 日の数だけを進める(交渉ごとの数には触れない)。
+    # 面談の LLM 呼び出しと壁 1 の生メッセージは、交渉を持たない。経路そのものは web.interview.agent と web.attack の壁 1 にあるが、
+    # 数える関数(reserve(None))は共通で、1 日の数だけを進める(交渉ごとの数には触れない)。
     env = web_env
     budget = _budget(env, daily_limit=2)
     nid = await _negotiation(store, env)

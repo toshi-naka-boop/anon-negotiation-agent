@@ -28,8 +28,6 @@ class InterviewConfig:
     max_request_body_bytes: int
     max_output_tokens: int
     thinking_level: str
-    llm_calls_per_window: int
-    llm_window_seconds: float
     state_idle_ttl_seconds: float
     max_active_interviews: int
     choice_pairs: int
@@ -49,8 +47,6 @@ class InterviewConfig:
             )
         if self.thinking_level not in THINKING_LEVELS:
             raise ValueError(f"[web.interview] thinking_level must be one of {THINKING_LEVELS}")
-        if self.llm_calls_per_window < 1 or self.llm_window_seconds <= 0:
-            raise ValueError("[web.interview] llm_calls_per_window and llm_window_seconds must be positive")
         if self.state_idle_ttl_seconds <= 0 or self.max_active_interviews < 1:
             raise ValueError("[web.interview] state_idle_ttl_seconds and max_active_interviews must be positive")
         if not (MIN_CHOICE_PAIRS <= self.min_answered_pairs <= self.choice_pairs <= MAX_CHOICE_PAIRS):
@@ -81,8 +77,6 @@ def load_interview_config(path: Path = _CONFIG_PATH) -> InterviewConfig:
             max_request_body_bytes=int(section["max_request_body_bytes"]),
             max_output_tokens=int(section["max_output_tokens"]),
             thinking_level=str(section["thinking_level"]),
-            llm_calls_per_window=int(section["llm_calls_per_window"]),
-            llm_window_seconds=float(section["llm_window_seconds"]),
             state_idle_ttl_seconds=float(section["state_idle_ttl_seconds"]),
             max_active_interviews=int(section["max_active_interviews"]),
             choice_pairs=int(section["choice_pairs"]),

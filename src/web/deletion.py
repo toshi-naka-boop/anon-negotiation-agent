@@ -4,6 +4,8 @@
 この同じ流れを使う。
   1. principals_meta の deletion_state を deleting にする(削除中の印)。以後、その依頼者の操作は
      すべて拒否する(web.session_middleware)。
+  1′. 面談の途中状態(web のメモリ。web.interview.state)を消す。メモリを消すだけなので失敗しない。冪等(なければ何もしない)。
+     流れの最初(_run)で行うので、自動削除も、途中から続ける見回りも、同じように消す。
   2. 金庫の削除を呼ぶ(冪等。すでに消えていても成功)。
   3. web 側で、開示台帳(principals/{pid}/ledger)と、本人が当事者の段の状態(段 1 の職務要約を含む)を
      消す。段の状態は、stages/{nid} に持たせた候補者の依頼者 ID で引く。
@@ -16,8 +18,8 @@
 ので、delete_by_user は取らない(ロックは再入できない)。自動削除(delete_expired・resume)は、
 自分でロックを取る。
 
-利用記録がなければ(面談を送っていなければ)、サーバにデータはないので、何もせずに終える
-(クッキーを消すのは呼び出し側)。
+利用記録がなければ(面談を送っていなければ)、サーバに永続のデータはないので、金庫にも (default) にも触れずに終える
+(クッキーを消すのは呼び出し側)。ただし面談の途中状態は、送信の前(利用記録を作る前)にもメモリにあるので、1′ だけは利用記録がなくても行う。
 
 ログには、止まった段の名前と例外の型名だけを書く(依頼者 ID・入力は書かない)。
 """
@@ -27,6 +29,7 @@ import enum
 import logging
 from collections.abc import Awaitable, Callable
 
+from web.interview.state import InterviewStateStore
 from web.ledger import DisclosureLedger
 from web.locks import PrincipalLocks
 from web.principals_meta import DELETION_DELETING, PrincipalsMetaStore
@@ -37,14 +40,14 @@ _log = logging.getLogger(__name__)
 
 
 class DeletionOutcome(enum.Enum):
-    NO_RECORD = "no_record"  # 利用記録がない(面談を送っていない)。サーバにデータはない
+    NO_RECORD = "no_record"  # 利用記録がない(面談を送っていない)。サーバに永続のデータはない(面談の途中状態〔メモリ〕は消した)
     COMPLETED = "completed"  # 最後の段(利用記録の削除)まで終わった
     INCOMPLETE = "incomplete"  # どこかの段で失敗した。削除中の印が残るので、依頼者の見回りが続ける
     SKIPPED = "skipped"  # 見回りが対象にしなかった(delete_after が延びた・すでに消えた・削除中でない)
 
 
 class PrincipalDeletion:
-    """削除の流れ。金庫・利用記録・段の状態・開示台帳・ロックを、外から渡す。"""
+    """削除の流れ。金庫・利用記録・段の状態・開示台帳・面談の途中状態・ロックを、外から渡す。"""
 
     def __init__(
         self,
@@ -53,12 +56,14 @@ class PrincipalDeletion:
         meta: PrincipalsMetaStore,
         stages: StageStore,
         ledger: DisclosureLedger,
+        interview_states: InterviewStateStore,
         locks: PrincipalLocks,
     ) -> None:
         self._vault = vault
         self._meta = meta
         self._stages = stages
         self._ledger = ledger
+        self._interview_states = interview_states
         self._locks = locks
 
     # ------------------------------------------------------------------
@@ -66,9 +71,10 @@ class PrincipalDeletion:
     # ------------------------------------------------------------------
 
     async def delete_by_user(self, principal_id: str) -> DeletionOutcome:
-        """§6.3 の 1〜4。利用記録がなければ NO_RECORD(クッキーを消すだけ)。"""
+        """§6.3 の 1〜4。利用記録がなければ NO_RECORD(面談の途中状態〔メモリ〕を消して、クッキーを消すだけ)。"""
         marked = await self._meta.mark_deleting(principal_id)  # 1
         if marked == "absent":
+            self._interview_states.discard(principal_id)  # 1′(面談を送る前は利用記録がないが、途中の状態はメモリにある)
             return DeletionOutcome.NO_RECORD
         return await self._run(principal_id)
 
@@ -97,10 +103,11 @@ class PrincipalDeletion:
             return await self._run(principal_id)
 
     # ------------------------------------------------------------------
-    # 2〜4(印は立て済み。ロックは呼び出し側が持っている)
+    # 1′〜4(印は立て済み。ロックは呼び出し側が持っている)
     # ------------------------------------------------------------------
 
     async def _run(self, principal_id: str) -> DeletionOutcome:
+        self._interview_states.discard(principal_id)  # 1′(メモリを消すだけ。失敗しない。金庫などの段が失敗しても、メモリはすでに消えている)
         steps: tuple[tuple[str, Callable[[], Awaitable[object]]], ...] = (
             ("vault", lambda: self._vault.delete_principal(principal_id)),  # 2
             ("ledger", lambda: self._ledger.delete_all(principal_id)),  # 3

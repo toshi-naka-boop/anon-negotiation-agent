@@ -645,7 +645,8 @@ async def test_web_usage_record_is_deleted_last_and_never_before_the_other_steps
 
 @pytest.mark.anyio
 async def test_web_deletion_without_a_usage_record_only_clears_the_cookie(web_app):
-    # DV-06 / §6.3: 利用記録がなければ(面談を送っていなければ)、サーバにデータはないので、クッキーを消すだけで終える。
+    # DV-06 / §6.3: 利用記録がなければ(面談を送っていなければ)、サーバに永続のデータはないので、金庫にも (default) にも触れず、クッキーを消すだけで
+    # 終える(メモリにある面談の途中状態は消す。test_web_deletion_forgets_the_interview_in_progress)。
     browser = web_app.browser()
     pid = await browser.open_start_page()
     probe = DeletionProbe(web_app)
@@ -734,3 +735,90 @@ async def test_web_deletion_leaves_no_summary_or_ledger_that_was_written_through
     assert (other_stage["candidate_principal_id"], other_stage["job_summary"], other_stage["stage"]) == (other_pid, _CANARY_OTHER, 2)
     assert len(list(env.default_db.collection("principals").document(other_pid).collection("ledger").stream())) == 7
     assert (await other_browser.get(f"/v1/principals/{other_pid}/ledger")).status_code == 200
+
+
+# ----------------------------------------------------------------------
+# DV-06(面談の途中状態。台帳 I-26): 面談を送る前の途中状態は、サーバのメモリにある(web.interview.state)。本人の「データを消す」と、
+# 30 日の自動削除の流れ(同じ _run)が、これも消す。面談を送る前は利用記録がないので、その経路(NO_RECORD)でも消える。
+# ----------------------------------------------------------------------
+
+_PROFILE = {"experience_years": 7.3141, "prefecture": "神奈川県", "job_category": "it_web"}
+
+
+async def _interview_in_progress(browser, pid: str) -> str:
+    """面談を始めて、プロフィールまで進める(メモリに途中の状態ができる)。面談の API のパスを返す。"""
+    base = f"/v1/principals/{pid}/interview"
+    assert (await browser.post(f"{base}/begin")).status_code == 200
+    assert (await browser.post(f"{base}/profile", _PROFILE)).status_code == 200
+    assert (await browser.get(f"{base}/state")).json()["bands"] is not None  # 途中まで進んでいる
+    return base
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("registered", [False, True], ids=["without_usage_record", "with_usage_record"])
+async def test_web_deletion_forgets_the_interview_in_progress(web_app, registered):
+    # 本人の「データを消す」で、面談の途中状態(メモリ)もすぐに消える。面談を送る前は利用記録がなく(NO_RECORD の経路)、送ったあとは
+    # 利用記録がある(通常の経路)。どちらでも消える。ほかの依頼者の面談は、そのまま残る。
+    browser, other_browser = web_app.browser(), web_app.browser()
+    pid = await browser.register() if registered else await browser.open_start_page()
+    other_pid = await other_browser.open_start_page()
+    base = await _interview_in_progress(browser, pid)
+    other_base = await _interview_in_progress(other_browser, other_pid)
+    store = web_app.services.interview.store
+    assert len(store) == 2
+    token = browser.cookie
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert (response.status_code, response.json()) == (200, {"status": "deleted"})
+    assert browser.cookie is None
+    assert store.get(pid) is None and len(store) == 1  # 本人の分だけが、メモリから消えた
+    # 削除でクッキーも消えたので、署名の合う元のクッキーを付け直して、面談の API から見ても「始まっていない」ことを確かめる
+    browser.set_cookie(token)
+    gone = await browser.get(f"{base}/state")
+    assert (gone.status_code, gone.json()["detail"]) == (409, "interview_not_started")
+    assert (await other_browser.get(f"{other_base}/state")).json()["bands"] is not None  # ほかの依頼者の面談は、そのまま
+
+
+@pytest.mark.anyio
+async def test_web_deletion_that_stops_midway_has_already_forgotten_the_interview_and_the_sweeper_forgets_it_again(web_app):
+    # 流れの最初にメモリを消すので、金庫などの段で失敗しても(202。印は残る)、面談の途中状態はもう消えている。見回りが流れを最初から
+    # やり直すときも、同じ段を通るので、そのとき見回りを動かす web のメモリにある面談の途中状態(ここでは直接置く)も消す。
+    browser = web_app.browser()
+    pid = await browser.register()
+    await _interview_in_progress(browser, pid)
+    store = web_app.services.interview.store
+    probe = DeletionProbe(web_app)
+    probe.fail_once_at("vault")
+
+    response = await browser.post(f"/v1/principals/{pid}/delete")
+
+    assert (response.status_code, response.json()) == (202, {"status": "deleting"})
+    assert probe.meta_state(pid) == "deleting" and len(store) == 0  # 印は残っているが、メモリの面談は、もう消えている
+    store.create(pid)
+
+    report = await web_app.services.principal_sweeper.sweep_once()
+
+    assert (report.deleting, report.completed, report.incomplete, report.errors) == (1, 1, 0, 0)
+    assert probe.meta_state(pid) is None and len(store) == 0
+
+
+@pytest.mark.anyio
+async def test_the_automatic_deletion_forgets_the_interview_in_progress_of_the_expired_principal_only(web_app):
+    # 30 日の自動削除(依頼者の見回り)も、本人のボタンと同じ流れを通る。放置された面談の状態は、寿命(1 時間)を過ぎると読めなくなるが、
+    # メモリには残っている(次に誰かが面談を始めるまで掃除されない)。期限が来た依頼者の分だけを、見回りが消す。
+    browser, other_browser = web_app.browser(), web_app.browser()
+    pid = await browser.register()
+    other_pid = await other_browser.open_start_page()
+    await _interview_in_progress(browser, pid)
+    await _interview_in_progress(other_browser, other_pid)
+    web_app.clock.advance(dt.timedelta(days=10))
+    await other_browser.register()  # 利用記録は、10 日後に作る(30 日の期限は、40 日目)
+    web_app.clock.advance(dt.timedelta(days=20, minutes=1))  # 最初の依頼者の最終利用から 30 日と 1 分
+    store = web_app.services.interview.store
+    assert set(store._states) == {pid, other_pid}  # どちらも寿命を過ぎているが、メモリには残っている(確認の前提)
+
+    report = await web_app.services.principal_sweeper.sweep_once()
+
+    assert (report.due, report.completed, report.incomplete, report.skipped, report.errors) == (1, 1, 0, 0, 0)
+    assert set(store._states) == {other_pid}  # 期限が来た依頼者の分だけが消えた

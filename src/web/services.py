@@ -85,7 +85,12 @@ def build_services(
     llm_budget = LlmBudget(default_db, clock, config.llm_budget)
     limiter = RateLimiter(default_db, clock, rate_limits)
     attack = build_attack_services(clock=clock, send_raw=send_raw)
-    deletion = PrincipalDeletion(vault=vault, meta=meta, stages=stages, ledger=ledger, locks=locks)
+    interview = build_interview_service(
+        vault=vault, meta=meta, llm_budget=llm_budget, clock=clock, sleep=sleep, web_config=config
+    )
+    deletion = PrincipalDeletion(
+        vault=vault, meta=meta, stages=stages, ledger=ledger, interview_states=interview.store, locks=locks
+    )  # 本人の削除と 30 日の自動削除は、面談の途中状態(メモリ)も消す(台帳 I-26)
     referees = RefereeManager(
         RefereeDeps(
             vault=vault,
@@ -113,9 +118,6 @@ def build_services(
     )
     principal_sweeper = PrincipalSweeper(
         meta=meta, deletion=deletion, clock=clock, sleep=sleep, config=config.principal_sweeper
-    )
-    interview = build_interview_service(
-        vault=vault, meta=meta, llm_budget=llm_budget, clock=clock, sleep=sleep, web_config=config
     )
     return WebServices(
         vault=vault,

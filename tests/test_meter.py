@@ -9,8 +9,10 @@
     金庫〔正本〕が断る。0 件と 21 件は 422(金庫に触れる前)。
   - 「本人確認が必要」の答えは区間を変えない。候補者側エージェントの手・候補者自身の確かめは使わない。
   - 別々の候補者の交渉を混ぜて、同じ線の上の答えが食い違ったときは、500 にせず 422 で知らせる。
-  - 何も覚えず、何も書かず、セッションを見ない。
+  - 何も覚えず、何も書かず(入口の枠の回数を rate_limits に数える以外は)、セッションを見ない。
+  - 入口の枠(web.limits の meter。1 回で最大 20 件を読むため): 超えたら 429 で、金庫にも段の状態にも触れない。クライアント IP ごと。窓が変われば開く。
 防御なし(GET /v1/demo/meter/simulation): 300〜1500 万を 10 万刻みで二分探索すると、どの値も 7 手以内で特定される(620 万は 7 手。純粋な計算で、金庫を呼ばない)。
+入口の枠は掛けない(メーターの枠を使い切っていても呼べ、回数も数えない)。
 """
 
 import datetime as dt
@@ -18,6 +20,7 @@ from typing import get_args
 
 import pytest
 
+from attack_helpers import make_env, small_limits  # noqa: F401  (make_env はフィクスチャ。入口の枠を絞った web を作る)
 from negotiation_core import AXES, Anchor, Package, Policy, Verdict, evaluate
 from negotiation_core.estimate_interval import Interval, estimate_interval
 from scripted_negotiators import (
@@ -37,7 +40,7 @@ from vault_helpers import demo_create_request, put_candidate_and_employer_templa
 from web.fictional_answerer import FixtureAnswerer
 from web.meter_api import MAX_NEGOTIATION_IDS, NOTE, SIMULATION_CANDIDATES, build_meter, simulate_bisection
 from web.referee import NegotiationContext, Referee, RefereeDeps, StepOutcome
-from web_app_helpers import dump_documents
+from web_app_helpers import REQUESTED_WITH, dump_documents
 from web_helpers import create_demo_negotiation
 
 METER = "/v1/demo/meter"
@@ -663,7 +666,8 @@ async def test_the_meter_reads_the_candidate_side_only(web_app, monkeypatch):
 
 @pytest.mark.anyio
 async def test_the_meter_writes_nothing_and_remembers_nothing(web_app):
-    # §8.3: web は一覧を覚えない。読むだけで、金庫にも (default) にも書かない。
+    # §8.3: web は一覧を覚えない。読むだけで、金庫にも (default) にも書かない。(default) に増えるのは、入口の枠(meter)の回数 rate_limits だけで、
+    # 交渉 ID も IP も入らない。
     nid = await _fictional_negotiation(web_app, [_line(900), _line(550)])
     browser = web_app.browser()
     vault_before, default_before = dump_documents(web_app.store._db), dump_documents(web_app.default_db)
@@ -673,7 +677,13 @@ async def test_the_meter_writes_nothing_and_remembers_nothing(web_app):
     second = await browser.post(METER, {"negotiation_ids": [nid]})
 
     assert first.status_code == second.status_code == 200 and first.json() == second.json()
-    assert dump_documents(web_app.store._db) == vault_before and dump_documents(web_app.default_db) == default_before
+    default_after = dump_documents(web_app.default_db)
+    counters = {path: data for path, data in default_after.items() if path.startswith("rate_limits/")}
+    assert dump_documents(web_app.store._db) == vault_before
+    assert {path: data for path, data in default_after.items() if path not in counters} == default_before  # 回数のほかは、何も書いていない
+    assert sorted(path.split("/")[1].split(".")[0] for path in counters) == ["meter", "overall"]  # 入口 meter と全体の、2 つの文書
+    assert [data["count"] for data in counters.values()] == [2, 2]  # 2 回呼んだ分だけ
+    assert nid not in str(counters)
     assert web_app.store.get_view(nid, "candidate").version == version_before
 
 
@@ -757,3 +767,101 @@ async def test_the_meter_routes_are_in_the_openapi_schema_of_the_web_app(web_app
     paths = web_app.app.openapi()["paths"]
 
     assert list(paths[METER]) == ["post"] and list(paths[SIMULATION]) == ["get"]
+
+
+# ----------------------------------------------------------------------
+# 入口の枠(web.limits の meter): POST にだけ掛け、シミュレーション(GET。純粋な計算)には掛けない
+# ----------------------------------------------------------------------
+
+
+def _as_client(ip: str) -> dict[str, str]:
+    """X-Requested-With と、X-Forwarded-For の末尾(クライアント IP。web.client_ip)。"""
+    return {**REQUESTED_WITH, "X-Forwarded-For": ip}
+
+
+def _rate_limit_documents(env) -> dict[str, dict]:
+    return {path: data for path, data in dump_documents(env.default_db).items() if path.startswith("rate_limits/")}
+
+
+@pytest.mark.anyio
+async def test_the_meter_answers_429_over_its_limit_without_reading_anything_and_opens_again_in_the_next_window(make_env, monkeypatch):
+    # 1 回で最大 20 件の交渉について金庫と Firestore を読むので、読む前に数える。超えたら 429(Retry-After と、画面が理由を出せる本文)で、
+    # 段の状態にも金庫にも触れない。窓が変われば、また通る。上限は 3 回に下げて確かめる(設定ファイルの値は test_the_default_limit_of_the_meter...)。
+    env = make_env(rate_limits=small_limits(meter=3))
+    nid = await _fictional_negotiation(env, [_line(900), _line(550)])
+    reads: list[str] = []
+    original_events, original_fictional = env.vault.get_demo_events, env.services.stages.is_fictional_negotiation
+
+    async def recording_events(nid_, side, after_seq=0):
+        reads.append("vault")
+        return await original_events(nid_, side, after_seq)
+
+    async def recording_fictional(nid_):
+        reads.append("stages")
+        return await original_fictional(nid_)
+
+    monkeypatch.setattr(env.vault, "get_demo_events", recording_events)
+    monkeypatch.setattr(env.services.stages, "is_fictional_negotiation", recording_fictional)
+    browser = env.browser()
+    body = {"negotiation_ids": [nid]}
+
+    assert [(await browser.post(METER, body)).status_code for _ in range(3)] == [200, 200, 200]
+    reads_before = len(reads)
+    refused = await browser.post(METER, body)
+
+    assert reads_before >= 3  # 通った分は、読んでいる(確認の前提)
+    assert refused.status_code == 429
+    detail = refused.json()["detail"]
+    assert {key: detail[key] for key in ("code", "entrance", "scope", "limit", "window_seconds")} == {
+        "code": "rate_limited",
+        "entrance": "meter",
+        "scope": "client",
+        "limit": 3,
+        "window_seconds": 600,
+    }
+    assert refused.headers["Retry-After"] == str(detail["retry_after_seconds"]) and 1 <= detail["retry_after_seconds"] <= 600
+    assert len(reads) == reads_before  # 断った要求は、段の状態にも金庫にも触れていない
+
+    env.clock.advance(dt.timedelta(seconds=detail["retry_after_seconds"]))  # 次の窓
+    assert (await browser.post(METER, body)).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_the_meter_limit_is_per_client_and_the_simulation_is_neither_limited_nor_counted(make_env):
+    env = make_env(rate_limits=small_limits(meter=2))
+    nid = await _fictional_negotiation(env, [_line(900), _line(550)])
+    browser = env.browser()
+
+    async def post_as(ip: str):
+        return await browser.client.post(METER, json={"negotiation_ids": [nid]}, headers=_as_client(ip))
+
+    assert [(await post_as("198.51.100.1")).status_code for _ in range(2)] == [200, 200]
+    assert (await post_as("198.51.100.1")).status_code == 429
+    assert (await post_as("198.51.100.2")).status_code == 200  # 別のクライアントは、別の枠
+    # クライアントは X-Forwarded-For の末尾。利用者が書ける先頭側を変えても、別の枠にならない(台帳 C-3)
+    assert (await post_as("203.0.113.9, 198.51.100.1")).status_code == 429
+
+    # シミュレーション(純粋な計算)は、メーターの枠を使い切っていても呼べて、回数も数えない
+    counters = _rate_limit_documents(env)
+    assert counters  # 数えた文書がある(確認の前提)
+    for _ in range(5):
+        simulation = await browser.client.get(SIMULATION, params={"value": 620}, headers={"X-Forwarded-For": "198.51.100.1"})
+        assert simulation.status_code == 200 and simulation.json()["found"] == 620
+    assert _rate_limit_documents(env) == counters
+
+
+@pytest.mark.anyio
+async def test_the_default_limit_of_the_meter_is_60_per_client_in_10_minutes(web_app):
+    # 設定ファイルの値(meter = 60)が、本番の組み立ての POST に効いている: 60 回目まで通り、61 回目は 429。
+    ip = "198.51.100.1"
+    for _ in range(59):  # HTTP を通さずに数える
+        await web_app.services.limiter.admit("meter", ip)
+    browser = web_app.browser()
+    body = {"negotiation_ids": ["0123456789abcdef"]}  # 存在しない交渉(403)。ここでは、枠を通ったかどうかだけを見る
+
+    sixtieth = await browser.client.post(METER, json=body, headers=_as_client(ip))
+    sixty_first = await browser.client.post(METER, json=body, headers=_as_client(ip))
+
+    assert sixtieth.status_code == 403  # 枠は通った(中身は、存在しない交渉を断る 403)
+    assert sixty_first.status_code == 429
+    assert (sixty_first.json()["detail"]["entrance"], sixty_first.json()["detail"]["limit"]) == ("meter", 60)

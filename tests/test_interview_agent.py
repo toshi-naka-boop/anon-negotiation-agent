@@ -6,13 +6,13 @@
 - JSON モード(応答スキーマなし)・max_output_tokens・固定の指示文・新しいセッション(会話を積まない。L14-3)・LLM の入力に ID が入らない
 - 出力の検証(SalaryBasis・ConstraintList)・出力が切れたとき
 - 送る前の計上(送っている最中にカウンタがすでに進んでいる。X-54)、再試行も 1 回と数え 429・5xx でも戻さない(X-56)、1 日の上限
-- Vertex AI の一時的なエラーの再試行(§4.1 と同じ規則)、依頼者ごとの窓
+- Vertex AI の一時的なエラーの再試行(§4.1 と同じ規則)。短い間の連打の枠(§8.2 の面談の枠)は、ここではなく HTTP の入口(web.limits の
+  interview_llm)にある → tests/test_interview_api.py
 - トレースのスパンに面談の中身が載らない(別のプロセスで OpenTelemetry のスパンを集めて確かめる。§5・§7)
 """
 
 import asyncio
 import dataclasses
-import datetime as dt
 import json
 import os
 import subprocess
@@ -34,7 +34,6 @@ from web.interview.agent import (
     LLM_UNAVAILABLE,
     OUTPUT_INVALID,
     OUTPUT_TRUNCATED,
-    RATE_LIMITED,
     InterviewAgent,
     InterviewLlmFailure,
     load_instruction,
@@ -405,25 +404,6 @@ async def test_when_the_counter_cannot_be_written_nothing_is_sent(default_db, cl
         await agent.extract_salary_basis(OWNER, QA)
 
     assert stub.requests == []  # カウンタに書けないときは送らない(閉じる側に倒す。X-50)
-
-
-@pytest.mark.anyio
-async def test_the_per_principal_window_stops_a_burst_and_opens_again_later(default_db, clock):
-    config = dataclasses.replace(DEFAULT_INTERVIEW_CONFIG, llm_calls_per_window=2, llm_window_seconds=600)
-    stub = StubLlm(behavior=lambda request: BASIS_JSON)
-    agent = make_agent(default_db, clock, stub, config=config)
-
-    await agent.extract_salary_basis(OWNER, QA)
-    await agent.extract_salary_basis(OWNER, QA)
-    with pytest.raises(InterviewLlmFailure) as excinfo:
-        await agent.extract_salary_basis(OWNER, QA)
-    assert excinfo.value.code == RATE_LIMITED
-    assert len(stub.requests) == 2 and daily_count(default_db, clock) == 2  # 断った分は、送らず、1 日の数にも入れない
-
-    await agent.extract_salary_basis("fedcba9876543210", QA)  # ほかの依頼者には関係しない
-    clock.advance(dt.timedelta(seconds=600))
-    await agent.extract_salary_basis(OWNER, QA)  # 窓が過ぎれば、また使える
-    assert len(stub.requests) == 4
 
 
 # ---------------------------------------------------------------------------

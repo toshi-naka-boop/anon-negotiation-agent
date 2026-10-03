@@ -28,6 +28,11 @@
 | POST | /submit | web で丸めて金庫に送る(利用記録を先に作る)。面談の状態を消す |
 | POST | /discard | 面談を破棄する(途中の状態をメモリから消す) |
 
+LLM を呼ぶ 3 つ(/salary/answers・/comment・/reason)には、入口の枠 interview_llm(web.limits。クライアント IP ごと・3 つで 1 つの枠)を、
+本文を読む前に掛ける。超えたら 429(Retry-After つき。detail は {"code": "rate_limited", "entrance": "interview_llm", ...} の辞書)、数えられなければ 503。
+本人のセッションの確認(401・403)のあとに数える(他人の ID への要求は数えない)。LLM を呼ばない手順(プロフィール・二択の回答など)には掛けない。
+1 日の物理の数の上限(web.llm_budget)は別の歯止めで、こちらの 429 は detail が文字列 "daily_limit_reached"。
+
 エラーの detail は理由の名前(入力の値は含めない)。検証エラー(422)は、場所・理由の種類だけを返す(web.app の既定と同じ)。
 """
 
@@ -107,6 +112,8 @@ def build_interview_router(services: "WebServices") -> APIRouter:
         dependencies=[Depends(_no_store), Depends(_require_own_principal)],
     )
 
+    llm_entrance = services.limiter.guard("interview_llm")  # LLM を呼ぶ 3 つの API の入口の枠(web.limits)
+
     def service():
         return services.interview  # テストが差し替えられるよう、リクエストごとに取り出す
 
@@ -127,7 +134,7 @@ def build_interview_router(services: "WebServices") -> APIRouter:
         return service().set_profile(pid, body.experience_years, body.prefecture, body.job_category)
 
     @router.post("/salary/answers")
-    async def salary_answers(pid: str, request: Request) -> dict[str, Any]:
+    async def salary_answers(pid: str, request: Request, _limit: None = Depends(llm_entrance)) -> dict[str, Any]:
         body = _validated(SalaryAnswersBody, await _read_limited_json(request, service().max_body_bytes))
         return await service().propose_salary(pid, body.answers)
 
@@ -152,12 +159,12 @@ def build_interview_router(services: "WebServices") -> APIRouter:
         return service().answer_choice(pid, body.pair_id, body.option, body.response)
 
     @router.post("/comment")
-    async def comment(pid: str, request: Request) -> dict[str, Any]:
+    async def comment(pid: str, request: Request, _limit: None = Depends(llm_entrance)) -> dict[str, Any]:
         body = _validated(TextBody, await _read_limited_json(request, service().max_body_bytes))
         return await service().add_statements(pid, "free_comment", body.text)
 
     @router.post("/reason")
-    async def reason(pid: str, request: Request) -> dict[str, Any]:
+    async def reason(pid: str, request: Request, _limit: None = Depends(llm_entrance)) -> dict[str, Any]:
         body = _validated(TextBody, await _read_limited_json(request, service().max_body_bytes))
         return await service().add_statements(pid, "reason_for_leaving", body.text)
 

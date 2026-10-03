@@ -6,24 +6,27 @@
 - 入口の注記(最初の応答に含まれる)、権限(本人のセッションだけ)
 - 手順の順番(AC-01: 年収の確認と二択 5 組が終わるまで確認画面に進めない。確認前の金庫への書き込みは 0 件)
 - 軸を外す(§2.4)・受けるアンカーが 0 件の警告(I-1)・項目を消す/付け直す・矛盾・年収の換算・LLM の失敗の伝え方
-- 本文 32 KB の上限(C-49)・企業の一覧とブロック先・面談の状態の寿命(メモリのみ)
+- 本文 32 KB の上限(C-49)・企業の一覧とブロック先・面談の状態の寿命(メモリのみ。本人の削除・30 日の自動削除で消えることは
+  tests/test_principal_deletion.py)
+- LLM を呼ぶ 3 つの API(年収の 3 問・自由コメント・辞めた理由)の入口の枠(web.limits の interview_llm。§8.2。クライアント IP ごと)。
+  超えると 429 で LLM に送らない。LLM を呼ばない手順は、掛からず、数えない
 - 送信のあと、生の値がどこにも残らない(AC-18: カナリアを Firestore の全文書とログに探す)・辞めた理由の原文を持たない(AC-17)
 """
 
-import dataclasses
 import datetime as dt
 import json
 import logging
 
 import pytest
 from agents_helpers import StubLlm, llm_response
+from attack_helpers import make_env, small_limits  # noqa: F401  (make_env はフィクスチャ。入口の枠を絞った web を作る)
 from google.genai import errors as genai_errors
 from google.genai import types
 
 from negotiation_core import AXES, AXIS_KEYS
 from web.llm_budget import LlmBudgetUnavailable, jst_date
 from web.vault_client import VaultUnavailableError
-from web_app_helpers import REQUESTED_WITH, documents_mentioning
+from web_app_helpers import REQUESTED_WITH, documents_mentioning, dump_documents
 
 BASIS = {
     "amount_man_yen": 600,
@@ -665,19 +668,126 @@ async def test_when_the_counter_cannot_be_written_the_model_is_not_called(env, f
     assert llm.stub.requests == []
 
 
+# --- LLM を呼ぶ 3 つの API の入口の枠(web.limits の interview_llm。台帳 I-26)。上限は 3 回に絞って確かめる ---
+
+
+@pytest.fixture
+async def limited_flow(make_env, llm):
+    """入口の枠 interview_llm を 3 回に絞った web での、1 人の依頼者の面談(面談の LLM はスタブ)。"""
+    web = make_env(rate_limits=small_limits(interview_llm=3))
+    web.services.interview.agent.use_model(llm.stub)
+    browser = web.browser()
+    return Flow(web, browser, await browser.open_start_page())
+
+
+async def post_from(flow: Flow, suffix: str, body: dict, ip: str):
+    """クライアント IP(X-Forwarded-For の末尾。web.client_ip)を指定した POST。"""
+    return await flow.browser.client.post(f"{flow.base}/{suffix}", json=body, headers={**REQUESTED_WITH, "X-Forwarded-For": ip})
+
+
+def rate_limit_documents(env) -> dict[str, dict]:
+    return {path: data for path, data in dump_documents(env.default_db).items() if path.startswith("rate_limits/")}
+
+
+def daily_llm_count(env) -> int:
+    snapshot = env.default_db.collection("llm_call_counters").document(jst_date(env.clock.now())).get()
+    return snapshot.to_dict()["count"] if snapshot.exists else 0
+
+
 @pytest.mark.anyio
-async def test_the_per_principal_window_gives_429_after_a_burst(env, flow, llm):
+async def test_the_three_llm_steps_share_one_allowance_and_a_refusal_neither_calls_the_model_nor_changes_the_state(limited_flow, llm):
+    flow = limited_flow
+    await flow.until_choices(pairs=0)  # 年収の 3 問(1 回目)まで
+    await flow.ok("POST", "comment", {"text": "年収 600 万円以上なら行く"})  # 2 回目
+    await flow.ok("POST", "reason", {"text": "夜勤が多かった"})  # 3 回目
+    sent, state = len(llm.stub.requests), await flow.ok("GET", "state")
+    assert sent == 3 and daily_llm_count(flow.env) == 3
+
+    refused = [
+        await flow.post("salary/answers", {"answers": SALARY_ANSWERS}),
+        await flow.post("comment", {"text": "もう 1 つ"}),
+        await flow.post("reason", {"text": "もう 1 つ"}),
+    ]
+
+    for response in refused:  # 3 つとも同じ枠。detail は辞書(1 日の上限の文字列 "daily_limit_reached" と違う。画面は両方を扱う)
+        assert response.status_code == 429
+        detail = response.json()["detail"]
+        assert detail == {
+            "code": "rate_limited",
+            "entrance": "interview_llm",
+            "scope": "client",
+            "limit": 3,
+            "window_seconds": 600,
+            "retry_after_seconds": detail["retry_after_seconds"],
+        }
+        assert response.headers["Retry-After"] == str(detail["retry_after_seconds"]) and 1 <= detail["retry_after_seconds"] <= 600
+    assert len(llm.stub.requests) == sent  # LLM に送っていない
+    assert daily_llm_count(flow.env) == 3  # 1 日の物理の数にも入れていない
+    assert await flow.ok("GET", "state") == state  # 面談の状態は変わらない(やり直せる)
+
+
+@pytest.mark.anyio
+async def test_a_different_client_ip_has_its_own_allowance_and_the_window_opens_again(limited_flow, llm):
+    flow = limited_flow
     await flow.begin()
     await flow.profile()
-    service = env.services.interview
-    service.agent._config = dataclasses.replace(service.agent._config, llm_calls_per_window=2)
+    answers = {"answers": SALARY_ANSWERS}
+    assert [(await flow.post("salary/answers", answers)).status_code for _ in range(3)] == [200, 200, 200]
+    over = await flow.post("salary/answers", answers)
+    assert over.status_code == 429 and len(llm.stub.requests) == 3
 
-    first = [await flow.post("salary/answers", {"answers": SALARY_ANSWERS}) for _ in range(2)]
-    third = await flow.post("salary/answers", {"answers": SALARY_ANSWERS})
+    other = await post_from(flow, "salary/answers", answers, "198.51.100.8")  # 別のクライアント IP は、別の枠(同じ依頼者でも)
+    assert other.status_code == 200 and len(llm.stub.requests) == 4
+    assert (await post_from(flow, "salary/answers", answers, "203.0.113.9, 127.0.0.1")).status_code == 429  # 末尾が最初の IP なら、同じ枠
 
-    assert [response.status_code for response in first] == [200, 200]
-    assert (third.status_code, third.json()["detail"]) == (429, "rate_limited")
-    assert len(llm.stub.requests) == 2
+    flow.env.clock.advance(dt.timedelta(seconds=over.json()["detail"]["retry_after_seconds"]))  # 次の窓
+    assert (await flow.post("salary/answers", answers)).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_the_steps_that_do_not_call_the_model_are_neither_limited_nor_counted(limited_flow, llm):
+    flow = limited_flow
+    await flow.begin()
+    await flow.profile()
+    for _ in range(3):  # 枠を使い切る
+        await flow.ok("POST", "salary/answers", {"answers": SALARY_ANSWERS})
+    assert (await flow.post("salary/answers", {"answers": SALARY_ANSWERS})).status_code == 429  # 使い切った(確認の前提)
+    counters = rate_limit_documents(flow.env)
+    assert sorted(data["count"] for data in counters.values()) == [3, 3]  # interview_llm のクライアントの文書と、全体の文書
+
+    # 枠を使い切ったあとも、LLM を呼ばない手順は、最後の送信まで何度でも通る
+    await flow.begin()
+    await flow.profile()
+    await flow.ok("POST", "salary/confirm", {"salary_basis": BASIS})
+    await flow.axes()
+    await flow.answer_pairs(6)  # 12 回の回答
+    for suffix in ("state", "axes", "choices", "confirmation"):
+        await flow.ok("GET", suffix)
+    await flow.ok("POST", "confirm", {})
+    await flow.ok("GET", "worst-case")
+    await flow.ok("POST", "worst-case/approve")
+    await flow.ok("GET", "companies")
+    await flow.ok("POST", "blocklist", {"company_ids": []})
+    assert (await flow.ok("POST", "submit")) == {"status": "submitted"}
+
+    assert rate_limit_documents(flow.env) == counters  # どれも数えていない
+    assert len(llm.stub.requests) == 3
+
+
+@pytest.mark.anyio
+async def test_requests_without_the_own_session_are_refused_before_they_are_counted(limited_flow, llm):
+    flow = limited_flow
+    anonymous, other = flow.env.browser(), flow.env.browser()  # クッキーなし・別の依頼者
+    await other.open_start_page()
+
+    for suffix in ("salary/answers", "comment", "reason"):
+        no_session = await anonymous.post(f"{flow.base}/{suffix}", {})
+        foreign = await other.post(f"{flow.base}/{suffix}", {})
+        assert (no_session.status_code, no_session.json()["detail"]) == (401, "no_session")
+        assert (foreign.status_code, foreign.json()["detail"]) == (403, "forbidden")
+
+    assert rate_limit_documents(flow.env) == {}  # 本人でない要求は、枠を使わない
+    assert llm.stub.requests == []
 
 
 def _body_of_size(size: int, key: str = "text") -> bytes:
