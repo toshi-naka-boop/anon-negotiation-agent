@@ -9,13 +9,19 @@
   "requiredApprovalFingerprint": "v19:298da78d4ee4",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
-  "openIssueIds": [],
+  "openIssueIds": [
+    "P-15",
+    "P-16",
+    "P-17",
+    "P-18",
+    "P-19"
+  ],
   "requiredReads": [
     "design.md",
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v19 を承認（2026-10-03。指紋 v19:298da78d4ee4）。ユーザーの判断: P-12 明示する、P-13 組織の配下（拒否ポリシーを足す）、P-14 案 1、P-8〜P-11 推奨どおり、design-critic は opus のまま。次: (1) pyproject に cryptography・google-auth を明示（済ませる）。(2) ユーザーの手順 A の結果を待ち、B〜F（と拒否ポリシー G）を進める。(3) ③④⑤ の実装を委譲（sonnet、worktree）: ③ = L15-1・L15-2・MAX_PROMPT_TOKENS の config 化・計画の 2 段の読み（PlanEnvelope。P-14 案 1 で AC-04 の試験を直す）・L18-5 の IP ごとの制限・store.py の封印（DV-19）・deploy_check.sh（(a)〜(h) ＋ 拒否ポリシー）、④⑤ は §11 の範囲。完了判定は呼び出し側が DV を実行する。",
+  "nextAction": "③④⑤ の実装（2026-10-03〜）。ギャップ調査: research/gap-inventory-2026-10-03.md（未着手の AC: 01・02・12〜15・18〜22、DV-19）。進行中（sonnet・worktree）: D（web/agents/core の積み残し）、E（金庫の封印と L15-1）、J（ケース 2・3 とリプレイ）、K（面談の API）。次の波（D・E を取り込んだ後）: F（攻撃モードの web 入口・入口ごとのレート制限・3 枚の壁）、G（段階開示 ④・架空人物の自動応答の配線・L9-4）、H（メーター API・活動ログ・開示台帳 API・/healthz）、I（金庫: テンプレートの起動時の投入・フィクスチャをイメージに）。その後: L（画面 static/ と SSE）、M（deploy_check.sh・canary_scan.py・check_no_web_storage.sh・README・トレース）。ユーザー待ち: 手順 A の結果、P-15〜P-19（推奨で進める）、依存の追加（Cloud Trace の exporter、sse-starlette・uvicorn の明示）。",
   "lastUpdated": "2026-10-03",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
