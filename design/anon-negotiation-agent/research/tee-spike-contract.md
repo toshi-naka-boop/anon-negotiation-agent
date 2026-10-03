@@ -218,7 +218,7 @@ def release_for_digest(releases: list[dict], digest: str) -> dict | None
 - `GET /api/tee/attestation` は、`nonce` なしなら検証済みの直近の結果（5 分）を返すのが既定で、金庫の発行枠（毎秒 1 回）を使うのは `nonce` ありの転送だけ（2 秒の制限）。
 - 理由: 起動時に見回りが複数の交渉を同時に再開すると、single-flight がなければ 1 件以外が金庫の 429 に当たる。
 
-## 16. 追記（2026-10-03。批評 16・17 巡目の受理分。実装者 A・B・C に個別に伝達済み。契約の本文より優先する）
+## 16. 追記（2026-10-03。批評 16・17 巡目の受理分。実装者 A・B・C に個別に伝達済み。契約の本文より優先する。**§17・§18 と食い違う所は §17・§18 が優先**（L18-4）: 鍵の GET → 探りの encrypt、ピンの取り外しは否定の結果だけ、期待する主体にオーナーを含める）
 
 - **(C-56) §5**: `_tee/dek` に `kek_version`（KMS の `:encrypt` の応答の `name`。鍵の版の完全な名前）を足す。起動時に `GET https://cloudkms.googleapis.com/v1/<鍵の名前>` の `primary.name` と完全一致しなければ、復号せずに非 0 で終了する（ログは固定文 `DEK was wrapped by a non-primary key version; rotate the DEK` と 2 つの版の名前）。`kek_version` の無い文書も拒否する。
 - **(X-70) 手順の順序**: debug の VM を消す → 鍵の新しい版を primary にする → 古い版を無効化する → `scripts/tee_reset_dek.py --yes` → 本番の VM を作る（初回の起動で、新しい版で DEK を作る）。本番の起動後に版を回さない。live のデータが入った後の版の更新は、動いている金庫が、起動時に開いた DEK を primary で包み直して `_tee/dek` を上書きする（1 時間ごとに primary を確かめる。`kek_version` の前提条件つきの更新）。これはスパイクの範囲外（10/5 以降）。起動時の規則（primary でなければ起動しない）は変えない。
@@ -246,3 +246,10 @@ def release_for_digest(releases: list[dict], digest: str) -> dict | None
 - **(X-75) 期待する主体の正本**: `deploy/expected-kms-principals.json` `{"owners": ["<メール>", ...], "principal_set_pattern": "principalSet://iam.googleapis.com/projects/<番号>/locations/global/workloadIdentityPools/vault-tee-pool/attribute.image_digest/{digest}"}`。`deploy_check.sh` はこれと `vault-releases.json` の `active` から期待集合を作る（スパイクの後）。
 - **(X-78) 説明文**: オーナーの復号の記録は「監査の設定が有効で除外がない間」。抑止は設定変更の Admin Activity の記録まで。
 - **(X-79) ③**: 計画の読み方は `PlanEnvelope`（`schema`・`checks`）→ `checks` があれば残りを捨てる → 空なら `Move` の規則。`Plan` 型を 1 回で当てない。
+
+## 19. 追記（2026-10-03。批評 18 巡目 design-critic の受理分）
+
+- **(C-62) WIF**: プール `vault-tee-pool` にはプロバイダを `attestation-verifier` の 1 件だけ置く。deploy_check は「有効なプロバイダが 1 件・発行元・audience・mapping・条件」を完全一致で照合し、プールとプロバイダを変えられる主体を列挙する。
+- **(C-63) 順序**: 版の切り替えの先頭は「プロバイダを本番の条件に更新する」。debug の条件に戻したら手順 D の全体をやり直す。live のデータが入った後は debug の条件に戻さない。本番の起動後、Data Access ログで新しい版の後の Encrypt・Decrypt の主体が本番の VM だけであることを確かめる。
+- **(L18-5) 公開 API の nonce の転送**: いまは全体で 10 秒に 1 回。③ で、クライアント IP ごとに 10 秒に 1 回（§8.2 と同じ IP の取り方）＋全体で 2 秒に 1 回に替える（匿名の 1 人が枠を独占して審査員の AC-23 `--web` を 429 にしないため）。
+- **(L18-7) 上限**: 失効したイメージが動き続けうる時間は最長およそ 40 分（10 分 ＋ 30 分）。

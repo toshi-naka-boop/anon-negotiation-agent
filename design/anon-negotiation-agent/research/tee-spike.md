@@ -1054,6 +1054,12 @@ gcloud compute instances stop vault-tee --zone="$ZONE"
 gcloud compute instances start vault-tee --zone="$ZONE"
 ```
 
+検証が終わったら、負の試験 3 のために付けた impersonate の権限を外す（手順 A で付けたもの）。
+
+```
+gcloud iam service-accounts remove-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
+```
+
 検証が終わったら、IAP のファイアウォール規則を消す（金庫に手元から届く経路を閉じる）。
 
 ```
@@ -1189,7 +1195,7 @@ gcloud kms keys remove-iam-policy-binding vault-kek --location="$REGION" --keyri
 | R4 | Direct VPC egress の起動遅延（1 分以上）と接続切断 | 中 | web の起動の不安定。デモ中の瞬断 | E の最初の接続時間を測る | startup probe と再試行。コネクタ（+ $0.0215/h）[S23][S24] |
 | R5 | 東京ゾーンの在庫・クォータ不足 | 中 | VM が作れない | A のクォータ確認。作成時のエラー | 別ゾーン（SEV は a・b・c）、別の機密技術、別リージョン |
 | R6 | 鍵の条件の組み立て（debug は STABLE を満たさない・digest の付け替え・IAM の反映待ち・条件の書き間違い） | 中 | 点 2 の遅れ | 2-7 の切り分け表 | テスト用の条件で先に鍵の解放を確かめる |
-| R7 | 運営者＝鍵の所有者＝プロジェクトのオーナー。IAM を書き換えれば、鍵を別のイメージに渡せる。基本ロールに復号権を含むので、IAM を変えずに KEK を使える（C-58。抑止は Data Access 監査ログ） | 構造上、必ずある | 「運営者から隠せる」の主張の強さ | — | 説明文に書く。IAM の書き換えは Admin Activity ログに残る [S18]。KMS の Data Access ログを有効にすれば、復号した主体を残せる（任意）|
+| R7 | 運営者＝鍵の所有者＝プロジェクトのオーナー。IAM を書き換えれば、鍵を別のイメージに渡せる。基本ロールに復号権を含むので、IAM を変えずに KEK を使える（C-58。抑止は Data Access 監査ログ） | 構造上、必ずある | 「運営者から隠せる」の主張の強さ | — | 説明文に書く。IAM の書き換えは Admin Activity ログに残る [S18]。KMS の Data Access ログを手順 A で有効にし、復号した主体を残す（必須。設定が有効で除外がない間）|
 | R8 | digest↔コミットの結び付けが、運営者の申告（対応表）のまま | 必ずある（再現ビルドが無い間）| 「公開コードで動いている」の検証力 | — | L1（GitHub の証明つきビルド）または L2（再現ビルド）を 10/7 以降の任意課題に |
 | R9 | `store.py` の封印の統合が大きい（約 40 か所） | 中 | 10/5 以降の工数 | スパイクでは試験文書の往復だけにする | 範囲を live の項目だけに絞る。間に合わなければ、「鍵の解放」までで TEE を出し、封印は後 |
 | R10 | 費用が予算アラート 3,000 円を超える | 必ずある | 通知（上限ではない）| — | 10/3 に引き上げる。夜間は VM を停止 |

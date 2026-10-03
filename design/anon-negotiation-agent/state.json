@@ -1,12 +1,12 @@
 {
-  "currentNode": "批評",
-  "status": "in_progress",
-  "designVersion": "v18",
+  "currentNode": "承認CP",
+  "status": "awaiting_user",
+  "designVersion": "v19",
   "approvedDesignVersion": null,
   "approvedDesignSha256": null,
   "approvedAt": null,
   "approvalEvidence": null,
-  "requiredApprovalFingerprint": "v18:ed550de15ed6",
+  "requiredApprovalFingerprint": "v19:298da78d4ee4",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
   "openIssueIds": [
@@ -15,14 +15,15 @@
     "P-10",
     "P-11",
     "P-12",
-    "P-13"
+    "P-13",
+    "P-14"
   ],
   "requiredReads": [
     "design.md",
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v18（批評 18 巡目 codex の medium X-75〜X-79 の直し。18 巡目は codex に新規の high なし）を起草した（2026-10-03）。design-critic（opus）の 18 巡目の結果を待ち、high がなければ承認 CP（指紋 v18:ed550de15ed6。ブリーフつき）。medium の直しは v18 に入れた（この周期は上限 3 巡なので、直し自体の再批評はしない。承認ブリーフにそう書く）。TEE スパイクの実装: A・C は取り込み済み、B は最終の差分（C-61・X-77・attest() の否定でのピン外し）を待って取り込み、全テストを回してコミット。ユーザーの確認待ち: P-8〜P-13、手順 A の実行結果、design-critic のモデル。承認済みは v14（4109a75c582c）のまま。",
+  "nextAction": "承認 CP（2026-10-03）: v19 の指紋 v19:298da78d4ee4 をブリーフつきで提示した。18 巡目は両批評とも新規の high なし（codex の medium 5 と design-critic の medium 2・low 7 は v18・v19 で直した。直し自体は再批評していない）。承認されたら ③④⑤（L15-1・L15-2・MAX_PROMPT_TOKENS の config 化・L16-1/X-74 の 2 段の読み（P-14 の答え次第）・L18-5 の IP ごとの制限・store.py の封印・deploy_check.sh・画面）。TEE スパイクの実装は A・B・C とも取り込み済み（d459168 まで。全テスト 2,309 件）。ユーザーの手順 A の結果待ち。P-12 の承認後に pyproject に cryptography・google-auth を明示。ユーザーの確認待ち: P-8〜P-14、design-critic のモデル（frontmatter は opus。16〜18 巡目は claude-opus-5-5 で走った）。",
   "lastUpdated": "2026-10-03",
   "delegation": {
     "批評": "claude/design-critic（frontmatter は `model: opus`。16 巡目の実際のモデルは claude-opus-5-5。2026-10-02 の『fable』の指示と食い違うので、直すかはユーザーに確認）+ codex exec (gpt-5.6-sol, xhigh)",
