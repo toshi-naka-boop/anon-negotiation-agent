@@ -217,3 +217,15 @@ def release_for_digest(releases: list[dict], digest: str) -> dict | None
 - §8 の検証（初回のピン留めと、接続エラー後の付け替え）は **transport 単位の single-flight** にする。同時に来た要求は同じ検証の結果を待って共有し、それぞれが `/v1/attestation` を呼ばない。検証が失敗したら、待っていた要求にも同じ失敗（`httpx.ConnectError`）を返す。再検証の間隔の下限（2 秒）は single-flight の後に適用する（直前の検証が間隔内なら、待たずにその結果を使う）。
 - `GET /api/tee/attestation` は、`nonce` なしなら検証済みの直近の結果（5 分）を返すのが既定で、金庫の発行枠（毎秒 1 回）を使うのは `nonce` ありの転送だけ（2 秒の制限）。
 - 理由: 起動時に見回りが複数の交渉を同時に再開すると、single-flight がなければ 1 件以外が金庫の 429 に当たる。
+
+## 16. 追記（2026-10-03。批評 16・17 巡目の受理分。実装者 A・B・C に個別に伝達済み。契約の本文より優先する）
+
+- **(C-56) §5**: `_tee/dek` に `kek_version`（KMS の `:encrypt` の応答の `name`。鍵の版の完全な名前）を足す。起動時に `GET https://cloudkms.googleapis.com/v1/<鍵の名前>` の `primary.name` と完全一致しなければ、復号せずに非 0 で終了する（ログは固定文 `DEK was wrapped by a non-primary key version; rotate the DEK` と 2 つの版の名前）。`kek_version` の無い文書も拒否する。
+- **(X-70) 手順の順序**: debug の VM を消す → 鍵の新しい版を primary にする → 古い版を無効化する → `scripts/tee_reset_dek.py --yes` → 本番の VM を作る（初回の起動で、新しい版で DEK を作る）。本番の起動後に版を回さない。live のデータが入った後の版の更新は、動いている金庫が、起動時に開いた DEK を primary で包み直して `_tee/dek` を上書きする（1 時間ごとに primary を確かめる。`kek_version` の前提条件つきの更新）。これはスパイクの範囲外（10/5 以降）。起動時の規則（primary でなければ起動しない）は変えない。
+- **(X-70) §4 の 5**: `_tee/selftest` は、無ければ作り（32 バイトの乱数 R を封印した `probe`、R の SHA-256 の `probe_sha256`、`created_at`）、あれば `probe` を開封して SHA-256 が一致することを確かめる。一致しなければ非 0 で終了（固定文 `sealing self-test failed: existing ciphertext does not open`）。再起動をまたいで既存の暗号文が同じ DEK で開くことの確認。
+- **(C-57) §10・§13**: `deploy/vault-releases.json` の各要素に `status`（`active`／`revoked`）。`load_releases` は無ければ `active`。`allowed_digests` は `active` だけ。`release_for_digest` は revoked も返す（表示用）。`scripts/tee_record_release.py --revoke <digest>` で `revoked` と `revoked_at`。許可表はイメージに焼くので、失効は表を直して `web` を再デプロイする（新しいリビジョン）。
+- **(C-57) §8**: 接続エラーのときだけでなく、`reverify_interval_seconds`（既定 600）ごとにも検証し直す。間隔を過ぎた最初の要求が（single-flight で）再検証し、失敗したらピンを外して、通るまで全要求を `httpx.ConnectError` にする。
+- **(X-67) §8**: 検証（初回・付け替え・定期）は transport 単位の single-flight（§15）。
+- **(L16-5) §7**: `web` の ID トークンは、メタデータサーバから `format=full` で取る（`identity?audience=...&format=full`。これがないと `email` が入らない）。
+- **(L16-6・X-73) §12**: `scripts/verify_attestation.py` は `--project`・`--service-account` を必須にする。`--direct` は、控えた証明書だけを信用する接続で `/v1/attestation` を呼び、自分で計算した証明書ハッシュで `eat_nonce` を照合する。`--web` は金庫の証明書を観測できないので、nonce・署名・claims・`active` なダイジェストまでを確かめる（証明書との結び付きは確かめない。設計書 AC-23 もそう書く）。
+- **(X-71) deploy_check（スパイクの後）**: KEK の実効権限は、Cloud Asset の Policy Analyzer（`gcloud asset analyze-iam-policy --full-resource-name=//cloudkms.googleapis.com/<鍵の名前> --permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt`）で全階層・custom role 込みで列挙し、`active` なダイジェストの principalSet 以外が 1 件でもあれば失敗にする。WIF プロバイダは attribute mapping と condition を組で完全一致で照合する。

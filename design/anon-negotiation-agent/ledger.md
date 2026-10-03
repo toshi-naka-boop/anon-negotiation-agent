@@ -33,6 +33,35 @@
 - 問い: 直接 import するので `pyproject.toml` に明示してよいか（新しいライブラリではない。ルール上の承認が要る）。
 - 推奨: 明示する。`cryptography` 50.0.1（Apache-2.0 OR BSD-3-Clause。AES-256-GCM と X.509 の生成。標準ライブラリにはどちらもない。google-auth・Authlib が推移的に使っている）、`google-auth` 2.58.1（Apache-2.0。`google.auth.jwt` で RS256 の検証。自前の JWT 検証は危ない。Firestore のクライアントが推移的に使っている）。研究報告が挙げた `requests` は、STS と KMS を httpx で直接呼ぶ設計にしたので要らない。承認までは `pyproject.toml` を変えず、実装は進める（どちらも uv.lock にあり、テストは動く）。
 
+### X-70（批評 17 巡目・codex / 設計 / high）鍵の版の切り替えの順序で、金庫が再起動できなくなる
+
+- §9 は `_tee/dek.kek_version == primary` を起動の条件にしながら、本番イメージへ切り替えた「直後」に primary を更新する。本番の金庫が旧版 V1 で DEK を包んで起動した後に V2 を primary にして V1 を無効化すると、稼働中はメモリの DEK で動くが、次の起動で止まる。DEK を作り直すと既存の封印済みデータが開けなくなる。契約 §5 にも `kek_version` の保存・照合がなく、AC-22 も `_tee/dek` と再起動を検査しない。
+- 案: live のデータを入れる前に「debug 停止 → V2 を primary → V1 無効化 → debug の DEK 削除 → 本番を初回起動」の順にする。`kek_version == V2`、強制再起動、既存の暗号文の開封を AC-22 に加える。live 後の版の更新は DEK の再生成ではなく、同じ DEK の包み直しの手順を定める。
+- 原文: reviews/round-17-codex.md
+
+### X-71（批評 17 巡目・codex / 設計 / high）deploy_check は「ほかの主体に復号権がない」を証明しない
+
+- §10 の (b) は KEK 自身の IAM、(c) は `web`・VM の SA のロールだけを見る。WIF の attribute mapping、key ring や folder・organization からの継承、custom role を含む実効的な KMS 権限は照合しない。上位の階層で別の主体に復号権が付いていても (a)〜(f) は合格し、その主体は TEE を経由せずに KEK を使える。
+- 案: attribute mapping と condition を組で完全一致検査し、`cloudkms.cryptoKeyVersions.useToDecrypt/useToEncrypt` の実効権限を全階層・custom role 込みで列挙して、期待する principalSet 以外が 1 件でもあれば失敗にする。そこまで検査しないなら、主張を「CryptoKey 直下の binding が一致する」まで弱める。
+- 原文: reviews/round-17-codex.md
+
+### X-72（批評 17 巡目・codex / 設計 / medium）失効と定期の再検証が、実装の契約に存在しない
+
+- v16 §9 は `status=revoked` と 10 分ごとの再検証を要求するが、契約（ファイル）の §10・§13 の形には `status` がなく、§8 は接続エラーのときしか再検証しない。`format=full` も契約に固定されていない。許可表の版と再読込の方法も未定。
+- 原文: reviews/round-17-codex.md
+
+### X-73（批評 17 巡目・codex / 設計 / medium）AC-23 の `--web` は金庫の証明書を独立に照合できない
+
+- AC-23 は `--web`・`--direct` の双方で証明書のハッシュを照合するとするが、`--web` は公開の web API を呼ぶだけで金庫の TLS 証明書を観測できない（契約 §10 では `certificate_sha256=None` で飛ばす）。受入条件だけ読むと、通信経路まで結び付いたように誤認される。
+- 案: `--web` は nonce・署名・claims・active なダイジェストの検証だけ、`--direct` だけが証明書との結合を検証する、と分ける。
+- 原文: reviews/round-17-codex.md
+
+### X-74（批評 17 巡目・codex / 設計 / medium）`checks` 優先の寛容な読みが、strict な Plan の検証より後にある
+
+- §2.7 は `Plan` を strict な pydantic 型で検証するとしながら、有効な `checks` があれば列挙外の `move="check"` やグリッド外の `package` も無視するとする。通常のモデル検証では無視する前に Plan 全体が失敗する。§4.1 にも `checks` を先に取り出す手順がない。`off_grid` も残っている。
+- 案: JSON object と `schema`・`checks` を先に検証し、空でなければ raw の `move`・`package` を型検証せずに捨てる 2 段の読み方にする。`checks=[]` のときだけ `Move` の規則で strict に検証する。`off_grid` を本文・型・試験から除く。
+- 原文: reviews/round-17-codex.md
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |
