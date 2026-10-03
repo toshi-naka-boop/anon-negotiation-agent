@@ -228,7 +228,7 @@ def release_for_digest(releases: list[dict], digest: str) -> dict | None
 - **(X-67) §8**: 検証（初回・付け替え・定期）は transport 単位の single-flight（§15）。
 - **(L16-5) §7**: `web` の ID トークンは、メタデータサーバから `format=full` で取る（`identity?audience=...&format=full`。これがないと `email` が入らない）。
 - **(L16-6・X-73) §12**: `scripts/verify_attestation.py` は `--project`・`--service-account` を必須にする。`--direct` は、控えた証明書だけを信用する接続で `/v1/attestation` を呼び、自分で計算した証明書ハッシュで `eat_nonce` を照合する。`--web` は金庫の証明書を観測できないので、nonce・署名・claims・`active` なダイジェストまでを確かめる（証明書との結び付きは確かめない。設計書 AC-23 もそう書く）。
-- **(X-71) deploy_check（スパイクの後）**: KEK の実効権限は、Cloud Asset の Policy Analyzer（`gcloud asset analyze-iam-policy --full-resource-name=//cloudkms.googleapis.com/<鍵の名前> --permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt`）で全階層・custom role 込みで列挙し、`active` なダイジェストの principalSet 以外が 1 件でもあれば失敗にする。WIF プロバイダは attribute mapping と condition を組で完全一致で照合する。
+- **(X-71・X-75) deploy_check（スパイクの後）**: KEK の実効権限は、Cloud Asset の Policy Analyzer（`gcloud asset analyze-iam-policy --full-resource-name=//cloudkms.googleapis.com/<鍵の名前> --permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt` に、組織の配下なら `--organization`、そうでなければ `--project`）で全階層・custom role 込みで列挙し、`deploy/expected-kms-principals.json`（承認済みのオーナーと、`active` なダイジェストの principalSet。手で書く正本）と完全一致でなければ失敗にする。解析が未完了なら失敗。WIF プロバイダは attribute mapping と condition を組で完全一致で照合する。
 
 ## 17. 追記（2026-10-03。批評 17 巡目の受理分。実装者 A・B に個別に伝達済み）
 
@@ -239,3 +239,10 @@ def release_for_digest(releases: list[dict], digest: str) -> dict | None
 - **(X-72) 許可表**: イメージに焼く。失効は表を直して `web` を再デプロイ。
 - **(L17-2) 環境変数**: probe の Job は `VAULT_BASE_URL`・`VAULT_SERVICE_ACCOUNT`・`GOOGLE_CLOUD_PROJECT`（`VAULT_AUDIENCE` は読まない。audience は設定の `caller_audience`）。`web` は `VAULT_TEE=true`・`VAULT_BASE_URL`・`VAULT_SERVICE_ACCOUNT`・`GOOGLE_CLOUD_PROJECT`（任意: `VAULT_RELEASES_FILE`・`VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE`・`GITHUB_REPO_URL`）。
 - **(X-74) ③ の実装**: `Plan` は 2 段で読む（`schema`・`checks` を strict に → `checks` が空でなければ `move`・`package` を捨てる → 空なら `Move` の規則で strict に）。スパイクの範囲外。
+
+## 18. 追記（2026-10-03。批評 18 巡目（codex。新規の high なし）の受理分）
+
+- **(X-77) §8**: 一時的な失敗でピンを保持して業務の要求を通すのは、最後に検証が通ってから `max_unverified_seconds`（既定 1800）まで。超えたら証明書は保持したまま業務の要求を `httpx.ConnectError` で閉じ、2 秒間隔で再検証して通ったら復帰する（実装者 B に伝達）。
+- **(X-75) 期待する主体の正本**: `deploy/expected-kms-principals.json` `{"owners": ["<メール>", ...], "principal_set_pattern": "principalSet://iam.googleapis.com/projects/<番号>/locations/global/workloadIdentityPools/vault-tee-pool/attribute.image_digest/{digest}"}`。`deploy_check.sh` はこれと `vault-releases.json` の `active` から期待集合を作る（スパイクの後）。
+- **(X-78) 説明文**: オーナーの復号の記録は「監査の設定が有効で除外がない間」。抑止は設定変更の Admin Activity の記録まで。
+- **(X-79) ③**: 計画の読み方は `PlanEnvelope`（`schema`・`checks`）→ `checks` があれば残りを捨てる → 空なら `Move` の規則。`Plan` 型を 1 回で当てない。

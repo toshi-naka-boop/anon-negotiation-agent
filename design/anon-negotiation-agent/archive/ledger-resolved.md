@@ -1471,3 +1471,42 @@ codex は high 2・medium 3（X-70〜X-74）。design-critic は high 2・medium
 
 - L17-1: 平文で残るメタデータの列挙が実際より少ない（`end_reason` など）。→ §9 の列挙に `end_reason`・`to_move`・`paused`・`paused_at`・`version`・`request_id` を足し、DV-19 の期待値とした。
 - L17-2: 手順 E の環境変数が契約と合っていない。→ 手順 E と手順書を契約 §7・§12 の名前（`VAULT_TEE`・`VAULT_SERVICE_ACCOUNT`・`GOOGLE_CLOUD_PROJECT`）に直した。
+
+## 批評 18 巡目・codex（v17 → v18、2026-10-03。gpt-5.6-sol xhigh、reviews/round-18-codex.md。新規の high なし、medium 5）
+
+65 分の待ちと探りの encrypt には新たな破綻を認めず（attestation トークンと WIF のトークンは最長 1 時間、との公式の裏づけつき）。
+
+### X-75（批評 18 巡目・codex / 設計 / medium）Policy Analyzer の実行範囲と期待集合が確定していない
+
+- §10 のコマンドに必須の `--project`／`--folder`／`--organization` がなく、オーナー一覧の正本もない。契約 §16 は期待集合からオーナーを落としている。`--project` だけだと組織・folder から継承した復号主体を見落とし、現在の IAM からオーナーを自動採取すると不正に追加されたオーナーまで期待値になる。
+- 案: 承認済みオーナーを含む期待 principal の正本を別ファイルに固定する。組織配下なら `--organization`、それ以外は `--project` を明示し、未完了の解析も失敗にする。契約 §16 も同じ集合に揃える。
+- 原文: reviews/round-18-codex.md
+
+### X-76（批評 18 巡目・codex / 設計 / medium）AC-22 が新設した監査・再起動の検査を合格条件から落としている
+
+- §10 は照合を (a)〜(h) にしたが、AC-22 は (a)〜(f) のまま。実装者が AC-22 を正とすると (g)(h) のない `deploy_check.sh` ができる。
+- 原文: reviews/round-18-codex.md
+
+### X-77（批評 18 巡目・codex / 設計 / medium）一時的な失敗なら古いピンを無期限に信用できる
+
+- 429・503・接続失敗ではピンを保持してデータ通信を続けるが、最後に検証が通ってからの上限がない。金庫が `/v1/attestation` だけを 503 にし続けると、業務 API には秘密が無期限に送られ、「10 分ごとに再検証」の保証が消える。
+- 案: ピンの保持とデータ通信の許可を分け、`last_verified_at`（またはトークンの `expires_at`）を超えたら業務要求を閉じ、attestation だけを再試行する。
+- 原文: reviews/round-18-codex.md
+
+### X-78（批評 18 巡目・codex / 設計 / medium）オーナーの復号が必ず主体・時刻つきで残るとは言えない
+
+- プロジェクトの IAM を変更できるオーナーは、Data Access ログを無効化したり自分を除外したりできる。設定変更の Admin Activity は残るが、復号そのものの主体・時刻は残らない。
+- 案: 「監査設定が有効で除外がない間は復号を記録できる。オーナーは設定を変えられ、その変更記録による抑止まで」と弱める。強い保証は、組織側での監査設定の継承と、オーナーが管理できない別プロジェクトへのログの転送。
+- 原文: reviews/round-18-codex.md
+
+### X-79（批評 18 巡目・codex / 設計 / medium）`Plan` の 2 段の読みと、旧来の一括の strict 検証が併存している
+
+- §2.7 は 2 段の読みを定めた直後に「strict な `Plan` 型」を要求し、`Move` の説明に `off_grid` が残る。§4.1 も 2 段の読みを明記していない。実装者が `Plan.model_validate()` を先に呼ぶと、DV-17 の寛容な読みと逆になる。
+- 案: 第 1 段を別の型（`PlanEnvelope`）として明記し、§4.1 に「Envelope の検証 → checks があれば残りを未検証で捨てる → 空なら Move の検証」を書く。strict な Plan 型と `off_grid` の残存記述を揃える。
+- 原文: reviews/round-18-codex.md
+
+- **X-75 の解決**: §10 (b) に範囲のフラグ（組織なら `--organization`、なければ `--project`。P-13 の答えで決める）、期待の正本 `deploy/expected-kms-principals.json`（手で書く。現在の IAM から自動で採らない）、未完了の解析は不合格、を書いた。契約 §16 の期待集合にオーナーを足して揃えた。
+- **X-76 の解決**: AC-22 を (a)〜(h) にし、(h) は「再起動の前にあった `_tee/selftest` が後に開く」まで書いた。
+- **X-77 の解決**: §9・契約 §18 に `max_unverified_seconds`（30 分）を置き、超えたら証明書を保持したまま業務の要求を閉じて attestation だけ再試行する。実装者 B に伝えた。
+- **X-78 の解決**: オーナーの復号の記録は「監査の設定が有効で除外がない間」に限ると書き、抑止は設定変更の Admin Activity の記録までとした。強い保証は P-13 とあわせてユーザーの判断。
+- **X-79 の解決**: §2.7 の 2 段の読みを `PlanEnvelope` として明記し、§4.1 の計画の段と §14 の行を揃えた。

@@ -1,14 +1,14 @@
 {
   "currentNode": "批評",
   "status": "in_progress",
-  "designVersion": "v17",
+  "designVersion": "v18",
   "approvedDesignVersion": null,
   "approvedDesignSha256": null,
   "approvedAt": null,
   "approvalEvidence": null,
-  "requiredApprovalFingerprint": "v17:edf087f9ccd4",
+  "requiredApprovalFingerprint": "v18:ed550de15ed6",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
-  "criticRound": 17,
+  "criticRound": 18,
   "openIssueIds": [
     "P-8",
     "P-9",
@@ -22,7 +22,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v17（批評 17 巡目の直し。X-70〜X-74、C-58〜C-61、L17-1〜2）を起草した（2026-10-03）。18 巡目（この周期の上限 3 巡目。reviews/round-18*.md、ID は C-62〜・X-75〜）を回し、high がなければ承認 CP（指紋 v17:edf087f9ccd4。ブリーフつき）。high が残れば残指摘を列挙してユーザーに判断を仰ぐ。TEE スパイクの実装: C は取り込み済み（9d3a603）、A は取り込み済み（d004721）＋ probe encrypt と固定文の差分を取り込む、B は C-61 と attest() の否定でのピン外しの差分を待って取り込む。取り込んだら全テストを回してコミット。ユーザーの確認待ち: P-8〜P-13、手順 A の実行結果、design-critic のモデル（opus のまま／fable）。承認済みは v14（4109a75c582c）のまま。",
+  "nextAction": "v18（批評 18 巡目 codex の medium X-75〜X-79 の直し。18 巡目は codex に新規の high なし）を起草した（2026-10-03）。design-critic（opus）の 18 巡目の結果を待ち、high がなければ承認 CP（指紋 v18:ed550de15ed6。ブリーフつき）。medium の直しは v18 に入れた（この周期は上限 3 巡なので、直し自体の再批評はしない。承認ブリーフにそう書く）。TEE スパイクの実装: A・C は取り込み済み、B は最終の差分（C-61・X-77・attest() の否定でのピン外し）を待って取り込み、全テストを回してコミット。ユーザーの確認待ち: P-8〜P-13、手順 A の実行結果、design-critic のモデル。承認済みは v14（4109a75c582c）のまま。",
   "lastUpdated": "2026-10-03",
   "delegation": {
     "批評": "claude/design-critic（frontmatter は `model: opus`。16 巡目の実際のモデルは claude-opus-5-5。2026-10-02 の『fable』の指示と食い違うので、直すかはユーザーに確認）+ codex exec (gpt-5.6-sol, xhigh)",
