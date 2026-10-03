@@ -64,6 +64,15 @@
 - 古いコメントの直し（小さな積み残し）: `src/agents/instructions/__init__.py`（attacker は ③ で書く）、`src/web/__init__.py`（攻撃モード・レート制限は後の段）、`tests/test_llm_budget.py`（生メッセージの経路が無い）。
 - 本物の Gemini で未確認: `attacker.md`、面談の指示文 2 本（`salary.md`・`constraints.md`）。ユーザーの環境で 1 回ずつ流す（DV-15 と同じ位置付け）。
 
+### I-27（実装時の気づき / 文面と小さな判断 / low。次の改訂（v20）で設計書に反映）段階開示（G）とメーター・2 パネル（H2）で分かったこと
+
+- **判断（呼び出し側、2026-10-04）**: デモ・攻撃の架空の候補者も、フィクスチャの職務要約と連絡先でサーバが「会う」「承認」を自動で押す（デモで段 2 まで見せる。P-2 の趣旨に沿う）。見込み「なし」は段 0 の表示で終わり、台帳には書かない。自動応答は判定の瞬間ではなく、候補者が段の状態を読んだ・操作したときに冪等に行う（GET が書く。サーバが決める値だけ）。
+- §6.2 に足す: 段ごとに見えるものの表（`web.stages.EMPLOYER_SEES` を正）、`stages/{nid}` の項目（`agreed_at`・`meet`・`approve` の側ごとのフラグ・`job_summary`・デモだけ `candidate_template_id`・`employer_template_id`）、求人の企業名は本物の候補者の交渉では `job_id` から、デモ・攻撃ではテンプレート ID から引く、段 2 の「氏名と連絡先」は候補者の分を求人側へ（求人側の連絡先はフィクスチャにない）、本文 32 KB・要約 400 文字。
+- §6.3・§7 に足す: 台帳の行は `nid`・`action`（disclose/meet/approve）・`stage`・`operator`（principal/fictional_employer/fictional_candidate/system）・`items`・`to`・`simulated`・`at`（生の値なし。文書 ID は交渉 ID と出来事で決まる固定の文字列）。段の状態・台帳・活動ログ・パネル・メーターの web の API の一覧を §3.3 の後に 1 節起こす。
+- §8.3 に足す: `POST /v1/demo/meter` の本文と応答（組ごとの区間 `(lower, upper]` と `cells`、`observations` は「本人確認が必要」を含む、観測の多い順、`narrowest`、1 件でも本物なら 403、別の候補者の答えが食い違えば 422）、シミュレーションは「どの値も 7 手以内」（121 通り中 114 通りが 7 手）。§8.2 の表にメーターの入口（`meter`。60 回／10 分。K2 で実装）。
+- §7 FR-39 に足す: `GET /v1/principals/{pid|me}/panels` の `worst_case`（アンカーが条件を付けている値だけを丸めたマスで。多次元のポリシーを軸ごとに射影するので、組の情報は落ちる＝画面の文言で誤読させない）と `still_hidden`（7 軸。年収は隠れているマスの種類数、外した軸は値の数、ほかの離散軸は 0。値は持たない）。画面が自分の依頼者 ID を知る方法は `me` の別名。デモの架空人物の生の値を見せる版は未作成（画面 L2 で要るなら足す）。
+- DV-02 の「10 本」は段階開示では 2〜4 本（エミュレータの競合待ち）。AC-14・AC-15 は `tests/test_stages.py`・`tests/test_stages_llm_inputs.py`。DV-01 のメーターの行は `tests/test_meter.py`。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |
