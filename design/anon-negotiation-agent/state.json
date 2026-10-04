@@ -17,7 +17,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v21 承認済み。TEE スパイク進行中（記録: research/tee-spike-step-a.md §5）。A 完了、B 完了（digest sha256:1fc217…、許可表に記録）、C は VM 作成済み（debug、RUNNING）→ シリアル・launcher のログ・IAP トンネル・verify_attestation --allow-debug・curl 4 本。P-20 は (b) で確定（README・手順書は反映済み。design.md は v22 で。I-35）。次: D（本番の条件・版の切り替え・本番イメージ）、E（Cloud Run から VPC 経由。(default) の作成も）、F、G。並行: serve_local --live の画面確認、デモ動画、信頼境界図・説明文・Zenn、deploy_check（EXPECTED_KMS_PRINCIPALS_FILE=tmp/tee_spike/expected-kms-principals.json）。",
+  "nextAction": "v21 承認済み。TEE スパイク進行中（記録: research/tee-spike-step-a.md §5）。A・B 完了。C: debug VM で attestation OK、点 4 の curl 4 本 401/401/404/403 で合格。残り: launcher ログの sealing self-test ok の確認。次: D（プロバイダを本番条件に → 負の試験 1（停止・開始でSTS 4xx）→ debug VM 削除 → 旧 _tee/dek を控える → KMS 権限を外して 65 分待つ（その間に E のアプリのイメージ）→ 付け直し → 版 2 を primary・版 1 無効化 → tee_reset_dek → 本番 VM → self-test → reset → 負の試験 C-56）。E、F、G。P-20 は (b)（design.md は v22 で。I-35）。並行: serve_local --live、デモ動画、信頼境界図・説明文・Zenn、deploy_check（EXPECTED_KMS_PRINCIPALS_FILE=tmp/tee_spike/expected-kms-principals.json）。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
