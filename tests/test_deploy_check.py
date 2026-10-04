@@ -11,7 +11,7 @@ GCP にも、実物の gcloud・curl にも接続しない。スクリプトは�
 - `--list` が、(a)〜(i) と §10 の項目名を出す(環境変数なしで動く)。`--show-expected` は gcloud を呼ばずに、期待する主体の集合を出す。
 - 「良い世界」(すべて本番の設定どおり)では、VAULT_MODE=tee・cloudrun のどちらでも、SKIP にしている項目のほかが、すべて [OK]・終了コード 0。
 - 項目ごとに、設定を 1 つ壊すと [NG](終了コード 1)になり、理由が出る。gcloud・curl が失敗したときも [NG](確かめられないものを通さない)。
-- 読み出しだけを行う(--reset-vault がなければ、gcloud に書き込みの動詞を渡さない)。--reset-vault は、再起動を 1 回だけ行い、再起動の後の自己試験を確かめる。
+- 読み出しだけを行う(--reset-vault がなければ、gcloud に書き込みの動詞を渡さない)。--reset-vault は、停止→開始を 1 回だけ行い(reset は使わない)、再起動の後の自己試験を確かめる。
 - トークンの値は、出力にも、curl の引数にも出ない(ヘッダは標準入力で渡す)。
 - uv pip show aiohttp は、実物の uv でも動く(リポジトリの環境に aiohttp はない)。
 """
@@ -327,7 +327,7 @@ def scenario_of(world: dict) -> dict:
     add("wif-providers", ["workload-identity-pools providers list"], world["providers"])
     add("ancestors", ["projects get-ancestors"], world["ancestors"])
     add("kms-analysis", ["asset analyze-iam-policy", "//cloudkms.googleapis.com/"], world["kms_analysis"])
-    add("pool-analysis", ["asset analyze-iam-policy", "//iam.googleapis.com/"], world["pool_analysis"])
+    add("pool-analysis", ["asset analyze-iam-policy", "//cloudresourcemanager.googleapis.com/projects/"], world["pool_analysis"])
     add("kms-key", ["kms keys describe vault-kek"], world["key"])
     add("kms-versions", ["kms keys versions list"], world["versions"])
     add("vm", ["compute instances describe vault-tee"], world["vm"])
@@ -336,7 +336,8 @@ def scenario_of(world: dict) -> dict:
     add("project-iam", ["projects get-iam-policy"], world["project_iam"])
     add("project-number", ["projects describe"], text=PROJECT_NUMBER + "\n")
     add("deny-policy", ["iam policies get vault-kek-deny"], world["deny"])
-    add("reset", ["compute instances reset vault-tee"], text="")
+    add("stop", ["compute instances stop vault-tee"], text="")
+    add("start", ["compute instances start vault-tee"], text="")
     add("launcher-log", ["logging read", "confidential-space-launcher"], world["launcher_logs"])
     add("audit-others", ["logging read", "NOT protoPayload.authenticationInfo.principalSubject"], world["audit_others"])
     add("audit-expected", ["logging read", "protoPayload.authenticationInfo.principalSubject="], world["audit_expected"])
@@ -645,7 +646,7 @@ def test_the_check_only_reads_and_never_prints_a_token(repo):
     result = run_script(repo, make_world("tee"))
 
     assert result.code == 0
-    forbidden = ("create", "delete", "update", "reset", "add-iam", "remove-iam", "set-iam", "enable", "disable", "patch", "import")
+    forbidden = ("create", "delete", "update", "reset", "stop", "start", "add-iam", "remove-iam", "set-iam", "enable", "disable", "patch", "import")
     gcloud_calls = [call for call in result.commands if call.startswith("gcloud ")]
     assert gcloud_calls
     for call in gcloud_calls:
@@ -985,7 +986,8 @@ def test_policy_analyzer_uses_the_organization_when_org_id_is_given_and_the_proj
     assert len(analysis_calls) == 2 and all(f"--project={PROJECT_ID}" in call and "--organization" not in call for call in analysis_calls)
     assert "--full-resource-name=//cloudkms.googleapis.com/" + KEY_NAME in analysis_calls[0]
     assert "--permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt" in analysis_calls[0]
-    assert "--full-resource-name=//iam.googleapis.com/projects/" + PROJECT_NUMBER + "/locations/global/workloadIdentityPools/vault-tee-pool" in analysis_calls[1]
+    # Policy Analyzer は WIF のプールを対象にできない(実測 INVALID_ARGUMENT)ので、プロジェクトを対象に解析する
+    assert "--full-resource-name=//cloudresourcemanager.googleapis.com/projects/" + PROJECT_ID in analysis_calls[1]
     assert (
         "--permissions=iam.workloadIdentityPoolProviders.create,iam.workloadIdentityPoolProviders.update,"
         "iam.workloadIdentityPoolProviders.delete,iam.workloadIdentityPools.update" in analysis_calls[1]
@@ -1042,18 +1044,20 @@ def test_h_reset_is_skipped_without_the_flag_and_never_restarts_the_vm(repo):
     result = run_script(repo, make_world("tee"), "--only", "tee-h,tee-h-reset")
 
     assert result.status("tee-h") == "OK" and result.status("tee-h-reset") == "SKIP"
-    assert not any("instances reset" in call for call in result.commands)
+    assert not any(verb in call for call in result.commands for verb in ("instances reset", "instances stop", "instances start"))
 
 
 def test_h_reset_restarts_once_and_checks_that_the_old_ciphertext_opens(repo):
     result = run_script(repo, make_world("tee"), "--only", "tee-h-reset", "--reset-vault")
 
     assert result.status("tee-h-reset") == "OK" and result.code == 0
-    resets = [call for call in result.commands if "instances reset" in call]
-    assert len(resets) == 1 and "vault-tee" in resets[0]
-    # 再起動の前に _tee/selftest があることを確かめてから、再起動する
+    stops = [call for call in result.commands if "instances stop" in call]
+    starts = [call for call in result.commands if "instances start" in call]
+    assert len(stops) == 1 and len(starts) == 1 and "vault-tee" in stops[0] and "vault-tee" in starts[0]
+    assert not any("instances reset" in call for call in result.commands)  # reset は vTPM の DA ロックアウトのカウンタを増やすので使わない
+    # 再起動の前に _tee/selftest があることを確かめてから、停止→開始の順に行う
     selftest_read = next(index for index, call in enumerate(result.commands) if call.startswith("curl ") and "_tee/selftest" in call)
-    assert selftest_read < result.commands.index(resets[0])
+    assert selftest_read < result.commands.index(stops[0]) < result.commands.index(starts[0])
 
 
 @pytest.mark.parametrize(
@@ -1062,7 +1066,7 @@ def test_h_reset_restarts_once_and_checks_that_the_old_ciphertext_opens(repo):
         (lambda w: w.update(launcher_logs=[]), "出ていない"),
         (lambda w: w.update(launcher_logs=[{"textPayload": "sealing self-test: created the probe"}, {"textPayload": "sealing self-test ok"}]), "作り直した"),
         (lambda w: w.update(selftest_status=404), "_tee/selftest がない"),
-        (lambda w: w["fail"].update(reset=(1, "ERROR: (gcloud.compute.instances.reset) denied")), "再起動できない"),
+        (lambda w: w["fail"].update(stop=(1, "ERROR: (gcloud.compute.instances.stop) denied")), "停止できない"),
     ],
 )
 def test_h_reset_is_ng_when_the_self_test_does_not_come_back(repo, change, fragment):
@@ -1075,4 +1079,4 @@ def test_h_reset_is_ng_when_the_self_test_does_not_come_back(repo, change, fragm
 def test_h_reset_does_not_restart_when_there_is_no_self_test_to_check_afterwards(repo):
     result = run_script(repo, mutated("tee", lambda w: w.update(selftest_status=404)), "--only", "tee-h-reset", "--reset-vault")
 
-    assert not any("instances reset" in call for call in result.commands)  # 確かめる材料がないまま、再起動しない
+    assert not any(verb in call for call in result.commands for verb in ("instances reset", "instances stop", "instances start"))  # 確かめる材料がないまま、再起動しない

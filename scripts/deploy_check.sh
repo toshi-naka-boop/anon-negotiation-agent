@@ -5,7 +5,7 @@
 #   bash scripts/deploy_check.sh --list                     # 確認項目の一覧(環境変数は要らない)
 #   bash scripts/deploy_check.sh --only tee-a,tee-b         # 項目を絞る(繰り返し・コンマ区切り)
 #   bash scripts/deploy_check.sh --show-expected            # KEK を使えるはずの主体の期待集合を表示して終わる(gcloud を呼ばない)
-#   bash scripts/deploy_check.sh --reset-vault              # (h) の再起動後の自己試験も行う(金庫の VM を再起動する)
+#   bash scripts/deploy_check.sh --reset-vault              # (h) の再起動後の自己試験も行う(金庫の VM を停止→開始する)
 #
 # 項目ごとに [OK]・[NG]・[SKIP] を 1 行ずつ出す(NG と SKIP には、理由・差分を、字下げした行で添える)。NG が 1 つでもあれば終了コード 1、
 # なければ 0。必須の環境変数がない・引数が違うときは終了コード 2。
@@ -32,7 +32,8 @@
 #
 # このスクリプトがすること・しないこと
 #   - gcloud・curl は、読み出し(describe・list・get・read・GET)だけ。何も作らず、変えず、消さない。ただし --reset-vault を付けたときだけ、
-#     金庫の VM を再起動する(gcloud compute instances reset。数分、金庫が応えなくなる。審査期間中は付けない)。
+#     金庫の VM を停止→開始する(gcloud compute instances stop → start。数分、金庫が応えなくなる。審査期間中は付けない。
+#     instances reset は使わない: 実測(2026-10-04)で、起動のたびに vTPM の DA ロックアウトのカウンタが増え、reset はそれを「不正な停止」として数える)。
 #   - トークンの値・鍵・DEK・暗号文は、出力しない(ID トークン・アクセストークンは変数に持ち、curl には標準入力のヘッダで渡す。
 #     プロセスの引数に出ない)。Secret Manager の値も見ない(参照かどうかだけ)。bash -x(xtrace)で動かすと、トークンが画面に出る。使わない。
 #   - 期待値は、設定ファイル(config/params.toml)・deploy/vault-releases.json・deploy/expected-kms-principals.json と、手順書(research/tee-spike.md)
@@ -88,14 +89,14 @@ demo-url|all|AC-22 デモ URL(WEB_URL)が開ける
 submission-checklist|all|AC-22 提出物 6 点のチェックリスト
 tee-a|tee|(a) WIF のプール vault-tee-pool に有効なプロバイダが attestation-verifier の 1 件だけで、発行元・audience・mapping・condition が本番と完全一致
 tee-b|tee|(b) KEK を使える主体(Policy Analyzer。全階層)が deploy/expected-kms-principals.json と vault-releases.json の active から作った期待集合と完全一致
-tee-b-pool|tee|(b) プールとプロバイダを変えられる主体(Policy Analyzer)が承認済みのオーナーだけ
+tee-b-pool|tee|(b) プールとプロバイダを変えられる主体(Policy Analyzer。プロジェクトを対象に解析)が承認済みのオーナーだけ
 tee-c|tee|(c) 金庫の VM の SA と web の SA が、KEK を使える主体に現れない
 tee-d|tee|(d) KEK の primary の版が ENABLED で、それ以外の版はすべて無効・破棄予定
 tee-e|tee|(e) VM に外部 IP がなく、本番イメージ(confidential-space)で、tee-image-reference が active なダイジェスト
 tee-f|tee|(f) ファイアウォール規則 allow-iap-to-vault が消えている
 tee-g|tee|(g) Cloud KMS の Data Access 監査ログが有効で exemptedMembers が空、新しい版の後の Encrypt・Decrypt の主体が本番の VM の subject だけ
 tee-h|tee|(h) _tee/dek.kek_version が KEK の primary の版と一致
-tee-h-reset|tee|(h) 金庫を強制再起動しても sealing self-test ok(既存の暗号文が開く。--reset-vault のときだけ)
+tee-h-reset|tee|(h) 金庫を停止→開始しても sealing self-test ok(既存の暗号文が開く。--reset-vault のときだけ)
 tee-i|tee|(i) 拒否ポリシー vault-kek-deny があり、本文が手順 G と一致'
 
 # 手順書(research/tee-spike.md)と設定(config/params.toml の [vault.tee])の名前。期待値の元。
@@ -1443,11 +1444,9 @@ check_tee_b() {
 }
 
 check_tee_b_pool() {
-  if ! need_project_number; then
-    emit NG tee-b-pool "プロジェクト番号を取れない(PROJECT_NUMBER を設定するか、gcloud projects describe の権限を確かめる)"
-    return 0
-  fi
-  analyze pool-analysis "//iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}" \
+  # Policy Analyzer は Workload Identity Pool の full resource name を受け付けない(実測 2026-10-04: INVALID_ARGUMENT)ので、
+  # プロジェクトを対象に「プール・プロバイダを変えられる権限」を持つ主体を列挙する(プールの IAM は、プロジェクト〔と上位〕の束縛で決まる)。
+  analyze pool-analysis "//cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" \
     iam.workloadIdentityPoolProviders.create,iam.workloadIdentityPoolProviders.update,iam.workloadIdentityPoolProviders.delete,iam.workloadIdentityPools.update
   py_check tee-b-pool
 }
@@ -1537,11 +1536,17 @@ check_tee_h_reset() {
     return 0
   fi
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "    金庫の VM($VM_NAME)を再起動する(--reset-vault。数分、金庫が応えない)"
-  fetch reset "gcloud compute instances reset $VM_NAME" \
-    "$GCLOUD" compute instances reset "$VM_NAME" --zone "$ZONE" --project "$PROJECT_ID"
-  if [ "$(rf "$WORK/reset.rc" none)" != 0 ]; then
-    emit NG tee-h-reset "金庫の VM を再起動できない(gcloud compute instances reset: $(first_line "$WORK/reset.err"))"
+  echo "    金庫の VM($VM_NAME)を停止→開始する(--reset-vault。数分、金庫が応えない。reset は使わない: vTPM の DA ロックアウトのカウンタが増える)"
+  fetch stop "gcloud compute instances stop $VM_NAME" \
+    "$GCLOUD" compute instances stop "$VM_NAME" --zone "$ZONE" --project "$PROJECT_ID"
+  if [ "$(rf "$WORK/stop.rc" none)" != 0 ]; then
+    emit NG tee-h-reset "金庫の VM を停止できない(gcloud compute instances stop: $(first_line "$WORK/stop.err"))"
+    return 0
+  fi
+  fetch start "gcloud compute instances start $VM_NAME" \
+    "$GCLOUD" compute instances start "$VM_NAME" --zone "$ZONE" --project "$PROJECT_ID"
+  if [ "$(rf "$WORK/start.rc" none)" != 0 ]; then
+    emit NG tee-h-reset "金庫の VM を開始できない(gcloud compute instances start: $(first_line "$WORK/start.err"))"
     return 0
   fi
   filter="logName=\"projects/${PROJECT_ID}/logs/confidential-space-launcher\" AND timestamp>=\"${started}\""
