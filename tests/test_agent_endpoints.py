@@ -264,12 +264,12 @@ async def test_agent_card_is_published_at_the_standard_location(role, http):
 
 
 async def test_healthz_answers_200_without_running_the_llm(http, stub_llm):
-    # AC-22: GET /healthz は、認証なしで 200 {"status":"ok"}。LLM は動かさない。GET だけ(受信口の JSON-RPC とは別の経路)。
-    response = await http.get("/healthz")
+    # AC-22: GET /health は、認証なしで 200 {"status":"ok"}。LLM は動かさない。GET だけ(受信口の JSON-RPC とは別の経路)。
+    response = await http.get("/health")
 
     assert (response.status_code, response.json()) == (200, {"status": "ok"})
     assert stub_llm.requests == []
-    assert (await http.post("/healthz")).status_code == 405
+    assert (await http.post("/health")).status_code == 405
 
 
 # --- メッセージの形(exactly one DataPart) ---

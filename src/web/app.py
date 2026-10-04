@@ -14,7 +14,7 @@
   起動を拒否する(MissingSessionKeyError)。base64url として読めて 32 バイト以上でなければ、これも起動を拒否する
   (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
   乱数でない鍵)でも拒否する。create_app_from_env・create_app のどちらでも同じ。
-- GET /healthz(死活確認。AC-22): 認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(利用記録の Firestore にも触れない)。
+- GET /health(死活確認。AC-22): 認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(利用記録の Firestore にも触れない)。
 - 画面(static/。静的な HTML と素の JS・CSS。ビルド工程なし。§10): /static で静的ファイルを、ページの経路(/・/interview・/me・/demo・/attack)で対応する
   HTML を返す。どれも依頼者 ID を発行しない(発行は開始ページの GET /start だけ。画面の JS が呼ぶ。§6.3)。/static はセッションを見ない。
   SSE(/v1/stream/。web.ui_api)もセッションを見ない: 依頼者ごとのロックを、応答を送り終えるまで持つミドルウェアを通すと、つながっている間
@@ -72,7 +72,7 @@ from web.vault_client import (
 _log = logging.getLogger(__name__)
 
 # 死活確認(AC-22)。認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(Firestore にも金庫にも触れない)。
-HEALTHZ_PATH = "/healthz"
+HEALTH_PATH = "/health"
 VAULT_BASE_URL_ENV = "VAULT_BASE_URL"
 # TEE モード(契約 §7)
 VAULT_TEE_ENV = "VAULT_TEE"
@@ -201,7 +201,7 @@ def create_app(
     app.include_router(build_router(services, tee))
     add_pages(app)
 
-    @app.get(HEALTHZ_PATH)
+    @app.get(HEALTH_PATH)
     async def _healthz() -> dict[str, str]:
         return {"status": "ok"}
 
@@ -211,7 +211,7 @@ def create_app(
         meta=services.meta,
         locks=services.locks,
         clock=services.clock,
-        session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTHZ_PATH, STATIC_PATH_PREFIX, STREAM_PATH_PREFIX),
+        session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTH_PATH, STATIC_PATH_PREFIX, STREAM_PATH_PREFIX),
     )
 
     @app.exception_handler(RequestValidationError)

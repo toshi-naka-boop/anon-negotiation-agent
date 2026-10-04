@@ -340,7 +340,7 @@ def scenario_of(world: dict) -> dict:
     add("id-token", ["auth print-identity-token"], text="SECRET-ID-TOKEN\n")
 
     http = world["http"]
-    health = world.get("health_path", "/healthz")
+    health = world.get("health_path", "/health")
     curl = [
         {"url": f"{WEB_URL}{health}", "status": http["web"], "body": '{"status":"ok"}'},
         {"url": f"{AGENTS_URL}{health}", "status": http["agents"], "body": '{"status":"ok"}', "needs_auth": True},
@@ -516,7 +516,7 @@ def test_list_prints_every_item_without_any_environment_variable():
     for phrase in (
         "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", "INFO", "workers=1", "SESSION_SIGNING_KEY", "SERVICE_AUTH_ENABLED",
         "GOOGLE_GENAI_USE_VERTEXAI", "VAULT_BASE_URL", "public_base_url", "起動元", "TTL", "cacheConfig.disableCache",
-        "aiohttp", "run.googleapis.com/requests", "R-7", "/healthz", "/api/tee/attestation", "vault.app:create_app_from_env",
+        "aiohttp", "run.googleapis.com/requests", "R-7", "/health", "/api/tee/attestation", "vault.app:create_app_from_env",
         "デモ URL", "提出物 6 点", "vault-kek-deny", "allow-iap-to-vault", "Policy Analyzer", "exemptedMembers",
     ):
         assert phrase in result.stdout, phrase
@@ -649,7 +649,7 @@ def test_the_check_only_reads_and_never_prints_a_token(repo):
     for secret in SECRETS:
         assert secret not in result.stdout and secret not in result.stderr
         assert not any(secret in call for call in result.commands)
-    # トークンは、curl の引数ではなく標準入力のヘッダで渡る(認証が要る呼び出し: agents の /healthz・cacheConfig・_tee/dek は、auth=yes で通っている)
+    # トークンは、curl の引数ではなく標準入力のヘッダで渡る(認証が要る呼び出し: agents の /health・cacheConfig・_tee/dek は、auth=yes で通っている)
     authenticated = [call for call in result.commands if call.startswith("curl ") and "auth=yes" in call]
     assert len(authenticated) == 3 and all("-H @-" in call for call in authenticated)
     assert not any("Authorization" in call for call in result.commands)
@@ -774,21 +774,27 @@ def test_a_failing_gcloud_call_is_ng_not_a_pass(repo, item, name):
 
 
 def test_a_404_on_a_health_path_ending_in_z_explains_that_cloud_run_reserves_it(repo):
-    # Cloud Run の run.app では、末尾が z のパス(/healthz)を Google のフロントエンドが予約していて、コンテナに届かない(公式の既知の問題)
-    result = run_script(repo, mutated("tee", lambda w: w["http"].update(web=404)), "--only", "healthz-web")
+    # Cloud Run の run.app では、末尾が z のパス(/health)を Google のフロントエンドが予約していて、コンテナに届かない(公式の既知の問題)
+    result = run_script(
+        repo,
+        mutated("tee", lambda w: (w.update(health_path="/healthz"), w["http"].update(web=404))),
+        "--only",
+        "healthz-web",
+        env_extra={"HEALTH_PATH": "/healthz"},
+    )
 
     assert result.status("healthz-web") == "NG" and "予約" in result.text("healthz-web") and "HEALTH_PATH=/health" in result.text("healthz-web")
 
 
 def test_the_health_path_can_be_changed_with_health_path(repo):
-    world = mutated("tee", lambda w: w.update(health_path="/health"))
+    world = mutated("tee", lambda w: w.update(health_path="/livecheck"))
 
     on_default = run_script(repo, world, "--only", "healthz-web,healthz-agents")
-    renamed = run_script(repo, world, "--only", "healthz-web,healthz-agents", env_extra={"HEALTH_PATH": "/health"})
+    renamed = run_script(repo, world, "--only", "healthz-web,healthz-agents", env_extra={"HEALTH_PATH": "/livecheck"})
 
-    assert on_default.status("healthz-web") == "NG"  # 既定の /healthz は、この世界では届かない
+    assert on_default.status("healthz-web") == "NG"  # 既定の /health は、この世界では届かない
     assert renamed.status("healthz-web") == "OK" and renamed.status("healthz-agents") == "OK" and renamed.code == 0
-    assert "/health が 200" in renamed.items["healthz-web"][1]
+    assert "/livecheck が 200" in renamed.items["healthz-web"][1]
 
 
 def test_service_auth_may_be_unset_or_true(repo):

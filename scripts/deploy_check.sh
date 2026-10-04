@@ -23,7 +23,7 @@
 #   PROJECT_NUMBER  プロジェクト番号(任意。なければ gcloud projects describe で取る)
 #   VAULT_URL   金庫(Cloud Run 版)の URL(任意。なければ gcloud run services describe の status.url)
 #   WEB_SERVICE・AGENTS_SERVICE・VAULT_SERVICE  Cloud Run のサービス名(既定 web・agents・vault)
-#   HEALTH_PATH  死活確認のパス(既定 /healthz。下の注意を読む)
+#   HEALTH_PATH  死活確認のパス(既定 /health。下の注意を読む)
 #   CACHE_CONFIG_URL  Vertex AI の cacheConfig の URL(既定 https://aiplatform.googleapis.com/v1/projects/<PROJECT_ID>/cacheConfig)
 #   EXPECTED_KMS_PRINCIPALS_FILE  期待する主体の正本(既定 deploy/expected-kms-principals.json)
 #   RELEASES_FILE  digest の許可表(既定 deploy/vault-releases.json)
@@ -42,8 +42,8 @@
 # GCP の設定が違うのかを見分ける。Policy Analyzer(tee-b・tee-b-pool)は Cloud Asset API(cloudasset.googleapis.com)を有効にし、
 # 呼ぶ主体に cloudasset.assets.analyzeIamPolicy の権限が要る(手順 A の API の一覧にはない)。
 #
-# /healthz の注意: Cloud Run の *.run.app では、末尾が z のパス(/healthz)を Google のフロントエンドが予約していて、コンテナに届く前に自前の 404 を返す
-# (公式の既知の問題: 末尾が z のパスは避ける)。web・agents・金庫の経路が /healthz のままだと、healthz の 3 項目は NG(404)になる。
+# 死活確認のパスの注意: Cloud Run の *.run.app では、末尾が z のパス(/healthz など)を Google のフロントエンドが予約していて、コンテナに届く前に自前の 404 を返す
+# (公式の既知の問題: 末尾が z のパスは避ける)。web・agents・金庫の経路が /health のままだと、healthz の 3 項目は NG(404)になる。
 # アプリの経路を /health などに変えたら、HEALTH_PATH=/health で確認する。
 #
 # 書くときの注意: 変数の直後に日本語が続くときは、${VAR} と中括弧で囲む(macOS の bash 3.2 は、$VAR の直後のバイトを変数名に含めることがある)。
@@ -81,9 +81,9 @@ thinking-usage|all|§10 思考の量の設定が効いている(usage_metadata �
 no-aiohttp|all|§10 aiohttp が入っていない(uv pip show・uv.lock)
 request-log|all|§10 Log Router の _Default シンクが run.googleapis.com/requests を除外している
 r7-client-ip|all|R-7 X-Forwarded-For の末尾がクライアント IP
-healthz-web|all|AC-22 web の /healthz(既定。HEALTH_PATH で変える)が 200
-healthz-agents|all|AC-22 agents の /healthz が 200(ID トークンつき)
-healthz-vault|all|AC-22 金庫(cloudrun: /healthz が 200〔ID トークンつき〕。tee: web の /api/tee/attestation が verified=true)
+healthz-web|all|AC-22 web の /health(既定。HEALTH_PATH で変える)が 200
+healthz-agents|all|AC-22 agents の /health が 200(ID トークンつき)
+healthz-vault|all|AC-22 金庫(cloudrun: /health が 200〔ID トークンつき〕。tee: web の /api/tee/attestation が verified=true)
 demo-url|all|AC-22 デモ URL(WEB_URL)が開ける
 submission-checklist|all|AC-22 提出物 6 点のチェックリスト
 tee-a|tee|(a) WIF のプール vault-tee-pool に有効なプロバイダが attestation-verifier の 1 件だけで、発行元・audience・mapping・condition が本番と完全一致
@@ -1124,7 +1124,7 @@ VAULT_SERVICE="${VAULT_SERVICE:-vault}"
 CACHE_CONFIG_URL="${CACHE_CONFIG_URL:-https://aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/cacheConfig}"
 FIRESTORE_DOCS="https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/vault-db/documents"
 HTTP_TIMEOUT="${HTTP_TIMEOUT:-60}"
-HEALTH_PATH="${HEALTH_PATH:-/healthz}"
+HEALTH_PATH="${HEALTH_PATH:-/health}"
 RESET_POLLS="${RESET_POLLS:-36}"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
 PROJECT_NUMBER="${PROJECT_NUMBER:-}"

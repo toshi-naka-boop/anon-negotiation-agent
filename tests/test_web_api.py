@@ -298,10 +298,10 @@ async def test_interview_values_and_the_cookie_never_appear_in_the_logs(web_app,
 
 @pytest.mark.anyio
 async def test_healthz_answers_without_a_session_and_without_touching_the_usage_record(web_app, monkeypatch):
-    # AC-22: GET /healthz は、認証なしで 200 {"status":"ok"}。セッションを見ない: ID を発行せず、有効なクッキーがあっても利用記録
+    # AC-22: GET /health は、認証なしで 200 {"status":"ok"}。セッションを見ない: ID を発行せず、有効なクッキーがあっても利用記録
     # (Firestore の principals_meta)に触れない(死活確認が、Firestore の状態に左右されない)。
     stranger = web_app.browser()
-    anonymous = await stranger.get("/healthz")
+    anonymous = await stranger.get("/health")
     assert (anonymous.status_code, anonymous.json()) == (200, {"status": "ok"})
     assert "set-cookie" not in anonymous.headers and stranger.cookie is None
 
@@ -313,7 +313,7 @@ async def test_healthz_answers_without_a_session_and_without_touching_the_usage_
 
     monkeypatch.setattr(web_app.services.meta, "touch", broken)
 
-    again = await browser.get("/healthz")
+    again = await browser.get("/health")
 
     assert (again.status_code, again.json()) == (200, {"status": "ok"})
     # 対照: セッションを見るほかの経路は、利用記録を確かめられないので通さない(差し替えが効いている)

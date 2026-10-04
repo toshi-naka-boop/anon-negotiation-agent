@@ -8,7 +8,7 @@
 (web.service_auth)。
 TEE(Confidential Space)版では Cloud Run の IAM が効かないので、create_app に caller_verifier(vault.tee.caller_auth の依存)を渡し、
 アプリの中で ID トークンを検証する。attestation(vault.tee.attestation_api)を渡すと、認証なしの `GET /v1/attestation` を付ける(§9)。
-`GET /healthz`(死活確認。AC-22)は、常に、認証なしの素の経路として付ける(caller_verifier の依存の外。attestation と同じ)。
+`GET /health`(死活確認。AC-22)は、常に、認証なしの素の経路として付ける(caller_verifier の依存の外。attestation と同じ)。
 
 本番の起動口は create_app_from_env(`uvicorn vault.app:create_app_from_env --factory`)。起動時に、uvicorn のアクセスログの
 URL から ID(依頼者 ID・交渉 ID)を伏せる(§3.8。台帳 X-40)。伏せる処理は web の起動口と共通で、negotiation_core にある
@@ -96,7 +96,7 @@ def create_app(
             redoc_url=None,
             openapi_url=None,
         )
-    app.add_route("/healthz", _healthz, methods=["GET"])  # caller_verifier の依存の外(素の経路)。TEE 版でも認証なしで通る
+    app.add_route("/health", _healthz, methods=["GET"])  # caller_verifier の依存の外(素の経路)。TEE 版でも認証なしで通る
     if attestation is not None:
         app.add_route("/v1/attestation", attestation.endpoint, methods=["GET"])
 

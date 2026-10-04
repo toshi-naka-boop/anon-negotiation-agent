@@ -298,10 +298,10 @@ async def test_the_static_route_does_not_serve_anything_outside_static(web_app):
 
 @pytest.mark.anyio
 async def test_the_api_routes_are_still_served_next_to_the_pages(web_app):
-    # ページの経路と /static を足しても、既存の API の経路(/healthz・/start)は変わらない。
+    # ページの経路と /static を足しても、既存の API の経路(/health・/start)は変わらない。
     browser = web_app.browser()
 
-    assert (await browser.get("/healthz")).json() == {"status": "ok"}
+    assert (await browser.get("/health")).json() == {"status": "ok"}
     assert (await browser.get("/start")).json() == {"status": "ok"}
     assert (await browser.get("/openapi.json")).status_code == 200  # スキーマの生成が、足した口で壊れていない
 

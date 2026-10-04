@@ -8,7 +8,7 @@ a2a-sdk のサーバで、受信口ごとに自前の AgentExecutor(agents.execu
 | `/a2a/employer` | TurnInput | 通常の交渉の求人側 |
 | `/a2a/attacker` | AttackerTurnInput | 攻撃モードの求人側だけ |
 
-- `GET /healthz`(死活確認。AC-22)は 200 `{"status":"ok"}` を返す。LLM は動かさない。
+- `GET /health`(死活確認。AC-22)は 200 `{"status":"ok"}` を返す。LLM は動かさない。
 - 各受信口は JSON-RPC の口で、その下の `/.well-known/agent-card.json` に Agent Card を公開する
   (A2A の標準の場所。例: `/a2a/candidate/.well-known/agent-card.json`)。
 - 各受信口は、`TurnInput.phase` で、計画の LlmAgent(出力は Plan)か決定の LlmAgent(出力は Move)かを選ぶ。つまり
@@ -229,7 +229,7 @@ def create_app(*, model: BaseLlm | None = None, config: AgentsConfig = DEFAULT_A
     """
     require_no_http_retry(config)
     llm = build_gemini_model(config) if model is None else model
-    routes = [Route("/healthz", _healthz, methods=["GET"])]
+    routes = [Route("/health", _healthz, methods=["GET"])]
     handlers = []
     runners = {}
     for role in ROLES:
