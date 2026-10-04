@@ -268,3 +268,16 @@ gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --fi
 - 手順 A の後に課金が始まるものはありません。ここで止めても費用はほぼ出ません。
 - 次は手順 B（Cloud Build でイメージを作る。無料枠内）、手順 C（debug イメージで金庫を VM で動かす。ここから課金。VM は 1 時間およそ $0.125 ≈ 19 円。元の手順の「費用」の表）です。手順 C 以降は、点 1〜6 の「貼ってもらう出力」が `tests/manual/tee-spike.md` にあります。
 - 片付けの手順は F にあります（VM の削除、IAP の規則の削除、試験用の権限の取り消し）。
+
+## 5. 実施記録（2026-10-04。端末の出力から）
+
+- A-0〜A-2: 変数は 8 個とも入った。API の有効化は成功。クォータは N2D_CPUS 16・C3_CPUS 24 で合格。
+- A-3: `vault-tee`・`web-run` を作成。権限 3 つは付いた（条件つきの束縛で IAM ポリシーの版が 3 になった。想定どおり）。
+- A-4: リポジトリ `vault` を作成し、読み取り権限を付けた。
+- A-5: データベースの一覧は空だった（`(default)` も無い）。`vault-db` を作成（STANDARD・native・asia-northeast1・無料枠）。web 用の `(default)` は、手順 E かデプロイの前に作る（手順書に未記載。要追加）。
+- A-6: `vault-vpc`・`vault-subnet`・`vault-ip`（10.10.0.10）・ファイアウォール 2 本を作成。`run-egress-subnet` のブロックは実行されていない（あとで実行する）。
+- A-7: キーリングと鍵の作成は出力なしで終わった（成功時は無出力）。`gcloud kms keys list` で確かめる。
+- A-8: プールとプロバイダを作成（テスト用の条件）。
+- A-9: 自分のユーザーに試験用の権限 3 つを付けた（手順 F で外す）。
+- A-10: オーナーは 1 件。個人の gmail で、git の作者（GitHub の noreply）とは別のアドレス。P-20 の「すでに公開されている」という前提が成り立たないので、公開リポジトリに載せるかはユーザーに確認中。値は `tmp/tee_spike/expected-kms-principals.json`（gitignore 済み）に置いた。`deploy_check` は `EXPECTED_KMS_PRINCIPALS_FILE` でこのファイルを指せる。
+- A-11: 予算アラート（アラートのみ、20,000 円）は作成済み。KMS の Data Access 監査ログは未確認。
