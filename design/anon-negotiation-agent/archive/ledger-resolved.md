@@ -1735,3 +1735,4 @@ codex は high 2・medium 3（X-70〜X-74）。design-critic は high 2・medium
 - 推奨: そのまま載せる。オーナーのメールは git のコミットの作者としてすでに公開されている。別名（Google グループ）にすると、Policy Analyzer の列挙との照合が複雑になる。
 - 初回の `deploy_check` で、Policy Analyzer が `projectOwner:` やグループで返す場合は、その表記を正本に足す（M）。
 - **解決**: 確定（ユーザーの判断 2026-10-04「載せる」）。v21 §13 に書いた。値は手順 A の `gcloud projects get-iam-policy`（`roles/owner` の主体）から写す。Policy Analyzer が別の表記で返したら、その表記を正本に足す。
+- **追記（同日）**: 手順 A の出力で、オーナーは個人の gmail で、git の作者（GitHub の noreply）とは別だと分かった。「すでに公開されている」という前提が崩れたので改めて確認し、ユーザーの判断は (b): 公開リポジトリの `deploy/expected-kms-principals.json` は雛形のまま、実値は手元の git 管理外のファイル（`tmp/tee_spike/`）に置き、`deploy_check.sh` に `EXPECTED_KMS_PRINCIPALS_FILE` で渡す。web はこのファイルを実行時に読まないので動作は変わらない。失うのは、第三者がリポジトリだけで期待集合の全体を確かめられること（オーナーの部分）。design.md の文面は v22（I-35）。

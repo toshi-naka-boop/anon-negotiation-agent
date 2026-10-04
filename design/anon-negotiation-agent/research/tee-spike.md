@@ -807,7 +807,7 @@ gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(
 gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
 ```
 
-プロジェクトのオーナーの主体を一覧する（読み取りだけ。P-20 の正本 `deploy/expected-kms-principals.json` の `owners` に書く値。`user:` の後ろのメールを写す）。
+プロジェクトのオーナーの主体を一覧する（読み取りだけ。P-20 の実値のファイル（手元の `tmp/tee_spike/expected-kms-principals.json`。git 管理外。公開の雛形 `deploy/expected-kms-principals.json` には書かない）の `owners` に書く値。`user:` の後ろのメールを写し、`deploy_check.sh` には `EXPECTED_KMS_PRINCIPALS_FILE` でその場所を渡す）。
 
 ```
 gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --filter="bindings.role:roles/owner" --format="value(bindings.members)"

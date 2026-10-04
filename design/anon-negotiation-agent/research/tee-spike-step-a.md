@@ -252,7 +252,7 @@ gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(
 
 ## A-10（追加）オーナーの一覧（P-20 の正本に書く値）
 
-プロジェクトのオーナーの主体を一覧します（読み取りだけ。`user:` の後ろのメールを `deploy/expected-kms-principals.json` の `owners` に写します。この出力は貼ってください）。
+プロジェクトのオーナーの主体を一覧します（読み取りだけ。`user:` の後ろのメールを、手元の `tmp/tee_spike/expected-kms-principals.json` の `owners` に写します。公開の雛形には書きません（P-20 の判断 (b)）。この出力は貼ってください）。
 
 ```bash
 gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --filter="bindings.role:roles/owner" --format="value(bindings.members)"
@@ -279,5 +279,8 @@ gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --fi
 - A-7: キーリングと鍵の作成は出力なしで終わった（成功時は無出力）。`gcloud kms keys list` で確かめる。
 - A-8: プールとプロバイダを作成（テスト用の条件）。
 - A-9: 自分のユーザーに試験用の権限 3 つを付けた（手順 F で外す）。
-- A-10: オーナーは 1 件。個人の gmail で、git の作者（GitHub の noreply）とは別のアドレス。P-20 の「すでに公開されている」という前提が成り立たないので、公開リポジトリに載せるかはユーザーに確認中。値は `tmp/tee_spike/expected-kms-principals.json`（gitignore 済み）に置いた。`deploy_check` は `EXPECTED_KMS_PRINCIPALS_FILE` でこのファイルを指せる。
-- A-11: 予算アラート（アラートのみ、20,000 円）は作成済み。KMS の Data Access 監査ログは未確認。
+- A-10: オーナーは 1 件。個人の gmail で、git の作者（GitHub の noreply）とは別のアドレス。P-20 の「すでに公開されている」という前提が成り立たないため確認し、ユーザーの判断は (b)（2026-10-04）: 公開は雛形のまま、実値は手元の `tmp/tee_spike/expected-kms-principals.json`（gitignore 済み）に置き、`deploy_check` には `EXPECTED_KMS_PRINCIPALS_FILE` で渡す。
+- A-11: 予算アラート（アラートのみ、20,000 円）と KMS の Data Access 監査ログは設定済み（ユーザーの申告）。
+- 残りの 2 ブロック（`run-egress-subnet`、`kms keys list`）: 作成済み。鍵は版 1 が primary・ENABLED。
+- 手順 B（2026-10-04 08:15 UTC）: Cloud Build SUCCESS（54 秒）。digest `sha256:1fc217043c8a1c06aac8829038f11197a7df2513c9408a3bf52af4a23a6c7d01`（元のコミット ca5791a）。鍵の権限を digest の principalSet に付けた。許可表 `deploy/vault-releases.json` に記録（別コミット）。
+- 手順 C: debug イメージの VM `vault-tee` を作成（RUNNING、10.10.0.10、SEV）。以降の確認は進行中。

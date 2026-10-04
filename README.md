@@ -71,7 +71,7 @@ uv run python scripts/verify_attestation.py --web https://<web の URL> --projec
 本番の条件で、イメージのダイジェストが `deploy/vault-releases.json` の `active` な要素にあります。`--web` は、金庫の TLS 証明書を観測できないので、証明書との結び付きは確かめません(出力にもそう書きます)。
 
 - `deploy/vault-releases.json`: 金庫のイメージのダイジェストと、元のコミットの対応表(運営者の記録)。失効したものは `revoked` です。
-- `deploy/expected-kms-principals.json`: KEK を使えるはずの主体の正本(承認済みのオーナーと、`active` なダイジェストの principalSet の形)。
+- `deploy/expected-kms-principals.json`: KEK を使えるはずの主体の正本(承認済みのオーナーと、`active` なダイジェストの principalSet の形)。公開リポジトリには雛形(`<…>` のまま)だけを置き、実値(オーナーのメールとプロジェクト番号)は手元の git 管理外のファイルに書いて、`scripts/deploy_check.sh` には環境変数 `EXPECTED_KMS_PRINCIPALS_FILE` でその場所を渡す(台帳 P-20 の判断、2026-10-04)。
   運営者が `scripts/deploy_check.sh` で、Cloud Asset の Policy Analyzer の列挙と完全一致で照合します。第三者は、中身を読めますが、IAM との一致は運営者の確認です。
   - 埋め方: `owners` にオーナーのメールを書き、`<PROJECT_NUMBER>` をプロジェクト番号に置き換えます。`{digest}` はそのまま残します(スクリプトが `active` なダイジェストごとに展開します)。
     現在の IAM から自動では作りません(手で書く正本)。リポジトリは公開なので、載せるメールは、公開してよいものにします。

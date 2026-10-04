@@ -9,13 +9,15 @@
   "requiredApprovalFingerprint": "v21:f5311c47203f",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
-  "openIssueIds": [],
+  "openIssueIds": [
+    "I-35"
+  ],
   "requiredReads": [
     "design.md",
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v21 承認済み（2026-10-04）。TEE 手順 A はほぼ完了（記録: research/tee-spike-step-a.md §5）。残り: run-egress-subnet の作成、KMS の鍵の確認、KMS の監査ログ（コンソール）。ユーザー確認中: P-20 の前提が崩れた（オーナーは個人の gmail で git の作者と別）→ (a) 公開ファイルに載せる / (b) 公開は雛形のまま、実値は tmp/tee_spike/expected-kms-principals.json を EXPECTED_KMS_PRINCIPALS_FILE で指す（推奨 b）。次: 手順 B（Cloud Build でイメージ）→ C〜G。web 用の Firestore (default) が無い（デプロイ前に作る。手順書に足す）。並行: serve_local --live の画面確認、デモ動画、信頼境界図・説明文・Zenn、deploy_check。小さな積み残しは I-34。",
+  "nextAction": "v21 承認済み。TEE スパイク進行中（記録: research/tee-spike-step-a.md §5）。A 完了、B 完了（digest sha256:1fc217…、許可表に記録）、C は VM 作成済み（debug、RUNNING）→ シリアル・launcher のログ・IAP トンネル・verify_attestation --allow-debug・curl 4 本。P-20 は (b) で確定（README・手順書は反映済み。design.md は v22 で。I-35）。次: D（本番の条件・版の切り替え・本番イメージ）、E（Cloud Run から VPC 経由。(default) の作成も）、F、G。並行: serve_local --live の画面確認、デモ動画、信頼境界図・説明文・Zenn、deploy_check（EXPECTED_KMS_PRINCIPALS_FILE=tmp/tee_spike/expected-kms-principals.json）。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
