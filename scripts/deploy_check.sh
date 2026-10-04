@@ -1415,7 +1415,7 @@ check_healthz_agents() {
   local token=""
   token="$(identity_token "$AGENTS_URL")" || token=""
   if [ -z "$token" ]; then
-    emit NG healthz-agents "agents 用の ID トークンを取れない(web の SA $WEB_SA を impersonate できない。roles/iam.serviceAccountOpenIdTokenCreator が要る: $(first_line "$WORK/idtoken.err"))"
+    emit NG healthz-agents "agents 用の ID トークンを取れない(web の SA $WEB_SA を impersonate できない。gcloud のなりすましは先にアクセストークンを取るので roles/iam.serviceAccountTokenCreator が要る〔OpenIdTokenCreator では足りない。実測 2026-10-04〕。確認が済んだら外す: $(first_line "$WORK/idtoken.err"))"
     return 0
   fi
   fetch_http healthz-agents "${AGENTS_URL}${HEALTH_PATH}" "$token"
