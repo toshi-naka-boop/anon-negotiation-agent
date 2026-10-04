@@ -232,19 +232,13 @@ gcloud iam workload-identity-pools providers create-oidc attestation-verifier --
 
 ## A-9 試験用の権限（自分のユーザーに。手順 F で外す）
 
-web の SA の ID トークンを自分で作れるようにします（点 4「金庫が呼び出し元を確かめる」の手元の試験に使います）。
+web の SA になりすます権限を付けます（点 4「金庫が呼び出し元を確かめる」の手元の試験に使います。gcloud のなりすましは先にアクセストークンを取るので、ID トークンだけの権限（OpenIdTokenCreator）では足りません。2026-10-04 の実行で分かったので直しました）。
 
 ```bash
-gcloud iam service-accounts add-iam-policy-binding "$WEB_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountOpenIdTokenCreator
+gcloud iam service-accounts add-iam-policy-binding "$WEB_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
 ```
 
-金庫の SA の ID トークンも作れるようにします（「web 以外の SA は 403」の試験に使います）。
-
-```bash
-gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountOpenIdTokenCreator
-```
-
-金庫の SA になりすます権限を付けます（負の試験 3「オーナーでない主体は鍵を取れない」に使います。これも手順 F で外します）。
+金庫の SA になりすます権限を付けます（「web 以外の SA は 403」の試験と、負の試験 3「オーナーでない主体は鍵を取れない」に使います。手順 F で外します）。
 
 ```bash
 gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
@@ -283,4 +277,4 @@ gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --fi
 - A-11: 予算アラート（アラートのみ、20,000 円）と KMS の Data Access 監査ログは設定済み（ユーザーの申告）。
 - 残りの 2 ブロック（`run-egress-subnet`、`kms keys list`）: 作成済み。鍵は版 1 が primary・ENABLED。
 - 手順 B（2026-10-04 08:15 UTC）: Cloud Build SUCCESS（54 秒）。digest `sha256:1fc217043c8a1c06aac8829038f11197a7df2513c9408a3bf52af4a23a6c7d01`（元のコミット ca5791a）。鍵の権限を digest の principalSet に付けた。許可表 `deploy/vault-releases.json` に記録（別コミット）。
-- 手順 C: debug イメージの VM `vault-tee` を作成（RUNNING、10.10.0.10、SEV）。以降の確認は進行中。
+- 手順 C: debug イメージの VM `vault-tee` を作成（RUNNING、10.10.0.10、SEV）。`verify_attestation.py --allow-debug` は OK（image_digest がビルドと一致、hwmodel GCP_AMD_SEV、swname CONFIDENTIAL_SPACE、dbgstat enabled、project_id・SA が期待どおり、certificate_sha256 が eat_nonce と一致）。呼び出し元の検証は 401・401・(保留)・403。3 本目は、gcloud のなりすましに `roles/iam.serviceAccountTokenCreator` が要る（OpenIdTokenCreator では `iam.serviceAccounts.getAccessToken` が拒否される）ことが原因で、権限を足して再試験。

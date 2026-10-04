@@ -789,19 +789,13 @@ gcloud iam workload-identity-pools providers create-oidc attestation-verifier --
 
 （テスト用の条件にも、プロジェクトと金庫の SA を入れる。debug の間も、別のプロジェクトや別の SA で動かした同じイメージには鍵が出ないように。批評 C-56）
 
-自分のユーザーに、web の SA の ID トークンを作る権限を付ける（点 4 の手元の試験用）。
+自分のユーザーに、web の SA を impersonate する権限を付ける（点 4 の手元の試験用。`gcloud auth print-identity-token --impersonate-service-account` は先にアクセストークンを取る（`iam.serviceAccounts.getAccessToken`）ので、`roles/iam.serviceAccountOpenIdTokenCreator` では足りず `roles/iam.serviceAccountTokenCreator` が要る。実測 2026-10-04。検証が終わったら F で外す）。
 
 ```
-gcloud iam service-accounts add-iam-policy-binding "$WEB_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountOpenIdTokenCreator
+gcloud iam service-accounts add-iam-policy-binding "$WEB_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
 ```
 
-自分のユーザーに、金庫の SA の ID トークンを作る権限を付ける（「別の SA は 403」の試験用）。
-
-```
-gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountOpenIdTokenCreator
-```
-
-負の試験 3（オーナーでない主体は 403）のために、自分のユーザーに金庫の SA を impersonate する権限を付ける（アクセストークンの作成。検証が終わったら F で外す）。
+自分のユーザーに、金庫の SA を impersonate する権限を付ける（「別の SA は 403」の試験と、負の試験 3（オーナーでない主体は KMS で 403）に使う。検証が終わったら F で外す）。
 
 ```
 gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
@@ -1060,10 +1054,24 @@ gcloud compute instances stop vault-tee --zone="$ZONE"
 gcloud compute instances start vault-tee --zone="$ZONE"
 ```
 
-検証が終わったら、負の試験 3 のために付けた impersonate の権限を外す（手順 A で付けたもの）。
+検証が終わったら、手順 A で自分のユーザーに付けた impersonate の権限を外す（web の SA と金庫の SA の両方）。
+
+```
+gcloud iam service-accounts remove-iam-policy-binding "$WEB_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
+```
 
 ```
 gcloud iam service-accounts remove-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
+```
+
+（2026-10-04 の実行では、先に `roles/iam.serviceAccountOpenIdTokenCreator` も両方の SA に付けた。これも外す。）
+
+```
+gcloud iam service-accounts remove-iam-policy-binding "$WEB_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountOpenIdTokenCreator
+```
+
+```
+gcloud iam service-accounts remove-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountOpenIdTokenCreator
 ```
 
 検証が終わったら、IAP のファイアウォール規則を消す（金庫に手元から届く経路を閉じる）。

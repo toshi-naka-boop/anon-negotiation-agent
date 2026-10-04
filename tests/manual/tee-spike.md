@@ -418,6 +418,8 @@ gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name=
 
 共通の前提のトンネルを張った状態で、別のターミナルで、次の 4 本の `curl` を実行する(どれも研究報告 C のコマンド)。
 
+前提: 自分のユーザーに、web の SA と金庫の SA の `roles/iam.serviceAccountTokenCreator`(研究報告の手順 A)。`gcloud auth print-identity-token --impersonate-service-account` は先にアクセストークンを取るので、`roles/iam.serviceAccountOpenIdTokenCreator` だけでは `iam.serviceAccounts.getAccessToken` が拒否され、Bearer が空のまま 401 になる(2026-10-04 の実測)。
+
 トークンなしの呼び出しが 401 になることを確かめる。
 
 ```
