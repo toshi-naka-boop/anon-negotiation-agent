@@ -1736,3 +1736,24 @@ codex は high 2・medium 3（X-70〜X-74）。design-critic は high 2・medium
 - 初回の `deploy_check` で、Policy Analyzer が `projectOwner:` やグループで返す場合は、その表記を正本に足す（M）。
 - **解決**: 確定（ユーザーの判断 2026-10-04「載せる」）。v21 §13 に書いた。値は手順 A の `gcloud projects get-iam-policy`（`roles/owner` の主体）から写す。Policy Analyzer が別の表記で返したら、その表記を正本に足す。
 - **追記（同日）**: 手順 A の出力で、オーナーは個人の gmail で、git の作者（GitHub の noreply）とは別だと分かった。「すでに公開されている」という前提が崩れたので改めて確認し、ユーザーの判断は (b): 公開リポジトリの `deploy/expected-kms-principals.json` は雛形のまま、実値は手元の git 管理外のファイル（`tmp/tee_spike/`）に置き、`deploy_check.sh` に `EXPECTED_KMS_PRINCIPALS_FILE` で渡す。web はこのファイルを実行時に読まないので動作は変わらない。失うのは、第三者がリポジトリだけで期待集合の全体を確かめられること（オーナーの部分）。design.md の文面は v22（I-35）。
+
+### I-35（実装時の気づき / 文面と手順 / low。v22 で反映する）TEE スパイクの手順 A〜B で分かったこと
+
+- design.md §13 の P-20 の文面（「そのまま載せる」）と §10 (b) の「正本」の置き場を、(b) の判断（公開は雛形、実値は手元のファイルを `EXPECTED_KMS_PRINCIPALS_FILE` で渡す）に直す。README と手順書は反映済み。
+- web 用の Firestore `(default)` がプロジェクトに無い（手順 A の一覧が空だった）。手順 E かデプロイの前に作る手順（`gcloud firestore databases create --database='(default)' …`）を手順書と §10 に足す。TTL ポリシーの設定もそのとき。
+- 手順書の手順 A に、オーナーの一覧（`get-iam-policy`）を足した（P-20 の値）。手順 A の実施記録は `research/tee-spike-step-a.md` §5。
+- 手順 B: `_COMMIT` はビルド時の HEAD（ca5791a）。許可表の記録はビルドの後に別コミット（手順書どおり）。
+- 手順 D: VM の再起動に `reset` を使うと vTPM の DA ロックアウトのカウンタが増える（launcher の警告。8/32 まで使った）。手順書・手動確認を停止→開始に直した。本番イメージの `OnFailure` は、失敗の 2 分後の VM 再起動として現れる（コンテナの再起動ではない）。`tee.launch_policy.monitoring_memory_allow` は非推奨（次のイメージで `hardened_monitoring`/`debug_monitoring` に）。§9 の「失効したイメージが動き続けうる上限」などには影響しない。
+- 手順 C（点 4）: `gcloud auth print-identity-token --impersonate-service-account` には `roles/iam.serviceAccountTokenCreator` が要る（OpenIdTokenCreator だけでは `getAccessToken` が拒否される）。手順 A・F と案内・手動確認の文面を直した。設計には影響なし（本番の web は Cloud Run のメタデータサーバから自分の ID トークンを取るので、この権限は手元の試験だけの話）。
+- **解決**: v22 に反映（§10 の `(default)`、§13 の P-20 (b)）。README・手順書・案内は 2026-10-04 に反映済み。
+
+### I-36（実装時の気づき / 実測 / medium。v22 に反映）TEE スパイク 2 日目（2026-10-04〜05。Claude が端末にコマンドを送る方式 B）で分かったこと
+
+- 組織: `gcloud projects get-ancestors` はプロジェクトだけを返した。P-13 の答え「組織の配下」は実際と違う。Policy Analyzer は `--project` の範囲（deploy_check は祖先を見て整合する）。拒否ポリシー（手順 G）は、`roles/iam.denyAdmin` の付与を含むため Claude の自動実行では安全確認に止まった。ユーザーが実行して、単独のプロジェクトで作れるかを確かめる。作れなければ既定（記録による抑止）のまま、(i) は NG のまま説明文に書く。
+- Policy Analyzer: WIF プールの full resource name は `INVALID_ARGUMENT`。プロジェクトを対象にすると成功するが、`roles/owner` のプール権限（`iam.workloadIdentityPools.update` 等）は数えない（`gcloud iam roles describe roles/owner` の権限一覧にも policy binding 系の 4 件しか出ないのに、オーナーはプールを作れた）。deploy_check の (b) プール管理者は、Policy Analyzer とプロジェクトの IAM の `roles/owner`・`roles/iam.workloadIdentityPoolAdmin` の束縛を合わせ、空なら NG にした（実機で OK 1 件＝オーナー）。
+- vTPM: 起動のたびに launcher が `Failed orderly startup … DA lockout counter incremented: 9 / 32` を記録（停止→開始でも増える。`reset` はさらに不正な停止）。上限 32、回復は 2 時間に 1。設計: 再起動は停止→開始だけ、回数を節約、審査期間は連続稼働。deploy_check の `--reset-vault` は stop→start に変えた。
+- OnFailure: 本番イメージでは、ワークロードが非 0 で終わると `Reboot scheduled for <2 分後>` で VM を再起動する。コンテナの再起動ではない。
+- launcher の警告: `tee.launch_policy.monitoring_memory_allow` は非推奨（`hardened_monitoring`/`debug_monitoring`）。次のイメージで直す。
+- 合格した試験: 停止→開始（`unwrapped the stored DEK` → self-test ok）、本番条件の attestation（`verify_attestation.py --direct`、dbgstat disabled-since-boot・STABLE）、負の試験 2（別 digest → `KMS encrypt (primary probe) was refused (status 403)`）、負の試験 3（なりすまし `PERMISSION_DENIED`、オーナー `INVALID_ARGUMENT`、Data Access ログ 2 件）、C-56（`non-primary key version` で起動拒否）、Cloud Run Job（4 項目）、外部 IP なし、暗号文の確認。片付け（なりすまし 4 件の取り消し、IAP 規則の削除）済み。
+- 手順の注意: `gcloud logging read --freshness` は `--order=asc` と組み合わせると窓が効かない。`timestamp>=` をフィルタに書く。
+- **解決**: v22 §9（スパイクの結果）・§10（(b)・(h)・(i)、再起動、OnFailure、ラベル、デプロイ手順書）・§13（P-13 の訂正）・AC-22。コード: deploy_check の (b)・(h)（3528371・519190d）。残り: 手順 G（ユーザー）、デプロイ（`research/deploy-runbook.md`）、次のイメージでラベル。

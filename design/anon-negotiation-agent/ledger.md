@@ -21,15 +21,6 @@
 - 残したもの（判断待ち。デプロイの前に）: IP ごとの同時に持てる面談の数の上限。デモの 2 パネルを 1 本の SSE で送る。GET の再取得への IP ごとの枠。`/start`・`begin` を「新しく作るとき」だけ数えるか（いまは呼ぶたび）。二分探索の実演が失敗・時間切れで取消を待つ短い間に見回りが本物のレフェリーを起こし得る（確率は極小。直すなら `release` を足して取消まで予約を保つ）。
 - 会場の運用: 同じ Wi-Fi は同じ IP。聴衆が同時に見る日は `sse_max_connections_per_client`・`interview_begin`・`interview_llm`・`meter` を上げる（`params.toml` の運用メモ）。
 
-### I-35（実装時の気づき / 文面と手順 / low。v22 で反映する）TEE スパイクの手順 A〜B で分かったこと
-
-- design.md §13 の P-20 の文面（「そのまま載せる」）と §10 (b) の「正本」の置き場を、(b) の判断（公開は雛形、実値は手元のファイルを `EXPECTED_KMS_PRINCIPALS_FILE` で渡す）に直す。README と手順書は反映済み。
-- web 用の Firestore `(default)` がプロジェクトに無い（手順 A の一覧が空だった）。手順 E かデプロイの前に作る手順（`gcloud firestore databases create --database='(default)' …`）を手順書と §10 に足す。TTL ポリシーの設定もそのとき。
-- 手順書の手順 A に、オーナーの一覧（`get-iam-policy`）を足した（P-20 の値）。手順 A の実施記録は `research/tee-spike-step-a.md` §5。
-- 手順 B: `_COMMIT` はビルド時の HEAD（ca5791a）。許可表の記録はビルドの後に別コミット（手順書どおり）。
-- 手順 D: VM の再起動に `reset` を使うと vTPM の DA ロックアウトのカウンタが増える（launcher の警告。8/32 まで使った）。手順書・手動確認を停止→開始に直した。本番イメージの `OnFailure` は、失敗の 2 分後の VM 再起動として現れる（コンテナの再起動ではない）。`tee.launch_policy.monitoring_memory_allow` は非推奨（次のイメージで `hardened_monitoring`/`debug_monitoring` に）。§9 の「失効したイメージが動き続けうる上限」などには影響しない。
-- 手順 C（点 4）: `gcloud auth print-identity-token --impersonate-service-account` には `roles/iam.serviceAccountTokenCreator` が要る（OpenIdTokenCreator だけでは `getAccessToken` が拒否される）。手順 A・F と案内・手動確認の文面を直した。設計には影響なし（本番の web は Cloud Run のメタデータサーバから自分の ID トークンを取るので、この権限は手元の試験だけの話）。
-
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |
@@ -266,3 +257,5 @@
 | L19-1〜14 | 19 巡目の low のメモ | 文面は v20 に反映。L19-7・10・12 は K4、L19-8 は L2、L19-14 は K3 で実装 |
 | I-33 | 呼び出し側の実ブラウザでの確認 | 記録（入口・デモ・攻撃・面談の開始まで） |
 | P-20 | 期待する主体の正本に、オーナーのメールを載せてよいか | 確定を改めた（ユーザー、2026-10-04 (b)）: 「git の作者として公開済み」という前提が崩れた（オーナーは個人の gmail、作者は GitHub の noreply）ので、公開は雛形のまま、実値は手元の git 管理外のファイルを `EXPECTED_KMS_PRINCIPALS_FILE` で渡す。README は反映済み。design.md §10・§13 の文面は v22 で直す（I-35） |
+| I-35 | TEE 手順 A〜B で分かったこと（P-20 (b) の文面、(default) の作成、オーナーの一覧、なりすましの権限） | v22 に反映（§10・§13）。手順書・README・案内は反映済み |
+| I-36 | TEE スパイク 2 日目の実測（組織なし、Policy Analyzer の限界、vTPM の DA カウンタ、OnFailure の形、ラベルの非推奨、拒否ポリシーは手順 G 待ち） | v22 に反映（§9・§10・§13・AC-22）。deploy_check の (b)・(h) を直した（519190d・3528371） |

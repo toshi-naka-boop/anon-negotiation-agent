@@ -303,3 +303,5 @@ gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --fi
 - 片付け（手順 F）: なりすましの権限 4 件を取り消し（両 SA のポリシーは空）。`allow-iap-to-vault` を削除（以後、金庫に届くのは Cloud Run の経路だけ）。鍵の IAM は spike の digest の principalSet 1 件だけ。
 - 拒否ポリシー（手順 G）: `roles/iam.denyAdmin` の付与を含むコマンドは、Claude Code の自動実行の安全確認に止められた。ユーザーが朝に `tee-spike-day2.md` §5 を実行する。なお、組織が無いので作れない可能性がある（そのときは設計の既定「監査ログによる記録」のまま。deploy_check (i) は NG のまま運用で説明するか、組織なしのときは SKIP にする変更が要る）。
 - `deploy_check.sh --only tee-*`（14:0x UTC。ORG_ID なし、EXPECTED_KMS_PRINCIPALS_FILE は手元の実値、WEB_URL/AGENTS_URL は仮）: OK 7・NG 3。OK: (a) プロバイダ完全一致、(b) KEK を使える主体 = オーナー 1＋principalSet 1 で期待集合と一致・fullyExplored・範囲「プロジェクトのみ（組織の配下ではない）」、(c) 両 SA は現れない、(d) primary 2・版 1 は DISABLED、(f) IAP 規則なし、(g) Data Access 有効・除外なし・新しい版の後の Encrypt/Decrypt は本番 VM の subject だけ、(h) `_tee/dek.kek_version` = 版 2。NG: tee-b-pool は `gcloud asset analyze-iam-policy` が WIF プールの full resource name を `INVALID_ARGUMENT` で拒む（スクリプトの想定違い。プロジェクトを対象に解析する形へ直す）、tee-e は web が未デプロイ（`run services describe web` が無い）、tee-i は拒否ポリシー未作成（手順 G 待ち）。
+- deploy_check の (b) プール管理者を直して再実行: OK（主体 1 件＝オーナー。Policy Analyzer 0・プロジェクトの IAM 1）。
+- 00:3x JST（10/05）: 金庫の VM を停止（夜間）。
