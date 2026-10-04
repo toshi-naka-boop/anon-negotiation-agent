@@ -819,13 +819,34 @@ def check_tee_b():
     )
 
 
+# プール・プロバイダを変えられる役割。Policy Analyzer は基本ロール(roles/owner)にこの権限を数えない(実測 2026-10-04: オーナーがプールを
+# 作れたのに、owner の権限一覧にも解析結果にも iam.workloadIdentityPools.update 等が出ない)ので、プロジェクトの IAM の束縛からも拾う。
+POOL_ADMIN_ROLES = ("roles/owner", "roles/iam.workloadIdentityPoolAdmin")
+
+
 def check_tee_b_pool():
     owners, _ = expected_principals()
-    actual = analysis_identities("pool-analysis")
+    analyzed = set(analysis_identities("pool-analysis"))
+    policy = data("project-iam")
+    if not isinstance(policy, dict):
+        ng("プロジェクトの IAM ポリシーを読めない(gcloud projects get-iam-policy の出力が JSON でない)")
+    direct = set()
+    for binding in policy.get("bindings") or []:
+        if binding.get("role") in POOL_ADMIN_ROLES:
+            direct.update(binding.get("members") or [])  # 条件つきの束縛も数に入れる(条件の中身は見ない。広く取る側に倒す)
+    actual = analyzed | direct
+    if not actual:
+        ng(
+            "プール・プロバイダを変えられる主体が 1 件も見つからない(オーナーは必ず含まれるはず。空の結果を合格にしない)",
+            "Policy Analyzer の結果 0 件、プロジェクトの IAM に roles/owner・roles/iam.workloadIdentityPoolAdmin の束縛なし",
+        )
     extra = sorted(identity for identity in actual if norm(identity) not in owners)
     if extra:
         ng("プール・プロバイダを変えられる主体に、承認済みのオーナー以外がいる(C-62)", *["想定外: %s" % identity for identity in extra])
-    ok("プール・プロバイダを変えられる主体は %d 件で、承認済みのオーナーだけ。解析は完了。範囲: %s" % (len(actual), analysis_scope()))
+    ok(
+        "プール・プロバイダを変えられる主体は %d 件(Policy Analyzer %d・プロジェクトの IAM の owner/pool admin %d)で、承認済みのオーナーだけ。解析は完了。範囲: %s"
+        % (len(actual), len(analyzed), len(direct), analysis_scope())
+    )
 
 
 def check_tee_c():
@@ -1448,6 +1469,7 @@ check_tee_b_pool() {
   # プロジェクトを対象に「プール・プロバイダを変えられる権限」を持つ主体を列挙する(プールの IAM は、プロジェクト〔と上位〕の束縛で決まる)。
   analyze pool-analysis "//cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" \
     iam.workloadIdentityPoolProviders.create,iam.workloadIdentityPoolProviders.update,iam.workloadIdentityPoolProviders.delete,iam.workloadIdentityPools.update
+  fetch project-iam "gcloud projects get-iam-policy" "$GCLOUD" projects get-iam-policy "$PROJECT_ID" --format json
   py_check tee-b-pool
 }
 

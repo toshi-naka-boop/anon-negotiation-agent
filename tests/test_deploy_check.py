@@ -941,6 +941,10 @@ TEE_NG_CASES = [
     ("tee-c", lambda w: w.update(ancestors=IN_ORGANIZATION), "ORG_ID=987654321 を設定"),
     ("tee-b-pool", lambda w: w.update(pool_analysis=analysis_json([f"user:{OWNER}", "user:evil@example.com"])), "evil@example.com"),
     ("tee-b-pool", lambda w: w.update(pool_analysis=analysis_json([f"user:{OWNER}"], fully_explored=False)), "未完了"),
+    # Policy Analyzer は基本ロールのプール権限を数えない(実測)ので、プロジェクトの IAM の owner・pool admin の束縛も見る
+    ("tee-b-pool", lambda w: (w.update(pool_analysis=analysis_json([])), w["project_iam"]["bindings"].append({"role": "roles/owner", "members": ["user:evil@example.com"]})), "evil@example.com"),
+    ("tee-b-pool", lambda w: (w.update(pool_analysis=analysis_json([])), w["project_iam"]["bindings"].append({"role": "roles/iam.workloadIdentityPoolAdmin", "members": ["serviceAccount:ci@example.iam.gserviceaccount.com"]})), "ci@example.iam.gserviceaccount.com"),
+    ("tee-b-pool", lambda w: w.update(pool_analysis=analysis_json([])), "1 件も見つからない"),
     ("tee-c", lambda w: w.update(kms_analysis=analysis_json([f"user:{OWNER}", f"serviceAccount:{VAULT_SA}"])), VAULT_SA),
     ("tee-c", lambda w: w.update(kms_analysis=analysis_json([f"user:{OWNER}", f"serviceAccount:{WEB_SA}"])), WEB_SA),
     ("tee-d", lambda w: w["versions"][0].update(state="ENABLED"), "無効化されていない版"),
@@ -976,6 +980,19 @@ def test_breaking_one_tee_setting_makes_the_item_ng(repo, item, change, fragment
     assert result.status(item) == "NG", result.stdout
     assert fragment in result.text(item), result.stdout
     assert result.code == 1
+
+
+def test_pool_admins_are_taken_from_the_project_iam_when_the_analyzer_returns_nothing(repo):
+    # 実測(2026-10-04): roles/owner のプール権限は Policy Analyzer に出ない。プロジェクトの IAM の owner の束縛で補う
+    def change(w):
+        w.update(pool_analysis=analysis_json([]))
+        w["project_iam"]["bindings"].append({"role": "roles/owner", "members": [f"user:{OWNER}"]})
+
+    result = run_script(repo, mutated("tee", change), "--only", "tee-b-pool")
+
+    assert result.status("tee-b-pool") == "OK", result.stdout
+    assert "Policy Analyzer 0" in result.text("tee-b-pool") and "owner/pool admin 1" in result.text("tee-b-pool")
+    assert any("projects get-iam-policy" in call for call in result.commands)
 
 
 def test_policy_analyzer_uses_the_organization_when_org_id_is_given_and_the_project_otherwise(repo):
