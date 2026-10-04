@@ -1239,7 +1239,10 @@ dependencies = [
     { name = "google-cloud-firestore" },
     { name = "httpx" },
     { name = "itsdangerous" },
+    { name = "opentelemetry-sdk" },
     { name = "pydantic" },
+    { name = "sse-starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -1257,7 +1260,10 @@ requires-dist = [
     { name = "google-cloud-firestore", specifier = ">=2.32.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.42.1" },
     { name = "pydantic", specifier = ">=2.13.5" },
+    { name = "sse-starlette", specifier = ">=3.5.0" },
+    { name = "uvicorn", specifier = ">=0.54.0" },
 ]
 
 [package.metadata.requires-dev]

@@ -11,7 +11,10 @@ dependencies = [
     "google-cloud-firestore>=2.32.0",
     "httpx>=0.28.1",
     "itsdangerous>=2.2.0",
+    "opentelemetry-sdk>=1.42.1",
     "pydantic>=2.13.5",
+    "sse-starlette>=3.5.0",
+    "uvicorn>=0.54.0",
 ]
 
 [tool.uv]
