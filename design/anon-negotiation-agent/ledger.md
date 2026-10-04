@@ -27,6 +27,7 @@
 - web 用の Firestore `(default)` がプロジェクトに無い（手順 A の一覧が空だった）。手順 E かデプロイの前に作る手順（`gcloud firestore databases create --database='(default)' …`）を手順書と §10 に足す。TTL ポリシーの設定もそのとき。
 - 手順書の手順 A に、オーナーの一覧（`get-iam-policy`）を足した（P-20 の値）。手順 A の実施記録は `research/tee-spike-step-a.md` §5。
 - 手順 B: `_COMMIT` はビルド時の HEAD（ca5791a）。許可表の記録はビルドの後に別コミット（手順書どおり）。
+- 手順 D: VM の再起動に `reset` を使うと vTPM の DA ロックアウトのカウンタが増える（launcher の警告。8/32 まで使った）。手順書・手動確認を停止→開始に直した。本番イメージの `OnFailure` は、失敗の 2 分後の VM 再起動として現れる（コンテナの再起動ではない）。`tee.launch_policy.monitoring_memory_allow` は非推奨（次のイメージで `hardened_monitoring`/`debug_monitoring` に）。§9 の「失効したイメージが動き続けうる上限」などには影響しない。
 - 手順 C（点 4）: `gcloud auth print-identity-token --impersonate-service-account` には `roles/iam.serviceAccountTokenCreator` が要る（OpenIdTokenCreator だけでは `getAccessToken` が拒否される）。手順 A・F と案内・手動確認の文面を直した。設計には影響なし（本番の web は Cloud Run のメタデータサーバから自分の ID トークンを取るので、この権限は手元の試験だけの話）。
 
 ## 解決済み（一行索引）

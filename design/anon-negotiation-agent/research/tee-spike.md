@@ -908,6 +908,10 @@ TDX にする場合の差分（C の VM 作成コマンドの、この部分だ�
 
 ### D. 本番の条件・本番イメージに切り替える
 
+**再起動は `stop` → `start` で行う（`reset` は使わない）**: 実測（2026-10-04）で、`gcloud compute instances reset` のたびに launcher が `Failed orderly startup. Avoid using instance reset. Instead, use instance stop/start. DA lockout counter incremented: LockoutCounter: 8 / MaxAuthFail: 32` と記録した。vTPM の辞書攻撃対策のカウンタが不正な停止ごとに増え、上限（32）に達すると TPM がロックされ attestation が止まる（回復は 2 時間で 1 つ減る）。以下の「再起動」はすべて停止→開始。
+
+**OnFailure の実際の形**: 本番イメージでは、ワークロードが非 0 で終わると launcher が `Reboot scheduled for <2 分後>` を記録して VM を再起動する（コンテナだけの再起動ではない）。つまり失敗の繰り返しは「約 3 分ごとの VM の再起動」として現れる。
+
 順序が大事（批評 X-70・C-56）: 鍵の新しい版を primary にして古い版を無効化し、debug の間の DEK を消してから、本番の VM を初めて起動する。本番の金庫の最初の DEK が新しい版で包まれ、起動後に版を回す必要がなくなる（金庫は、`_tee/dek` を包んだ鍵の版が primary でなければ起動しない。契約 §16）。
 
 プロバイダの条件を、本番用（STABLE・dbgstat・hwmodel・プロジェクト・SA を要求）に更新する。
@@ -979,7 +983,11 @@ gcloud logging read "logName=\"projects/${PROJECT_ID}/logs/confidential-space-la
 VM を再起動して、既存の暗号文（`_tee/selftest`）が同じ DEK で開くことを確かめる（ログに `sealing self-test ok`。契約 §16 の自己試験）。
 
 ```
-gcloud compute instances reset vault-tee --zone="$ZONE"
+gcloud compute instances stop vault-tee --zone="$ZONE"
+```
+
+```
+gcloud compute instances start vault-tee --zone="$ZONE"
 ```
 
 負の試験（C-56）: 控えておいた古い `_tee/dek` を書き戻して VM を再起動すると、金庫は起動せずに `non-primary key version` のログを残す。
@@ -989,7 +997,11 @@ curl -sS -X PATCH -H "Authorization: Bearer $(gcloud auth print-access-token)" -
 ```
 
 ```
-gcloud compute instances reset vault-tee --zone="$ZONE"
+gcloud compute instances stop vault-tee --zone="$ZONE"
+```
+
+```
+gcloud compute instances start vault-tee --zone="$ZONE"
 ```
 
 確かめたら、もう一度 DEK を消して再起動する（新しい版で作り直される）。
@@ -999,7 +1011,11 @@ uv run python scripts/tee_reset_dek.py --yes
 ```
 
 ```
-gcloud compute instances reset vault-tee --zone="$ZONE"
+gcloud compute instances stop vault-tee --zone="$ZONE"
+```
+
+```
+gcloud compute instances start vault-tee --zone="$ZONE"
 ```
 
 ### E. Cloud Run から VPC 経由でつなぐ（Direct VPC egress）
@@ -1153,7 +1169,11 @@ gcloud kms decrypt --location="$REGION" --keyring=vault-tee --key=vault-kek --ci
 本番の金庫を再起動して、金庫（プールのワークロード）はこれまでどおり起動できることを確かめる（launcher のログに `sealing self-test ok`）。
 
 ```
-gcloud compute instances reset vault-tee --zone="$ZONE"
+gcloud compute instances stop vault-tee --zone="$ZONE"
+```
+
+```
+gcloud compute instances start vault-tee --zone="$ZONE"
 ```
 
 注意: 拒否ポリシーが効いている間は、オーナーも `scripts/tee_reset_dek.py` の後に金庫を再起動するだけで DEK を作り直せる（作り直しは金庫が行う）。手元から KEK を使う作業（ない前提）は、拒否ポリシーを一度外す必要があり、その変更は Admin Activity の監査ログに残る。デプロイの確認（設計書 §10）には「拒否ポリシー `vault-kek-deny` があり、本文が上と一致する」を足す。Policy Analyzer の範囲は `--organization="$ORG_ID"` にする。

@@ -17,7 +17,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v21 承認済み。TEE スパイク進行中（記録: research/tee-spike-step-a.md §5）。A〜E 完了（D: 本番条件で self-test ok、既存暗号文が開く、C-56 の拒否を確認。E: tee-probe 合格、外部 IP なし）。残り: 復帰の起動の self-test の確認、OnFailure の再起動の観察（13:13Z 以降をフィルタなしで）、負の試験 3（impersonate で PERMISSION_DENIED、オーナーは INVALID_ARGUMENT、監査ログ）、Firestore REST で暗号文の確認、負の試験 2（別 digest→KMS 403）、F（停止→開始、OnFailure、権限の取り消し、IAP 規則の削除）、G（拒否ポリシー）。その後: web・agents のデプロイ（E の最後の services update）、点 6（画面）、deploy_check（EXPECTED_KMS_PRINCIPALS_FILE）。P-20 は (b)（design.md は v22。I-35）。",
+  "nextAction": "v21 承認済み。TEE スパイク: A〜E 合格、負の試験 1・3・C-56 合格、暗号文の確認済み（記録: research/tee-spike-step-a.md §5）。VM は停止中（2026-10-04 夜）。注意: 以後 `reset` は使わない（vTPM DA カウンタ 8/32）。残り: 負の試験 2（別 digest → KMS 403）、F（停止→開始で self-test、OnFailure（権限を外して停止→開始→約 3 分ごとの失敗→戻して復帰）、impersonate 権限 4 件の取り消し、IAP 規則の削除）、G（拒否ポリシー。組織の権限が要る）。その後: web・agents のデプロイ（E の最後の services update、(default) は作成済み）、点 6（画面）、deploy_check（EXPECTED_KMS_PRINCIPALS_FILE）。design.md は v22 で I-35 を反映。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",

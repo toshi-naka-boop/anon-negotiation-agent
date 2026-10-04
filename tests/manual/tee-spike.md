@@ -226,8 +226,8 @@ uv run pytest tests/test_tee_key_release.py tests/test_tee_sealing.py -q
 5. KEK の新しい版を作って primary にし、`versions list` で古い版の番号(`ENABLED` で primary でないもの)を確かめ、古い版を無効化する。
 6. `uv run python scripts/tee_reset_dek.py --yes`(手元の ADC。無ければ先に `gcloud auth application-default login`)。接続先の表示が本物の Firestore とこのプロジェクトであること。`_tee/dek` と `_tee/selftest` の 2 件を消したと出ること。
 7. 本番イメージの VM を作る。launcher のログに `sealing self-test ok` が出ること(これが合格の最初の項目)。`@sha256` の参照が通らなければ、`tee-image-reference` をタグ参照に戻して作り直す。
-8. VM を再起動(`gcloud compute instances reset`)して、もう一度 `sealing self-test ok` が出ること(既存の暗号文 `_tee/selftest` が同じ DEK で開く。契約 §16)。
-9. 負の試験(C-56): 控えた古い `_tee/dek` を書き戻し(研究報告 D の `PATCH`。HTTP 200)、VM を再起動すると、launcher のログに `non-primary key version` が出て金庫が終了すること(`tee-restart-policy=OnFailure` で再起動を繰り返すので、同じ行が複数回出る)。
+8. VM を再起動(`stop` → `start`。`reset` は vTPM のロックアウトのカウンタを増やすので使わない。2026-10-04 の実測)して、もう一度 `sealing self-test ok` が出ること(既存の暗号文 `_tee/selftest` が同じ DEK で開く。契約 §16)。
+9. 負の試験(C-56): 控えた古い `_tee/dek` を書き戻し(研究報告 D の `PATCH`。HTTP 200)、VM を停止→開始すると、launcher のログに `non-primary key version` が出て金庫が終了すること(本番イメージの `OnFailure` は、失敗の 2 分後に VM の再起動を予約する形で現れる。`Reboot scheduled for …` の行。放っておくと約 3 分ごとに同じ失敗が繰り返される)。
 10. 確かめたら、`tee_reset_dek.py --yes` と再起動で、新しい版の DEK を作り直す(`sealing self-test ok`)。
 
 **負の試験 2(digest の違うイメージは、KMS に拒否される)**(研究報告に手順がないので追加)。コードを 1 行変える代わりに、`_COMMIT` を別の値でビルドする(ラベルが変わるので digest が変わる)。この digest には、鍵の権限を付けない。
