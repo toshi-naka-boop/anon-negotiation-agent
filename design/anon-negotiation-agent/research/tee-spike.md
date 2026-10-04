@@ -807,6 +807,12 @@ gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(
 gcloud iam service-accounts add-iam-policy-binding "$VAULT_SA" --member="user:$(gcloud config get-value account)" --role=roles/iam.serviceAccountTokenCreator
 ```
 
+プロジェクトのオーナーの主体を一覧する（読み取りだけ。P-20 の正本 `deploy/expected-kms-principals.json` の `owners` に書く値。`user:` の後ろのメールを写す）。
+
+```
+gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --filter="bindings.role:roles/owner" --format="value(bindings.members)"
+```
+
 Cloud KMS の Data Access 監査ログを有効にする（オーナーが復号したときに主体と時刻が残るように。批評 C-58）: コンソールの「IAM と管理」→「監査ログ」で「Cloud Key Management Service (KMS) API」を選び、「データ読み取り」「データ書き込み」にチェックを入れて保存する（コマンドは使わない。`set-iam-policy` でポリシー全体を上書きしないため）。
 
 予算アラートの引き上げ: コンソールの「お支払い」→「予算とアラート」で、閾値を想定費用（上の「費用」）に合わせて引き上げる（コマンドは使わない）。

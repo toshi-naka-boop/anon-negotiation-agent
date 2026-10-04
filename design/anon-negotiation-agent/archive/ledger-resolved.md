@@ -1728,3 +1728,10 @@ codex は high 2・medium 3（X-70〜X-74）。design-critic は high 2・medium
 - 全体のテスト: 3,498 件通過・1 件 skip（shellcheck なし）。
 
 - **解決**: X-80 は v20 の文面（allow と deny の書き分け）。X-81・X-83・X-84・L19-14 は K3。X-82・L19-8 は L2。C-65・C-66・L19-7・L19-10・L19-12 は K4（実装中）。文面の L19 は v20 に反映。
+
+### P-20（前提 / 公開 / 2026-10-04。ユーザーの確認待ち。既定は「そのまま載せる」）期待する主体の正本に、オーナーのメールを載せてよいか
+
+- `deploy/expected-kms-principals.json`（§10 (b) の正本）は公開リポジトリと web のイメージに入る。中身はプロジェクトのオーナーのメール（運営者）。
+- 推奨: そのまま載せる。オーナーのメールは git のコミットの作者としてすでに公開されている。別名（Google グループ）にすると、Policy Analyzer の列挙との照合が複雑になる。
+- 初回の `deploy_check` で、Policy Analyzer が `projectOwner:` やグループで返す場合は、その表記を正本に足す（M）。
+- **解決**: 確定（ユーザーの判断 2026-10-04「載せる」）。v21 §13 に書いた。値は手順 A の `gcloud projects get-iam-policy`（`roles/owner` の主体）から写す。Policy Analyzer が別の表記で返したら、その表記を正本に足す。

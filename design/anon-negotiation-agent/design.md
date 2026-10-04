@@ -1,10 +1,13 @@
 # anon-negotiation-agent 設計書
 
-- 版: v20（v19（承認済み。指紋 `v19:298da78d4ee4`、2026-10-03）に、③④⑤ の実装で決まった細部（台帳 I-21〜I-30）を写した。設計の意図は変えない。承認は改めて取る）
+- 版: v21（v20 に、ユーザーの判断 3 件（2026-10-04）を写した: P-20 の確定、依存 3 件の明示、Cloud Trace の exporter の見送り。設計の意図は変えない。承認は改めて取る。v20 は、v19（承認済み。指紋 `v19:298da78d4ee4`、2026-10-03）に ③④⑤ の実装で決まった細部（台帳 I-21〜I-34）を写したもの）
+- v20 からの変更（ユーザーの判断の反映。2026-10-04。設計の意図は変えない）
+  - P-20（確定）: 期待する主体の正本 `deploy/expected-kms-principals.json` に、プロジェクトのオーナーのメールをそのまま載せる（§13）
+  - 依存の明示: `sse-starlette`・`uvicorn`・`opentelemetry-sdk` を `pyproject.toml` に明示（どれも使用中。新しいライブラリではない。§10）。Cloud Trace への出力先（`opentelemetry-exporter-gcp-trace`）は見送り（足すまでスパンの出力先なし。FR-41 の項）
 - v19 からの主な変更（実装の反映。台帳 I-21〜I-30。設計の意図は変えない）
   - 実装済みの印: `PlanEnvelope` の 2 段の読み（§2.7・§4.1）、`own_move_number`、回答後の `last_check`、`max_prompt_tokens` の config 化、封印の組み込み（DV-19）、テンプレートの起動時の投入（§3.7）、面談（§5）、段階開示（§6.2）、攻撃モード・3 枚の壁・レート制限（§8.1・§8.2）、メーター（§8.3）、リプレイ（§8.4）、画面（§7・§10）
   - web の API の一覧を §3.3b に起こした。SSE と静的ファイルはセッションのミドルウェアの外（§4.1）。本人の削除で面談の途中状態も消す（§6.3）。レート制限の表に「攻撃モードの交渉の作成」「推定区間メーター」を足し、交渉の出力の上限を 3,072 に（§8.2。最悪額は約 1.25 倍）
-  - 前提 P-8〜P-19 はすべて確定（§13）。トレースの出力先（Cloud Trace の exporter）と `sse-starlette`・`uvicorn` の明示は、依存の追加の承認待ち（§10）
+  - 前提 P-8〜P-19 はすべて確定（§13）。トレースの出力先（Cloud Trace の exporter）と `sse-starlette`・`uvicorn` の明示は、v20 の時点では依存の追加の承認待ちだった（v21 で確定。§10）
 - v18 からの主な変更（批評 18 巡目 design-critic。台帳 C-62〜C-64、L18-1〜L18-7）
   - WIF の principalSet はプール単位なので、プールのプロバイダは 1 件だけとし、発行元・audience・mapping・条件を完全一致で照合する。プロバイダを足せる主体はオーナーだけで、その道の記録の読み解きは運営者に限ると書いた（C-62。§9・§10）
   - 版の切り替えの順序の先頭に「プロバイダを本番の条件に更新する」を置き、debug の条件に戻したら手順 D の全体をやり直す・live の後は戻さない、置かれた DEK の検出（監査ログの主体）を足した（C-63）
@@ -835,7 +838,7 @@ sequenceDiagram
   - API は `GET /v1/principals/{pid|me}/panels` → `worst_case`（アンカーが条件を付けている値だけを丸めたマスで。多次元のポリシーを軸ごとに射影するので組の情報は落ちる＝画面の文言で誤読させない）と `still_hidden`（7 軸。年収は隠れているマスの種類数、外した軸は値の数、ほかの離散軸は 0。値は持たない。I-27）。
   - これとは別に、デモ・攻撃の候補者側・求人側の 2 パネル（`GET /v1/demo/negotiations/{nid}/panels`。§3.2 の末尾）がある。AC-19 の「2 つのパネル」はこの 2 種類を指す（I-23）。
 - **管理画面**（FR-40）: 一時停止・再開・取消を、金庫の `control` に送る。取消の結果は「なし」になる。
-- **トレース**（FR-41）: OpenTelemetry で Cloud Trace に送る（出力先の exporter は依存の追加の承認待ち。承認まではスパンの出力先なし）。
+- **トレース**（FR-41）: OpenTelemetry で計装する（ADK が作るスパン）。Cloud Trace への出力先（`opentelemetry-exporter-gcp-trace`）は見送り（ユーザーの判断 2026-10-04。⑤ の優先度が最も低く、無くても成立する。足すまでスパンはどこにも送られない。足すときは依存の追加として改めて承認を取る）。出力先が無くても、`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false` の確認（§10）と、スパンにカナリアが出ないことの検査（`scripts/canary_scan.py`。AC-02）はそのまま行う。
   - ADK のメッセージ内容キャプチャは切る（`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`。既定値は調査事項 R-2）。
   - レフェリーは独自のスパンを出す。属性は side、手、軸名、グリッド上の値。
   - 金庫のスパンは回数と結果だけ。面談のスパンには内容を載せない。
@@ -985,7 +988,8 @@ sequenceDiagram
 | itsdangerous | セッションクッキーの署名 | BSD-3-Clause | 標準の hmac でも書ける。Starlette の SessionMiddleware が推移的に使う |
 | google-auth | ID トークンと attestation トークンの検証（`google.auth.jwt`。TEE 時。発行はメタデータサーバから httpx で） | Apache-2.0 | 自前の JWT 検証は危ない。Firestore のクライアントが推移的に使う。直接 import するので明示する（P-12） |
 | cryptography | 金庫の封印（AES-256-GCM）と TLS の自己署名の証明書（TEE 時） | Apache-2.0 または BSD-3-Clause | 標準ライブラリには AES-GCM も X.509 の生成もない。pyOpenSSL・Tink は新しい依存になる。google-auth が推移的に使う。直接 import するので明示する（P-12） |
-| sse-starlette | 画面への配信（SSE。`/v1/stream/`） | BSD-3-Clause | 自前の実装は接続の後始末が増える（ユーザーの承認、2026-09-29）。uv.lock にはあるが pyproject の明示は承認待ち（`uvicorn` も同じ） |
+| sse-starlette | 画面への配信（SSE。`/v1/stream/`） | BSD-3-Clause | 自前の実装は接続の後始末が増える（ユーザーの承認、2026-09-29）。`pyproject.toml` に明示（`uvicorn` も同じ。承認 2026-10-04） |
+| opentelemetry-sdk | スパンの検査（`scripts/canary_scan.py` と試験で、ADK が作るスパンをメモリに受けて、生の値が入っていないことを確かめる。AC-02） | Apache-2.0 | google-adk が推移的に依存する。直接 import するので明示する（P-12 の流儀。承認 2026-10-04）。Cloud Trace への exporter は見送り（FR-41 の項） |
 | httpx（開発用） | テストの HTTP クライアント | BSD-3-Clause | a2a-sdk が推移的に使う。テストでだけ直接使う |
 | pytest | テスト（開発用） | MIT | 標準の unittest でも可。記述量で pytest を選ぶ |
 
@@ -1168,6 +1172,7 @@ tenshokuagent/
   - P-12（確定、2026-10-03）: 依存の明示 → 推奨 `cryptography`・`google-auth` を `pyproject.toml` に明示（`requests` は不要）
   - P-14（確定、2026-10-03）（C-64）: 計画の寛容な読み（`checks` があれば `move`・`package` を捨てる。L16-1・X-74・X-79）は、AC-04 の「未定義の項目やグリッド外の値を含むメッセージはレフェリーでも拒否する」と両立しない。案 1（推奨）: 計画の `move`・`package` に限って AC-04 を読み替える（捨てた値はどこにも渡らないので FR-16 の目的は保てる。`checks` と、`checks` が空のときの手は従来どおり拒否）。案 2: 寛容な読みをやめ、`move` の違反も `schema_invalid` にする（`last_invalid` に生の値を写して手がかりにする。無効手を 1 つ使う）。答えが出るまで ③ の L16-1 の実装は保留
   - P-15〜P-19（確定、2026-10-03。実装の着手前に置いた前提。推奨どおり実装）: テンプレートは金庫が起動時にイメージ内のフィクスチャから投入（§3.7）／メーターの計算は Python（`negotiation_core.estimate_interval`）／攻撃の指示は `web` のメモリ／リプレイの時刻は記録する側が付ける／求人・企業の一覧はフィクスチャからの読み取り専用 API（§3.3b）
+  - P-20（確定、2026-10-04。推奨どおり）: 期待する主体の正本 `deploy/expected-kms-principals.json`（公開リポジトリと web のイメージに入る）には、プロジェクトのオーナーのメールをそのまま載せる（git のコミットの作者としてすでに公開されている。Google グループの別名にすると Policy Analyzer の列挙との照合が複雑になる）。値は手順 A の `gcloud projects get-iam-policy` の `roles/owner` の主体から写す。初回の `deploy_check` で Policy Analyzer が別の表記（`projectOwner:` やグループ）で返したら、その表記を正本に足す
   - P-13（確定、2026-10-03）（C-58）: プロジェクトが組織の配下か。配下なら、IAM の拒否ポリシーで `cloudkms.cryptoKeyVersions.useToDecrypt` をダイジェストの principalSet 以外（オーナーを含む）に拒否する案を取るか（運営者の抑止を「記録」から「拒否」に強められる。拒否ポリシーの変更も監査ログに残る）。配下でなければ既定（記録による抑止）のまま
 
 ---
