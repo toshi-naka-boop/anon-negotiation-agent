@@ -108,8 +108,10 @@ max_prompt_tokens = 20000
 # 1 回の LLM 実行の上限(秒)。レフェリーの 1 呼び出しの上限(暫定 60 秒。§4.1)より短くする。
 # 超えたら一時的なエラーとして返し、止まったままの実行を残さない。
 llm_timeout_seconds = 45
-# Agent Card に載せる、agents サービスの公開 URL。デプロイ時に差し替える(ローカル開発用の仮の値)。
-public_base_url = "http://localhost:8080"
+# Agent Card に載せる、agents サービスの公開 URL(web もこの URL で agents を呼ぶ。ID トークンの audience にもなる)。
+# Cloud Run の決定的な URL(https://<サービス名>-<プロジェクト番号>.<リージョン>.run.app。research/deploy-runbook.md)。
+# ローカルの開発用サーバ・デモ・試験は、自前の base URL(http://agents.test)を渡すので、この値を使わない。
+public_base_url = "https://agents-341888860511.asia-northeast1.run.app"
 
 [agents.cost_targets]
 # DV-15(design.md §12.2)の判定の基準。scripts/run_demo.py --judge が使う。設計書の数値は暫定で、正本はここ。
