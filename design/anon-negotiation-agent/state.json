@@ -1,11 +1,11 @@
 {
-  "currentNode": "承認CP",
-  "status": "awaiting_user",
+  "currentNode": "実装",
+  "status": "in_progress",
   "designVersion": "v21",
-  "approvedDesignVersion": null,
-  "approvedDesignSha256": null,
-  "approvedAt": null,
-  "approvalEvidence": null,
+  "approvedDesignVersion": "v21",
+  "approvedDesignSha256": "f5311c47203fbdbf80fe142392c832618d4c0c3facb734f516752813065944ba",
+  "approvedAt": "2026-10-04T07:52:20Z",
+  "approvalEvidence": "v21:f5311c47203f 承認します",
   "requiredApprovalFingerprint": "v21:f5311c47203f",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
@@ -15,7 +15,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "承認 CP（2026-10-04。全体のテスト 3,578 件通過・1 件 skip）: v21 の指紋 v21:f5311c47203f を提示。v21 は v20 にユーザーの判断 3 件（P-20 載せる・依存 3 件の明示・Cloud Trace の exporter 見送り）を写しただけ。v20 の指紋はユーザーが貼ったが承認語がなく、規律どおり承認とは記録していない。ユーザー待ち: v21 の承認（指紋＋承認語）、TEE 手順 A の結果（research/tee-spike-step-a.md の案内。クォータ・vault-db の有無・オーナーの一覧・エラーのブロック・コンソールの 2 件）。承認後: TEE スパイク（手順 B〜G はユーザー）、本物の Gemini での画面の流れ（serve_local --live）、デモ動画、信頼境界図・説明文・Zenn、デプロイ（deploy_check）。小さな積み残しは I-34。",
+  "nextAction": "v21 承認済み（2026-10-04）。TEE スパイクの手順 A を実行中（ユーザー。A-0〜A-2 済み: N2D_CPUS 16・C3_CPUS 24 で合格）。次: A-3〜A-11（research/tee-spike-step-a.md）→ 手順 B〜G（tests/manual/tee-spike.md の点 1〜6 の出力を貼ってもらう）。並行して: 本物の Gemini での画面の流れ（serve_local --live）、デモ動画、信頼境界図・説明文・Zenn、デプロイ（deploy_check）。小さな積み残しは I-34。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
