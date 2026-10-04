@@ -15,6 +15,7 @@ import asyncio
 import datetime as dt
 
 import pytest
+from test_interview_api import Flow, ScriptedLlm
 from vault_helpers import sample_package
 from web.locks import PrincipalLocks
 from web.referee import NegotiationContext, Referee, RefereeDeps, StepOutcome
@@ -24,7 +25,6 @@ from web_app_helpers import (
     GatedVault,
     build_web_env,
     documents_mentioning,
-    interview_body,
     lock_users,
     wait_until,
 )
@@ -112,13 +112,17 @@ async def test_deletion_waits_for_an_in_flight_interview_submit_and_leaves_no_da
     store, clock, vault_client, default_db, session_key
 ):
     # I-4: 同じ依頼者の操作(面談の送信。金庫への PUT policy の途中)がある間に削除が求められても、削除はその
-    # 操作の終わりを待ち、削除の後に金庫にも (default) にもデータが残らない。
+    # 操作の終わりを待ち、削除の後に金庫にも (default) にもデータが残らない。送信は、面談の API の /submit(本番の経路。台帳 X-81)。
     gated = GatedVault(vault_client, gated=("put_policy",))
     env = build_web_env(store=store, clock=clock, vault=gated, default_db=default_db, session_key=session_key)
     try:
+        env.services.interview.agent.use_model(ScriptedLlm().stub)
         browser = env.browser()
         pid = await browser.open_start_page()
-        submit = asyncio.create_task(browser.post(f"/v1/principals/{pid}/interview", interview_body()))
+        flow = Flow(env, browser, pid)
+        await flow.until_ready()  # 面談を、確認と「最悪ここまで」の承認まで進める(ここまでは、金庫を呼ばない)
+        assert gated.events == []
+        submit = asyncio.create_task(flow.post("submit"))
         await asyncio.wait_for(gated.entered.wait(), 10)  # 面談の送信が、金庫への書き込みの途中で止まった
         assert not store._principal_ref(pid).get().exists  # 金庫には、まだ何もない
 

@@ -21,7 +21,11 @@ SSE(sse-starlette)
 - ミドルウェアは、同じ依頼者のリクエストを 1 つずつ処理するため、応答を送り終えるまで依頼者ごとのロックを持つ(web.session_middleware)。
   SSE が 30 秒つながっている間ずっと持つと、同じ依頼者の操作と、レフェリーの金庫への操作(web.locks の PrincipalScopedVault)が
   30 秒止まる。そのため、/v1/stream/ はミドルウェアのセッションを見ない経路にして(web.app の session_free_prefixes)、本人の経路は、
-  この module が同じ確認(署名付きクッキー・削除中でないこと・交渉の当事者であること)を、始めに 1 回だけ行う。
+  この module が同じ確認(署名付きクッキー・削除中でないこと・交渉の当事者であること)を、始めに 1 回行う。
+  接続してから本人の削除が始まると、「削除中はすべての操作を拒否」(§6.3)に反して、金庫の削除と競合しながら記録を送り続けてしまう。
+  そのため、各 poll(2 秒ごと)の前に、利用記録 principals_meta を読み直す(読むだけ。依頼者のロックは取らない。台帳 X-83)。削除中・削除済み
+  (利用記録がない)なら、次の記録を送らずに、`event: problem`(detail は principal_deleting・principal_deleted)を送って閉じる(画面は通常の GET の
+  再取得に切り替え、その GET が 409 などで理由を示す)。読み直せないとき(Firestore の失敗)も、閉じる側に倒す(problem の stream_failed)。
   デモの経路は、/v1/demo/negotiations/{nid}/activity と同じ 2 段の確認(web の段の状態と金庫のデモ用の読み出しの口。台帳 X-38)を行う。
 
 ログには、例外の型名だけを書く(組み合わせの値・評価・依頼者 ID を、ここから出さない)。
@@ -104,6 +108,17 @@ Sleep = Callable[[float], Awaitable[None]]
 Monotonic = Callable[[], float]
 
 
+class StreamNotAllowed(Exception):
+    """読む前の確かめ直しで、この接続をもう続けられないと分かった(本人の削除が始まった・終わった。台帳 X-83)。
+
+    read が投げる。activity_event_stream は、次の記録を送らずに、detail(列挙値。入力の値は入れない)を `problem` で送って閉じる。
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 # ----------------------------------------------------------------------
 # フィクスチャから作る一覧(公開情報だけ。生の条件・職務要約・連絡先は読まない)
 # ----------------------------------------------------------------------
@@ -177,7 +192,8 @@ async def activity_event_stream(
     """read(after_seq) で活動ログを周期的に読み、新しい記録があるときだけ activity を送る。
 
     最終結果を送ったら end で閉じる。config.max_duration_seconds たったら(何も送らず)閉じる。一時的な金庫の失敗(503)は、
-    次の周期で読み直す。それ以外の失敗は problem を送って閉じる(応答の始まりを送った後なので、HTTP の状態では伝えられない)。
+    次の周期で読み直す。read が StreamNotAllowed を投げたら(読む前の確かめ直しで、続けられないと分かった。台帳 X-83)、何も読まずに、その理由を
+    problem で送って閉じる。それ以外の失敗は problem(stream_failed)を送って閉じる(応答の始まりを送った後なので、HTTP の状態では伝えられない)。
     """
     deadline = monotonic() + config.max_duration_seconds
     while True:
@@ -186,6 +202,9 @@ async def activity_event_stream(
             log = await read(after_seq)
         except VaultUnavailableError:
             log = None
+        except StreamNotAllowed as stopped:
+            yield ServerSentEvent(event=PROBLEM_EVENT, data=json.dumps({"detail": stopped.detail}))
+            return
         except Exception as exc:  # noqa: BLE001  応答の始まりを送った後なので、problem で伝える
             _log.warning("activity stream stopped error=%s", type(exc).__name__)
             yield ServerSentEvent(event=PROBLEM_EVENT, data=json.dumps({"detail": "stream_failed"}))
@@ -254,8 +273,8 @@ def build_ui_router(services: WebServices, stream: StreamConfig = DEFAULT_STREAM
             raise HTTPException(status_code=404, detail="not_found")
         return FileResponse(path, media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})
 
-    async def authorize_own_stream(request: Request, nid: str) -> None:
-        """本人の経路の確認: web.api の require_session・require_own_negotiation と同じ(ミドルウェアを通らないので、ここで行う)。"""
+    async def authorize_own_stream(request: Request, nid: str) -> str:
+        """本人の経路の確認: web.api の require_session・require_own_negotiation と同じ(ミドルウェアを通らないので、ここで行う)。依頼者 ID を返す。"""
         principal_id = services.codec.read(request.cookies.get(SESSION_COOKIE_NAME), services.clock.now())
         if principal_id is None:
             raise HTTPException(status_code=401, detail="no_session")
@@ -265,6 +284,19 @@ def build_ui_router(services: WebServices, stream: StreamConfig = DEFAULT_STREAM
         summaries = await vault.list_principal_negotiations(principal_id)
         if all(summary.nid != nid for summary in summaries):
             raise HTTPException(status_code=403, detail="forbidden")  # 他人の交渉も、存在しない交渉も、同じ 403
+        return principal_id
+
+    async def ensure_principal_still_active(principal_id: str) -> None:
+        """各 poll の前の確かめ直し(台帳 X-83): 利用記録を読み直す。読むだけで、依頼者のロックは取らない(接続の間、ほかの操作を止めない)。
+
+        削除中(deletion_state=deleting)・削除済み(利用記録がない)なら StreamNotAllowed。利用記録を読めなければ、その例外のまま伝える
+        (閉じる側に倒す。activity_event_stream が stream_failed で閉じる)。
+        """
+        meta = await services.meta.get(principal_id)
+        if meta is None:
+            raise StreamNotAllowed("principal_deleted")
+        if meta.deletion_state == DELETION_DELETING:
+            raise StreamNotAllowed("principal_deleting")
 
     async def read_demo_events(nid: str, side: Side, after_seq: int) -> list[EventViewItem]:
         """web.activity_api の read_demo_events と同じ 2 段の確認(web の段の状態〔補助〕と、金庫のデモ用の読み出しの口〔正本〕。台帳 X-38)。"""
@@ -279,10 +311,14 @@ def build_ui_router(services: WebServices, stream: StreamConfig = DEFAULT_STREAM
     async def stream_own_activity(
         nid: str, request: Request, after_seq: int = Query(default=0, ge=0, le=MAX_SEQ)
     ) -> EventSourceResponse:
-        """本人の活動ログの SSE(本人の側 = 候補者側だけ)。権限は /v1/negotiations/{nid}/activity と同じ(401・409・403)。"""
-        await authorize_own_stream(request, nid)
+        """本人の活動ログの SSE(本人の側 = 候補者側だけ)。権限は /v1/negotiations/{nid}/activity と同じ(401・409・403)。
+
+        つながった後は、各 poll の前に、本人の削除が始まっていないかを読み直す(台帳 X-83)。
+        """
+        principal_id = await authorize_own_stream(request, nid)
 
         async def read(position: int) -> ActivityLog:
+            await ensure_principal_still_active(principal_id)  # 削除中・削除済みなら、金庫を読まずに閉じる
             return to_activity_log("candidate", await vault.get_events(nid, "candidate", position), position)
 
         return EventSourceResponse(activity_event_stream(read, resume_position(request, after_seq), config=stream))

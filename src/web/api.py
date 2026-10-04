@@ -80,7 +80,6 @@ from web.api_models import (
     ControlBody,
     CreateNegotiationBody,
     DemoCreateBody,
-    InterviewSubmitRequest,
     PrincipalAnswerBody,
 )
 from web.attack.router import build_attack_router
@@ -335,25 +334,10 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
         return {"status": "ok"}
 
     # ------------------------------------------------------------------
-    # 面談の送信(§5 の手順 9)・ポリシーの閲覧・ブロックリスト
+    # ポリシーの閲覧・ブロックリスト
+    # 面談の送信(§5 の手順 9)は、面談の API の /submit(web.interview.api)だけ。丸める前のアンカーと属性帯を直接受ける口は、
+    # 公開面に置かない(台帳 X-81: 3 問・二択・確認・最悪ここまでの承認を経ずに、金庫へ書けてしまう)。
     # ------------------------------------------------------------------
-
-    @router.post("/v1/principals/{pid}/interview")
-    async def submit_interview(
-        pid: str, body: InterviewSubmitRequest, session: PrincipalSession = Depends(require_own_principal)
-    ) -> dict[str, str]:
-        """面談の結果(生の値のアンカー・外した軸・属性帯)を、web で丸めて金庫に置く。
-
-        金庫に初めて書く前に、利用記録 principals_meta を作る(§5 の手順 9・§6.3)。
-        """
-        try:
-            request = body.to_put_policy_request()  # 丸め(§2.5)と矛盾検査。エラーの文面に値が入るので返さない
-        except ValueError:
-            raise HTTPException(status_code=422, detail="policy_invalid") from None
-        if await services.meta.create_if_absent(pid) == "deleting":
-            raise HTTPException(status_code=409, detail="principal_deleting")
-        await vault.put_policy(pid, request)
-        return {"status": "submitted"}
 
     @router.get("/v1/principals/{pid}/policy", response_model=PolicyView)
     async def get_policy(pid: str, session: PrincipalSession = Depends(require_own_principal)) -> PolicyView:

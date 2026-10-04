@@ -5,11 +5,14 @@
 - 架空の求人は、フィクスチャの設定に従って、「会う」「承認」を自動で押す。実ユーザーの段 2 は模擬表示(連絡先を集めない)。デモ・攻撃の
   架空の候補者は、フィクスチャの職務要約・連絡先で、サーバが自動で押す。求人側を押す口は、HTTP にない(ほかの訪問者が求人側を操作しない)。
 - 匿名職務要約の入力(前後の空白を除いて 1〜400 文字、本文 32 KB まで)。エラーの応答に入力を返さない。
-- 画面で交渉を開いたとき、判定の後に作り損ねた段の状態を作る(台帳 L9-4)。
+- 画面で交渉を開いたとき、判定の後に作り損ねた段の状態を作る(台帳 L9-4。冪等な作成)。
 - 取消・一時停止との関係: 判定の前は段階開示の操作を受け付けず、判定の後の取消・一時停止は段を変えない(§3.4)。
+- GET は純粋な読み出し(台帳 X-84): 何度呼んでも、段の状態も台帳も変わらない。判定の検出(agreed_at)・架空人物の自動応答・台帳は、レフェリーの
+  完了のフック(StageSettler.settle)と、見回りが行う(フックと見回りの試験は、tests/test_stages_settle.py)。
+- 見込み「なし」で終わった交渉も、段 0 の開示を台帳に 1 行書く(台帳 L19-14)。段 1 以降には進めない。
 
 金庫は本物の vault の app を ASGI のままつなぐ(web の app へは Browser から入る)。LLM・GCP には接続しない。ほかの段階開示の試験
-(tests/test_stages_*.py)は、ここの部品(stage_env・make_case・agree など)を import して使う。
+(tests/test_stages_*.py)は、ここの部品(stage_env・make_case・agree・settle など)を import して使う。
 """
 
 import dataclasses
@@ -93,17 +96,35 @@ def agree(store, nid: str) -> None:
     store.process_move(nid, MoveRequest(expected_version=proposed.version, side="employer", move="accept"))
 
 
-async def live_negotiation(env, browser, *, agreed: bool = True, request_id: str = "request-0001") -> tuple[str, str]:
-    """面談を送った本物の候補者が、架空の求人と交渉を始める。agreed なら合意で終わらせる。(依頼者 ID, 交渉 ID) を返す。"""
+async def settle(env, nid: str, pid: str | None = None) -> bool:
+    """判定の直後の決着処理(判定の検出・架空人物の自動応答・台帳)を、レフェリーを動かさずに行う。pid は本物の候補者の依頼者 ID(デモなら None)。
+
+    本番では、レフェリーの完了のフック(RefereeDeps.on_finished)が、判定の直後に行う(台帳 X-84)。この試験の補助は、合意で終わらせる agree() が
+    レフェリーを通らないので、フックの代わりに、フックと同じ部品(StageSettler.settle)を直接呼ぶ。GET は、段の状態を書かない。
+    """
+    return await env.services.stage_settler.settle(nid, pid)
+
+
+async def live_negotiation(
+    env, browser, *, agreed: bool = True, settled: bool = True, request_id: str = "request-0001"
+) -> tuple[str, str]:
+    """面談を送った本物の候補者が、架空の求人と交渉を始める。agreed なら合意で終わらせ、settled なら決着処理まで済ませる(完了のフックの代わり。settle)。
+
+    (依頼者 ID, 交渉 ID) を返す。settled=False は、合意で終わったが、web がまだ決着処理をしていない状態(フックの前・フックの失敗)。
+    """
     pid = await browser.register()
     nid = await browser.create_negotiation(pid, EMPLOYER_TEMPLATE_ID, request_id)
     if agreed:
         agree(env.store, nid)
+        if settled:
+            await settle(env, nid, pid)
     return pid, nid
 
 
-async def demo_negotiation(env, browser, *, request_id: str = "request-demo1", agreed: bool = True) -> str:
-    """フィクスチャのテンプレートで、デモの交渉を web の API で作る(段の状態にテンプレート ID を控える)。agreed なら合意で終わらせる。"""
+async def demo_negotiation(
+    env, browser, *, request_id: str = "request-demo1", agreed: bool = True, settled: bool = True
+) -> str:
+    """フィクスチャのテンプレートで、デモの交渉を web の API で作る(段の状態にテンプレート ID を控える)。agreed なら合意で終わらせ、settled なら決着処理まで済ませる。"""
     response = await browser.post(
         "/v1/demo/negotiations",
         dict(
@@ -116,6 +137,8 @@ async def demo_negotiation(env, browser, *, request_id: str = "request-demo1", a
     nid = response.json()["nid"]
     if agreed:
         agree(env.store, nid)
+        if settled:
+            await settle(env, nid, None)
     return nid
 
 
@@ -180,7 +203,8 @@ async def test_before_the_judgment_no_likelihood_is_shown_and_no_stage_action_is
 
 @pytest.mark.anyio
 async def test_a_negotiation_that_ended_without_agreement_stops_at_stage_zero_with_nothing_but_the_likelihood(stage_env):
-    # FR-28: 不成立のときに相手へ返すのは「なし」だけ。段 1 以降には進めない(409 not_agreed)。台帳にも何も書かない。
+    # FR-28: 不成立のときに相手へ返すのは「なし」だけ。段 1 以降には進めない(409 not_agreed。agreed_at は付かない)。台帳には、段 0 の開示
+    # (「なし」を双方に出したこと)の 1 行だけを書く(台帳 L19-14。決着処理が書く。GET は書かない)。
     env = stage_env()
     browser = env.browser()
     pid, nid = await live_negotiation(env, browser, agreed=False)
@@ -193,9 +217,14 @@ async def test_a_negotiation_that_ended_without_agreement_stops_at_stage_zero_wi
     assert view["result"] == dict(likelihood="none", package=None)
     assert view["disclosed_to_employer"]["visible"] == ["likelihood"]
     assert view["disclosed_to_employer"]["likelihood"] == "none" and view["disclosed_to_employer"]["package"] is None
+    assert ledger_docs(env, pid) == {}  # 見るだけ(GET)では、台帳に書かない
+    assert await settle(env, nid, pid) is True  # 判定の直後の決着処理(完了のフックの代わり)
     for response in (await meet(browser, nid), await approve(browser, nid)):
         assert (response.status_code, response.json()) == (409, dict(detail="not_agreed"))
-    assert "agreed_at" not in stage_doc(env, nid) and ledger_docs(env, pid) == {}
+    assert "agreed_at" not in stage_doc(env, nid)
+    assert [(row["action"], row["stage"], row["operator"], row["items"], row["to"]) for row in ledger_docs(env, pid).values()] == [
+        ("disclose", 0, "system", ["result"], "both")
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -259,7 +288,7 @@ async def test_the_stage_view_shows_the_final_record_and_the_flags_but_never_the
     assert all_keys(view).isdisjoint(forbidden)
     assert pid not in json.dumps(view)
     assert view["employer_fictional"] is True and view["employer_auto_response"] is True
-    # 架空の求人(自動応答)は、判定の後に最初に見たときには、「会う」を押してある。候補者はまだ。
+    # 架空の求人(自動応答)は、判定の直後の決着処理(live_negotiation が、完了のフックの代わりに行う)で、「会う」を押してある。候補者はまだ。
     assert view["meet"] == dict(candidate=False, employer=True)
     assert view["approve"] == dict(candidate=False, employer=False)
 
@@ -368,8 +397,7 @@ async def test_the_approval_cannot_be_pressed_before_stage_one_is_open(stage_env
     # 承認は、段 1 が開いてから。段 0 の承認は 409 stage_not_open で、フラグも立たず、台帳にも書かない。
     env = stage_env()
     browser = env.browser()
-    pid, nid = await live_negotiation(env, browser)
-    await stage_of(browser, nid)  # 段 0 を整える(求人側の「会う」を自動で押す)
+    pid, nid = await live_negotiation(env, browser)  # 段 0 は、決着処理で整っている(求人側の「会う」を自動で押してある)
     before = ledger_docs(env, pid)
 
     response = await approve(browser, nid)
@@ -386,7 +414,7 @@ async def test_the_store_itself_refuses_a_press_that_is_not_allowed_yet_and_writ
     env = stage_env(meet=False, approve=False)
     stages = env.services.stages
     browser = env.browser()
-    pid, nid = await live_negotiation(env, browser)  # 合意で終わったが、web はまだ判定を記録していない
+    pid, nid = await live_negotiation(env, browser, settled=False)  # 合意で終わったが、web はまだ判定を記録していない
     before = (stage_doc(env, nid), ledger_docs(env, pid))
 
     unrecorded = await stages.press(nid, "candidate", "meet", operator="principal", job_summary=CANARY)
@@ -624,11 +652,12 @@ async def test_stage_actions_wait_for_the_judgment_and_a_later_cancel_or_pause_d
 
 @pytest.mark.anyio
 async def test_opening_a_judged_negotiation_whose_stage_was_never_created_creates_it(stage_env):
-    # L9-4: 判定の後に web が落ちて、段の状態を作り損ねた交渉(見回りは判定前の交渉しか見ない)も、画面で開いたとき(活動ログ・段の状態)に
-    # 作る。本物の候補者の依頼者 ID つき・TTL なし・段 0。段 0 の台帳は、判定を見つけたときに 1 回だけ書く。
+    # L9-4・DV-08: 判定の後に web が落ちて、段の状態を作り損ねた交渉(見回りは判定前の交渉しか見ない)も、画面で開いたとき(活動ログ・段の状態)に
+    # 作る(冪等な作成)。本物の候補者の依頼者 ID つき・TTL なし・段 0 で、段 0 が表示される。作るだけで、判定の検出(agreed_at)と台帳は書かない
+    # (台帳 X-84)。それらは、決着処理(見回りが拾う)が、段 0 の台帳の 1 行も含めて、1 回だけ書く。
     env = stage_env()
     browser = env.browser()
-    pid, nid = await live_negotiation(env, browser)
+    pid, nid = await live_negotiation(env, browser, settled=False)
     stages = env.default_db.collection("stages")
 
     stages.document(nid).delete()  # 作り損ねた状態
@@ -636,14 +665,21 @@ async def test_opening_a_judged_negotiation_whose_stage_was_never_created_create
     assert events.status_code == 200
     recreated = stage_doc(env, nid)
     assert (recreated["candidate_principal_id"], recreated["stage"]) == (pid, 0)
-    assert "ttl_at" not in recreated and "agreed_at" not in recreated
+    assert "ttl_at" not in recreated and "agreed_at" not in recreated and recreated["settled_at"] is None
 
     stages.document(nid).delete()  # もう一度。今度は段の状態の表示で
     view = await stage_of(browser, nid)
-    assert (view["stage"], view["result"]["likelihood"]) == (0, "high")
-    assert stage_doc(env, nid)["candidate_principal_id"] == pid and "agreed_at" in stage_doc(env, nid)
-    await stage_of(browser, nid)
-    await stage_of(browser, nid)
+    assert (view["stage"], view["agreed"], view["result"]["likelihood"]) == (0, True, "high")  # 段 0 が表示される
+    for _ in range(2):
+        await stage_of(browser, nid)  # 何度見ても、書かない
+    document = stage_doc(env, nid)
+    assert document["candidate_principal_id"] == pid and "agreed_at" not in document and document["settled_at"] is None
+    assert ledger_docs(env, pid) == {}
+
+    report = await env.services.sweeper.sweep_once()  # 見回りが、判定済みで決着がまだの段を拾う
+    await env.services.sweeper.sweep_once()
+    assert report.stages_settled == 1
+    assert "agreed_at" in stage_doc(env, nid) and stage_doc(env, nid)["settled_at"] is not None
     assert [row["stage"] for row in ledger_docs(env, pid).values() if row["action"] == "disclose"] == [0]
 
 
@@ -687,11 +723,17 @@ async def test_the_state_survives_a_restart_of_web(stage_env, store, clock, vaul
 async def test_a_demo_negotiation_plays_out_all_stages_with_the_fixtures_summary_and_contact(stage_env):
     # P-2・§6.2: デモの架空の候補者は、フィクスチャの職務要約・連絡先で、サーバが自動で「会う」「承認」を押す(架空の求人も自動)。
     # 段 2 は、実ユーザーではないので、フィクスチャの(架空の)連絡先をそのまま出す。段の状態の TTL(96 時間)は残り、台帳は作らない。
+    # 自動で押すのは、判定の直後の決着処理(完了のフック・見回り)で、GET ではない(台帳 X-84): 決着処理の前は、GET は段 0 を見せるだけで何も書かない。
     env = stage_env()
     visitor = env.browser()
-    nid = await demo_negotiation(env, visitor)
+    nid = await demo_negotiation(env, visitor, settled=False)
+    before = stage_doc(env, nid)
+    unsettled = (await visitor.get(f"/v1/demo/negotiations/{nid}/stage")).json()  # クッキーのない訪問者
+    assert (unsettled["agreed"], unsettled["stage"], unsettled["meet"]) == (True, 0, dict(candidate=False, employer=False))
+    assert stage_doc(env, nid) == before  # 見ただけでは、何も書いていない
 
-    response = await visitor.get(f"/v1/demo/negotiations/{nid}/stage")  # クッキーのない訪問者
+    assert await settle(env, nid) is True  # 判定の直後の決着処理(完了のフックの代わり)
+    response = await visitor.get(f"/v1/demo/negotiations/{nid}/stage")
 
     assert response.status_code == 200, response.text
     view = response.json()
@@ -746,7 +788,7 @@ async def test_a_stage_document_that_says_real_makes_the_demo_route_refuse_even_
     # 金庫が架空の候補者の交渉と認めても、web の段の状態(補助)が本物の候補者のものなら、拒否する(2 段の確認。どちらかが断れば 403)。
     env = stage_env()
     visitor = env.browser()
-    nid = await demo_negotiation(env, visitor)
+    nid = await demo_negotiation(env, visitor, settled=False)
     env.default_db.collection("stages").document(nid).update(dict(candidate_principal_id="0123456789abcdef"))
 
     response = await visitor.get(f"/v1/demo/negotiations/{nid}/stage")

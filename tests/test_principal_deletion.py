@@ -55,7 +55,7 @@ from vault_helpers import (
 from test_stages import EMPLOYER_TEMPLATE_ID, agree, approve, meet, stage_env  # noqa: F401  (stage_env はフィクスチャ)
 from web import ledger as ledger_module
 from web import stages as stages_module
-from web_app_helpers import CANARY, DeletionProbe, documents_mentioning, interview_body, plant_canaries
+from web_app_helpers import CANARY, DeletionProbe, documents_mentioning, plant_canaries
 from web_helpers import create_demo_negotiation
 
 def _write_live_negotiation_with_real_counterpart(
@@ -568,7 +568,7 @@ async def test_web_operations_of_a_deleting_principal_are_rejected_on_every_rout
 
     requests = [
         ("GET", "/start", None),
-        ("POST", f"/v1/principals/{pid}/interview", interview_body(accept_anchors=[])),
+        ("POST", f"/v1/principals/{pid}/interview/submit", None),
         ("GET", f"/v1/principals/{pid}/policy", None),
         ("POST", f"/v1/principals/{pid}/blocklist", {"blocklist": ["company-x"]}),
         ("GET", f"/v1/principals/{pid}/negotiations", None),

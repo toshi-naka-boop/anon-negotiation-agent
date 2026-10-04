@@ -27,6 +27,7 @@ from google.cloud import firestore
 from vault.clock import FixedClock
 from vault.templates import put_template
 from vault_helpers import make_employer_template
+from web.api_models import InterviewSubmitRequest
 from web.app import create_app
 from web.config import DEFAULT_WEB_CONFIG, WebConfig
 from web.services import WebServices
@@ -84,6 +85,16 @@ def interview_body(**overrides) -> dict:
     return body
 
 
+async def submit_interview(services: WebServices, pid: str, **overrides) -> None:
+    """面談の送信(丸め → 利用記録 → 金庫の PUT policy)を、内部の関数(InterviewService.submit_policy)で直接行う。
+
+    公開面(HTTP)には、丸める前のアンカーと属性帯を直接受ける口はない(台帳 X-81。本番の経路は、面談の API の /submit だけ)。この補助は、
+    面談の画面の流れ(3 問・二択・確認・承認)を通さずに依頼者を作りたいテストが使う。本文は interview_body(**overrides) の形で、
+    モデル(InterviewSubmitRequest)の検証に通らなければ pydantic.ValidationError、丸めで矛盾すれば HTTPException(422 policy_invalid)。
+    """
+    await services.interview.submit_policy(pid, InterviewSubmitRequest.model_validate(interview_body(**overrides)))
+
+
 class Browser:
     """クッキーを持つ 1 つのブラウザ。web の app に ASGI のまま(ネットワークを通さず)つなぐ。"""
 
@@ -123,10 +134,9 @@ class Browser:
         return self.pid
 
     async def register(self, **overrides) -> str:
-        """開始ページを開き、面談を送って、利用記録と金庫のポリシーを作る。依頼者 ID を返す。"""
+        """開始ページを開き、面談の送信(内部の関数。submit_interview)で、利用記録と金庫のポリシーを作る。依頼者 ID を返す。"""
         pid = await self.open_start_page()
-        response = await self.post(f"/v1/principals/{pid}/interview", interview_body(**overrides))
-        assert response.status_code == 200, response.text
+        await submit_interview(self._env.services, pid, **overrides)
         return pid
 
     async def create_negotiation(self, pid: str, employer_template_id: str, request_id: str = "request-0001") -> str:

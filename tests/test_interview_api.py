@@ -26,7 +26,7 @@ from google.genai import types
 from negotiation_core import AXES, AXIS_KEYS
 from web.llm_budget import LlmBudgetUnavailable, jst_date
 from web.vault_client import VaultUnavailableError
-from web_app_helpers import REQUESTED_WITH, documents_mentioning, dump_documents
+from web_app_helpers import REQUESTED_WITH, documents_mentioning, dump_documents, interview_body
 
 BASIS = {
     "amount_man_yen": 600,
@@ -1023,11 +1023,10 @@ async def test_the_canary_checks_can_actually_find_a_value_in_firestore_and_in_t
 
 
 @pytest.mark.anyio
-async def test_the_interview_routes_are_part_of_the_web_app_and_the_direct_submit_route_remains(env):
+async def test_the_interview_routes_are_part_of_the_web_app_and_there_is_no_direct_submit_route(env):
     paths = env.app.openapi()["paths"]
     base = "/v1/principals/{pid}/interview"
     expected = {
-        "": {"post"},  # 既存の直接の送信(丸める前のアンカーを受ける)。面談の API とは別に、そのまま残る
         "/begin": {"post"},
         "/state": {"get"},
         "/profile": {"post"},
@@ -1050,6 +1049,48 @@ async def test_the_interview_routes_are_part_of_the_web_app_and_the_direct_submi
     }
     for suffix, methods in expected.items():
         assert set(paths[base + suffix]) == methods, suffix
+    # 面談の下にある口は、設計書 §3.3b の一覧のとおりで、これだけ(足したのに、この一覧を直し忘れれば失敗する)。丸める前のアンカーを
+    # 直接受ける口(旧 POST /v1/principals/{pid}/interview。台帳 X-81)は、もうない
+    assert {path for path in paths if path.startswith(base)} == {base + suffix for suffix in expected}
+    assert base not in paths
+
+
+def _api_routes(routes):
+    """app.routes から、実際のルート(APIRoute)を取り出す。FastAPI は include_router したルータを、入れ子のまま(_IncludedRouter)持つ。"""
+    for route in routes:
+        if hasattr(route, "original_router"):
+            yield from _api_routes(route.original_router.routes)
+        elif hasattr(route, "dependant"):
+            yield route
+
+
+@pytest.mark.anyio
+async def test_no_public_route_writes_to_the_vault_without_going_through_the_interview(env):
+    # AC-01・台帳 X-81: 公開面に、面談の流れ(3 問・二択 5 組・確認・最悪ここまでの承認)を経ずに、金庫へポリシーを書ける口がない。
+    # app のルートをすべてなめて(OpenAPI に載らないページの経路も含む)、面談の直下(/interview)の、状態を変える口を探す: 1 つもない。
+    routes = {(method, route.path) for route in _api_routes(env.app.routes) for method in route.methods}
+    assert ("GET", "/interview") in routes and ("POST", "/v1/principals/{pid}/interview/submit") in routes  # 経路を読めている
+    assert len(routes) > 40  # ルートの読み取りが壊れて、何も確かめずに通らない
+    safe = {"GET", "HEAD", "OPTIONS"}
+    direct = {(method, path) for method, path in routes if path.rstrip("/").endswith("/interview") and method not in safe}
+    assert direct == set()
+    # ポリシーという名前の口は、読み出し(GET)だけ(ポリシーを書くのは、面談の /submit が呼ぶ内部の関数 submit_policy だけ)
+    assert {(method, path) for method, path in routes if path.endswith("/policy")} == {("GET", "/v1/principals/{pid}/policy")}
+
+
+@pytest.mark.anyio
+async def test_the_old_direct_submit_is_gone_and_a_body_sent_to_it_writes_nothing(env):
+    # 旧い直接の送信(丸める前のアンカーと属性帯を本文で受ける POST)を送っても、ルートがなく(404)、利用記録も金庫の文書も作られない。
+    # 面談の流れ(/submit)を経なければ、依頼者は登録されない(AC-01)。
+    browser = env.browser()
+    pid = await browser.open_start_page()
+
+    direct = await browser.post(f"/v1/principals/{pid}/interview", interview_body())
+    direct_with_slash = await browser.post(f"/v1/principals/{pid}/interview/", interview_body())
+
+    assert [direct.status_code, direct_with_slash.status_code] == [404, 404]
+    assert not meta_exists(env, pid) and not vault_has_principal(env, pid)
+    assert (await browser.get("/v1/session")).json() == {"principal_id": pid, "registered": False}
 
 
 @pytest.mark.anyio

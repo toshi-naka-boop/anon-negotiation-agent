@@ -439,7 +439,7 @@ flowchart LR
 | 群 | 口 | 要点 |
 |---|---|---|
 | 入口・セッション | `GET /start`（依頼者 ID の発行はこれだけ）、`GET /v1/session`（自分の依頼者 ID。クッキーは HttpOnly）、`GET /v1/interview/notice`（入口の注記。状態を作らない）、`GET /v1/jobs`（フィクスチャの求人。非公開求人は企業名を伏せる）、ページ `/`・`/interview`・`/me`・`/demo`・`/attack`、`/static/`（セッションを見ない） | §5・§6.1・§6.3 |
-| 面談 | `/v1/principals/{pid}/interview/` の `begin`・`state`・`profile`・`salary/answers`・`salary/confirm`・`axes`・`choices`・`choices/answer`・`comment`・`reason`・`confirmation`・`anchors/{key}/active`・`confirm`・`worst-case`・`worst-case/approve`・`companies`・`blocklist`・`submit`・`discard` | §5。LLM を呼ぶ 3 つは `interview_llm` の枠（§8.2） |
+| 面談 | 直接の送信の口はない（旧い `POST /v1/principals/{pid}/interview` は撤去。X-81。内部の関数 `submit_policy` はテストの補助だけが呼ぶ）。`/v1/principals/{pid}/interview/` の `begin`・`state`・`profile`・`salary/answers`・`salary/confirm`・`axes`・`choices`・`choices/answer`・`comment`・`reason`・`confirmation`・`anchors/{key}/active`・`confirm`・`worst-case`・`worst-case/approve`・`companies`・`blocklist`・`submit`・`discard` | §5。LLM を呼ぶ 3 つは `interview_llm` の枠（§8.2） |
 | 本人の交渉 | `GET/POST /v1/principals/{pid}/negotiations`、`POST /v1/principals/{pid}/delete`、`GET /v1/negotiations/{nid}/activity?after_seq=`、`GET .../panels`（本人の側だけ）、`POST .../control`、`POST .../principal-answer`、`GET .../stage`・`POST .../stage/meet`・`POST .../stage/approve`、`GET /v1/principals/{pid}/ledger`、`GET /v1/principals/{pid\|me}/panels`（FR-39） | §3.3・§4.4・§6.2・§7 |
 | デモ・攻撃（セッションなし。架空人物の交渉だけ） | `GET /v1/demo/cases`、`POST /v1/demo/negotiations`、`GET /v1/demo/negotiations/{nid}/activity\|panels\|stage`、`GET /v1/demo/replays/{case}`、`POST /v1/demo/meter`・`GET /v1/demo/meter/simulation`、`/v1/demo/attack/` の `negotiations`・`negotiations/{nid}/instruction`・`negotiations/{nid}/events`・`walls/1/example`・`walls/1`・`walls/2/{nid}`・`walls/3/{nid}`・`bisection` | §8.1〜§8.4 |
 | 配信 | `GET /v1/stream/negotiations/{nid}/activity`（本人）、`GET /v1/stream/demo/negotiations/{nid}/activity?side=`（SSE。2 秒ごとに読み、30 秒で切って画面がつなぎ直す。ミドルウェアの外。§4.1） | §7 |
@@ -564,11 +564,11 @@ flowchart LR
 - **見回り**: 起動時と、暫定 60 秒ごとに、金庫の一覧 API（`open=true`）を読み、交渉ごとに次を行う。どれも冪等なので、同じ交渉を何度拾っても安全。
   - 期限・寿命・最長の停止時間を過ぎていれば、`expire` を呼ぶ。
   - `active`・`awaiting_principal` なのにタスクがなければ、タスクを作り直す。
-  - 段階開示の状態 `stages/{nid}` がなければ作る（§6.2）。
+  - 段階開示の状態 `stages/{nid}` がなければ作る（§6.2）。判定済みで決着処理がまだの段（`settled_at` が null で、進行中の一覧にないもの）を拾って決着させる（X-84）。
 - **依頼者の見回り**（交渉の見回りとは別。暫定 10 分ごと）: `web` の `principals_meta` を直接調べ、次を行う（§6.3。P-6）。30 日使っていない依頼者は、進行中の交渉を持たないので、交渉の一覧からは拾えないため。
   - `delete_after` を過ぎていて、削除中でない依頼者: トランザクションで `delete_after` が読んだ値から変わっていないことを確かめてから、`deletion_state=deleting` にする。その後、削除の流れ（§6.3）を進める。
   - `deletion_state=deleting` のまま残っている依頼者: 削除の流れを最初からやり直す（各段は冪等）。
-- **セッションの外の経路**: `/static/` と SSE（`/v1/stream/...`）は、依頼者のロックを持つミドルウェアの外で配信する（SSE が 30 秒つながっている間、同じ依頼者の操作とレフェリーの金庫操作を止めないため）。本人用の SSE は、署名クッキー・削除中でないこと・当事者であることを始めに 1 回確かめる（I-23・L）。攻撃モードの指示（`web` のメモリ）が再起動で消えた交渉は、攻撃者の手番で `control(cancel)` して「なし」で終える（P-17・I-26）。
+- **セッションの外の経路**: `/static/` と SSE（`/v1/stream/...`）は、依頼者のロックを持つミドルウェアの外で配信する（SSE が 30 秒つながっている間、同じ依頼者の操作とレフェリーの金庫操作を止めないため）。本人用の SSE は、署名クッキー・削除中でないこと・当事者であることを始めに確かめ、各 poll（2 秒ごと）の前に利用記録を読み直す。削除中・削除済みなら次の記録を送らず `event: problem` で閉じる（画面は GET の再取得に切り替わる。X-83）。攻撃モードの指示（`web` のメモリ）が再起動で消えた交渉は、攻撃者の手番で `control(cancel)` して「なし」で終える（P-17・I-26）。
 - **1 手ごとの流れ**（LLM の呼び出しは 1 手番に最大 2 回。I-15・I-16）
   1. 手番の側の残りの手数が 0 なら、LLM を呼ばずに `end` を登録して、金庫の停止の判定（`stopped_budget`）を効かせる（L9-3）。
   2. **計画**: 金庫の `view` と、イベント列のその側の見え方から `TurnInput`（`phase=plan`）を組み立て、A2A で送り、計画の JSON を受け取って 2 段で読む（§2.7: `PlanEnvelope` → `checks` があれば残りを未検証で捨てる → 空なら `move`・`package` を `Move` の規則で検証。X-79）。
@@ -782,7 +782,7 @@ sequenceDiagram
   - ほかの訪問者が求人側を操作する経路は作らない。
 - **FR-33 の担保**: LLM への入力は、すべて `llm_gateway` の型付き関数（`TurnInput`・`AttackerTurnInput`・面談用入力）を通す。これらの型には、段 1 以降の内容を入れるフィールドがない。
 - 段の遷移は、それぞれの依頼者の開示台帳に追記する。
-- **実装で決めた細部**（G。I-27）: 段ごとに見えるものの表は `web.stages.EMPLOYER_SEES` を正とし、AC-14 で固定する。`stages/{nid}` には `agreed_at`・側ごとの `meet`・`approve`・`job_summary`、デモだけ `candidate_template_id`・`employer_template_id` を持つ（求人の企業名は本物の候補者の交渉では `job_id` から、デモ・攻撃ではテンプレート ID から引く）。架空の求人の自動応答は、判定の瞬間ではなく、候補者が段の状態を読んだ・操作したときに冪等に行う（GET が書く。サーバが決める値だけ）。デモ・攻撃の架空の候補者も、フィクスチャの職務要約と連絡先でサーバが自動で押す（デモで段 2 まで見せる）。攻撃モードの求人は攻撃者なので自動応答はなく段 0 のまま。見込み「なし」は段 0 の表示で終わり、台帳に書かない。段 2 の「氏名と連絡先」は候補者の分を求人側へ出す（求人側の連絡先はフィクスチャにない）。要約は 400 文字、本文は 32 KB。求人側を押す HTTP の口は作らない。
+- **実装で決めた細部**（G。I-27）: 段ごとに見えるものの表は `web.stages.EMPLOYER_SEES` を正とし、AC-14 で固定する。`stages/{nid}` には `agreed_at`・側ごとの `meet`・`approve`・`job_summary`、デモだけ `candidate_template_id`・`employer_template_id` を持つ（求人の企業名は本物の候補者の交渉では `job_id` から、デモ・攻撃ではテンプレート ID から引く）。判定の検出・架空の求人（とデモの架空の候補者）の自動応答・台帳の書き込み（決着処理 `StageFlow.settle`）は、レフェリーの完了のフック（`RefereeDeps.on_finished`。失敗してもレフェリーは落とさない）と、見回り（`settled_at` が null の段を拾う）と、本人の `POST meet`・`approve` が行う。`GET .../stage` は読み出しだけ（段の文書の作成（冪等）を除く。X-84）。期限切れで終わった交渉はフックが呼ばれないので、次の見回り（最大 60 秒）が決着させる。デモ・攻撃の架空の候補者も、フィクスチャの職務要約と連絡先でサーバが自動で押す（デモで段 2 まで見せる）。攻撃モードの求人は攻撃者なので自動応答はなく段 0 のまま。見込み「なし」は段 0 の表示で終わる（段 1 以降には進めない）。台帳には段 0 の開示（`disclose`・stage 0・items `result`・operator `system`）を 1 行書く（FR-38 の「全件」。L19-14）。`stages/{nid}` には決着の印 `settled_at` も持つ。段 2 の「氏名と連絡先」は候補者の分を求人側へ出す（求人側の連絡先はフィクスチャにない）。要約は 400 文字、本文は 32 KB。求人側を押す HTTP の口は作らない。
 
 ### 6.3 本人の確認・権限・削除
 
@@ -802,7 +802,7 @@ sequenceDiagram
   - 実名の確認と再認証は、ハッカソンでは非スコープとする（既知の限界として説明文に書く）。
 - **オブジェクト単位の権限**
   - ポリシーの閲覧・削除、ブロックリスト、交渉一覧、活動ログ、開示台帳、途中確認への回答、「会う」「承認」、一時停止・取消は、すべて「セッションの依頼者 ID が、その対象の当事者であること」を確かめてから行う。違えば 403 にする。
-- **状態を変えるリクエスト**は POST に限り、独自ヘッダ（`X-Requested-With`）を必須にする。他サイトからの単純なフォーム送信を通さないため。
+- **状態を変えるリクエスト**は POST に限り、独自ヘッダ（`X-Requested-With`）を必須にする。他サイトからの単純なフォーム送信を通さないため。GET が書くのは段の文書の作成（冪等）だけで、例外はない（X-84）。
 - **同じ依頼者の操作の直列化**（I-4）: `web` は、依頼者ごとのロック（プロセスの中の asyncio のロック。`web` は 1 インスタンスなので足りる）の下で、その依頼者のポリシー・ブロックリストの書き込み、レフェリーの金庫への操作、見回りの `stages/{nid}` の作成、削除の流れを 1 つずつ行う。削除の流れは、印を立てる前にロックを取り、最後まで持つ。途中にある書き込みが、削除の後に依頼者の文書を作り直すのを防ぐため。
 - クッキーの署名鍵は環境変数 `SESSION_SIGNING_KEY` で渡し、起動時に、32 バイト以上で異なるバイト値が 16 種類以上あることを確かめる（X-39）。
 - **デモ・攻撃モード**
@@ -1076,7 +1076,7 @@ tenshokuagent/
 
 | AC | 実行するもの | 合格基準 |
 |---|---|---|
-| AC-01 | `uv run pytest tests/test_interview_api.py tests/test_interview_logic.py tests/test_interview_agent.py` | 正規化 3 問と二択 5 組（A・B の両方）以上が終わるまで確認画面に進めない。確認前に `vault` への書き込みが 0 件 |
+| AC-01 | `uv run pytest tests/test_interview_api.py tests/test_interview_logic.py tests/test_interview_agent.py` | 正規化 3 問と二択 5 組（A・B の両方）以上が終わるまで確認画面に進めない。確認前に `vault` への書き込みが 0 件。公開面に、面談の流れを経ずに金庫へ書ける口がない（経路の走査。旧い口は 404。X-81） |
 | AC-02 | `uv run python scripts/canary_scan.py` と `bash scripts/check_no_web_storage.sh` | 生の値のカナリア（例: 623.45 万、`CANARY-7F3A`）を流した後、`vault-db`・`(default)`・ログ・`web` のメモリ・スパンのどこにも出てこない（エミュレータとスタブの LLM で。クラウドの `gcloud logging read` は AC-18 の手動の確認）。`static/` のコードに、生の値をブラウザの保存領域へ書く呼び出しがない |
 | AC-03 | `uv run pytest tests/test_agent_context.py` | ケース 1 の全手番で、LLM に渡す入力（固定の前文＋TurnInput。計画・決定の両方）に、フィクスチャの生の値も ID も自由文も入っていない |
 | AC-04 | `uv run pytest tests/test_validation.py` | 次の 8 種すべてが、全受信口とレフェリーの両方で拒否される: TextPart、未定義の項目、列挙外の値、範囲外の数値、グリッド外の値、`TurnInput` 用の受信口への `principal_instruction`、ID の形式違反、32 KB を超える本文。計画の `move`・`package` に限っては P-14 の答えに従う（推奨: `checks` があるときは捨てる＝どこにも渡らない。`checks` 自体と、`checks` が空のときの `move`・`package` は従来どおり拒否）。③ の後は、`Plan` 型を直接ではなく、レフェリーの実際の読み方（`PlanEnvelope` → `Move`）を通して検査する（C-64） |

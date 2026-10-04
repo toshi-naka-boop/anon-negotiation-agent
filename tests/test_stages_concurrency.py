@@ -22,7 +22,6 @@ from test_stages import (  # noqa: F401  (stage_env はフィクスチャ)
     meet,
     stage_doc,
     stage_env,
-    stage_of,
 )
 from web.stages import StageBusy
 
@@ -41,8 +40,7 @@ async def agreed_with_manual_employer(stage_env, **case_options):
     """合意で終わった本物の候補者の交渉。求人側の自動応答は切ってあり、テストが求人側を押す。判定の記録まで済ませる。"""
     env = stage_env(**case_options)
     browser = env.browser()
-    pid, nid = await live_negotiation(env, browser)
-    await stage_of(browser, nid)
+    pid, nid = await live_negotiation(env, browser)  # 判定の記録まで済ませてある(決着処理。GET は書かない)
     return env, browser, pid, nid
 
 
@@ -124,7 +122,7 @@ async def test_recording_the_agreement_in_parallel_writes_the_stage_zero_row_onc
     # 判定の記録(段 0 の台帳)も、並行で 1 回しか効かない。
     env = stage_env(meet=False, approve=False)
     browser = env.browser()
-    pid, nid = await live_negotiation(env, browser)
+    pid, nid = await live_negotiation(env, browser, settled=False)  # 合意で終わったが、判定はまだ記録していない
     await env.services.stages.ensure(nid, pid)
     stages = env.services.stages
 
@@ -135,6 +133,26 @@ async def test_recording_the_agreement_in_parallel_writes_the_stage_zero_row_onc
     resend = await stages.record_agreement(nid)
     assert results.count("recorded") + int(resend == "recorded") == 1
     assert list(ledger_docs(env, pid)) == [f"{nid}-stage0"]
+
+
+@pytest.mark.anyio
+async def test_settling_without_agreement_in_parallel_writes_the_stage_zero_row_once(stage_env):
+    # 見込み「なし」の決着(段 0 の開示の台帳の行。台帳 L19-14)も、並行・再送で 1 回しか効かない: 完了のフックと見回りが重なっても、行は 1 つ。
+    # 決着の印(settled_at)を、台帳の行と同じトランザクションで立てるので、2 本目以降は何も書かない。
+    env = stage_env()
+    browser = env.browser()
+    pid, nid = await live_negotiation(env, browser, agreed=False)
+    assert (await browser.post(f"/v1/negotiations/{nid}/control", dict(action="cancel"))).json()["status"] == "judged"
+    stages = env.services.stages
+
+    results, failures = await run_concurrently([lambda: stages.settle_without_agreement(nid) for _ in range(2)])
+
+    assert results.count("recorded") <= 1
+    assert all(isinstance(failure, StageBusy) for failure in failures), failures
+    resend = await stages.settle_without_agreement(nid)
+    assert results.count("recorded") + int(resend == "recorded") == 1
+    assert list(ledger_docs(env, pid)) == [f"{nid}-stage0"]
+    assert stage_doc(env, nid)["settled_at"] is not None and "agreed_at" not in stage_doc(env, nid)
 
 
 @pytest.mark.anyio

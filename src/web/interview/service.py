@@ -1,9 +1,11 @@
 """面談の進行(design.md §5 の手順 1〜9)。API(web.interview.api)から呼ばれる。LLM のほかは、決定的なコード。
 
 各段の状態は、サーバのメモリに依頼者 ID ごとに持つ(web.interview.state)。生の値は Firestore にも金庫にも書かない。金庫に書くのは、
-最後の submit だけ(AC-01: 確認前に金庫への書き込みは 0 件)。submit は、既存の送信 API(web.api の submit_interview)と同じ 3 つの
-操作 ── 利用記録 principals_meta を先に作る・web.api_models.InterviewSubmitRequest で丸める・金庫の PUT policy ── を行う
-(そのルートの中にあって関数に切り出されていないので、同じ操作をここに置いた)。
+最後の submit だけ(AC-01: 確認前に金庫への書き込みは 0 件)。submit は、送信のロジック submit_policy ── web.api_models.InterviewSubmitRequest で
+丸める・利用記録 principals_meta を先に作る・金庫の PUT policy ── を呼ぶ。
+丸める前のアンカーと属性帯を直接受ける HTTP の口(旧 POST /v1/principals/{pid}/interview)は、公開面から外した(台帳 X-81: 3 問・二択・確認・
+最悪ここまでの承認を経ずに金庫へ書けてしまうため)。submit_policy は、HTTP には出さない内部の関数で、画面の流れを通さずに依頼者を作りたい
+テストの補助(tests/web_app_helpers.py の submit_interview)だけが直接呼ぶ。
 
 進める順番(手順の前提)は、サーバが確かめる。前の手順を終えていなければ 409(detail は、足りない手順の名前)。
 - 年収の読み取りの前に、プロフィール(profile_missing)。年収の確認の前に、読み取り(salary_proposal_missing)。
@@ -20,6 +22,7 @@ from fastapi import HTTPException
 from negotiation_core import AXES, AXIS_KEYS
 from vault.api_models import PutBlocklistRequest
 
+from web.api_models import InterviewSubmitRequest
 from web.config import LimitsConfig
 from web.interview import agent as agent_module
 from web.interview.agent import ExtractionKind, InterviewAgent, InterviewLlmFailure
@@ -579,6 +582,21 @@ class InterviewService:
     # 手順 9: 送信
     # ------------------------------------------------------------------
 
+    async def submit_policy(self, principal_id: str, submission: InterviewSubmitRequest) -> None:
+        """送信のロジック(§5 の 9): 丸める(§2.5。矛盾は 422 policy_invalid)→ 利用記録を作る → 金庫の PUT policy。
+
+        金庫に初めて書く前に、利用記録 principals_meta を作る(§5 の 9・§6.3。削除中の依頼者には 409 principal_deleting)。丸めに失敗したときは、
+        利用記録も作らず、金庫にも書かない。面談の確認・「最悪ここまで」の承認は確かめない(submit が確かめてから呼ぶ)ので、HTTP には出さない
+        (台帳 X-81)。画面の流れを通さずに依頼者を作るテストの補助だけが、直接呼ぶ。
+        """
+        try:
+            put_policy_request = submission.to_put_policy_request()
+        except ValueError:
+            raise InterviewError(422, "policy_invalid") from None  # エラーの文には値が入るので返さない
+        if await self._meta.create_if_absent(principal_id) == "deleting":
+            raise InterviewError(409, "principal_deleting")
+        await self._vault.put_policy(principal_id, put_policy_request)
+
     async def submit(self, principal_id: str) -> dict[str, str]:
         """確認と「最悪ここまで」の承認がそろった面談を、web で丸めて金庫に送る。送ったら、面談の状態をメモリから消す。"""
         state = self._state(principal_id)
@@ -590,13 +608,10 @@ class InterviewService:
         if find_conflicts(derived.entries):
             raise InterviewError(409, "contradiction")
         try:
-            put_policy_request = to_submit_request(derived.entries, self._removed(state), state.bands).to_put_policy_request()
+            submission = to_submit_request(derived.entries, self._removed(state), state.bands)
         except ValueError:
             raise InterviewError(422, "policy_invalid") from None  # エラーの文には値が入るので返さない
-        # 既存の送信 API(web.api の submit_interview)と同じ操作: 金庫に初めて書く前に、利用記録を作る(§5 の 9・§6.3)
-        if await self._meta.create_if_absent(principal_id) == "deleting":
-            raise InterviewError(409, "principal_deleting")
-        await self._vault.put_policy(principal_id, put_policy_request)
+        await self.submit_policy(principal_id, submission)
         if state.blocklist is not None:
             await self._vault.put_blocklist(principal_id, PutBlocklistRequest(blocklist=list(state.blocklist)))
         self.store.discard(principal_id)  # 面談の状態を破棄する(画面のフォームの状態を消すのは、画面の側)

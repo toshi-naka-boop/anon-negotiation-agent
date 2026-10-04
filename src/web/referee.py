@@ -26,6 +26,10 @@ LLM に送る前に、物理の呼び出し数(交渉ごと・1 日)を `(defaul
 本物の候補者の交渉では、金庫への操作を 1 回ごとに、その依頼者のロックの下で行う(台帳 I-4。
 RefereeDeps.locks を渡したとき。エージェントを呼んでいる間はロックを持たない)。
 
+交渉が終わった(FINISHED)ときに、完了のフック RefereeDeps.on_finished(NegotiationContext)を呼ぶ(段の決着処理: 判定の検出・架空人物の自動応答・
+台帳。web.stages.StageSettler。台帳 X-84)。フックが失敗しても、レフェリーは落とさない(例外の型名だけをログに書く)。判定の直後に web が落ちた・
+フックが失敗した決着は、見回り(web.sweeper)が拾う。
+
 待って読み直す間隔は、既定では wait_poll_interval_seconds(暫定 2 秒)。ただし金庫が、送り直しても直らないエラー(404・409
 以外の 4xx。422 など)を返した後は、見回りの間隔(暫定 60 秒。client_error_wait_seconds)にする(台帳 L10-1)。読み直すたびに
 エージェント(LLM)を呼ぶので、直らないエラーで 2 秒ごとに呼び直すと、手番の期限で終わるまでの間に、LLM の呼び出しを使い果たす。
@@ -160,6 +164,9 @@ class RefereeDeps:
     count_llm_calls: bool = True
     # 1 回の計画から実行する確かめの数の上限(§2.7。[web.llm_budget] max_checks_per_plan)
     max_checks_per_plan: int = DEFAULT_WEB_CONFIG.llm_budget.max_checks_per_plan
+    # 交渉が終わった(FINISHED。判定が出た・交渉が消えた)ときに呼ぶ、完了のフック(台帳 X-84)。本番の組み立て(web.services)は、段の決着処理
+    # (web.stages.StageSettler)を渡す。None なら、何もしない。失敗しても、レフェリーは落とさない(見回りが拾う)。
+    on_finished: Callable[[NegotiationContext], Awaitable[None]] | None = None
 
 
 class StepOutcome(enum.Enum):
@@ -227,6 +234,7 @@ class Referee:
             outcome = await self.step()
             if outcome is StepOutcome.FINISHED:
                 await self._log_call_count()
+                await self._notify_finished()
                 return
             if outcome in (StepOutcome.WAITING, StepOutcome.RETRY):
                 await self._deps.sleep(self._wait_seconds)
@@ -439,6 +447,19 @@ class Referee:
         except LlmBudgetUnavailable:
             return
         _log.info("negotiation finished llm_calls=%d", count)
+
+    async def _notify_finished(self) -> None:
+        """交渉が終わったことを、完了のフック(段の決着処理。台帳 X-84)に知らせる。失敗しても、レフェリーは落とさない(見回りが拾う)。
+
+        ログには、例外の型名だけを書く(依頼者 ID・交渉 ID は書かない)。タスクの取消(CancelledError)は、そのまま伝える。
+        """
+        hook = self._deps.on_finished
+        if hook is None:
+            return
+        try:
+            await hook(self._context)
+        except Exception as exc:  # noqa: BLE001  フックの失敗で、終わった交渉のタスクを異常終了させない
+            _log.error("finish hook failed error=%s", type(exc).__name__)
 
     # ------------------------------------------------------------------
     # エージェントの呼び出し

@@ -28,7 +28,7 @@ from test_stages import agree
 from vault_helpers import new_id, put_candidate_and_employer_templates, sample_package
 from web.session import SESSION_COOKIE_NAME
 from web.vault_client import VaultNotFoundError, VaultUnavailableError
-from web_app_helpers import interview_body
+from web_app_helpers import submit_interview
 from web_helpers import create_demo_negotiation
 
 _HOUR = dt.timedelta(hours=1)
@@ -73,7 +73,7 @@ async def test_other_principals_id_is_forbidden_on_every_principal_route_and_cha
 
     routes = [
         ("GET", f"/v1/principals/{pid_b}/policy", None),
-        ("POST", f"/v1/principals/{pid_b}/interview", interview_body(reject_anchors=[])),
+        ("POST", f"/v1/principals/{pid_b}/interview/submit", None),  # 面談の送信は、面談の API の /submit だけ(台帳 X-81)
         ("POST", f"/v1/principals/{pid_b}/blocklist", {"blocklist": ["company-x"]}),
         ("GET", f"/v1/principals/{pid_b}/negotiations", None),
         ("POST", f"/v1/principals/{pid_b}/negotiations", {"request_id": "request-0002", "employer_template_id": template_id}),
@@ -160,7 +160,7 @@ async def test_state_changing_requests_without_x_requested_with_are_rejected_and
     negotiations_before = len(list(web_app.store._negotiations().stream()))
 
     posts = [
-        (f"/v1/principals/{pid}/interview", interview_body(accept_anchors=[])),
+        (f"/v1/principals/{pid}/interview/submit", None),
         (f"/v1/principals/{pid}/blocklist", {"blocklist": ["company-x"]}),
         (f"/v1/principals/{pid}/negotiations", {"request_id": "request-0002", "employer_template_id": template_id}),
         (f"/v1/principals/{pid}/delete", None),
@@ -475,7 +475,7 @@ async def test_the_principal_id_is_issued_only_by_the_start_page_get_and_never_o
     stranger = web_app.browser()
     pid_x = "0123456789abcdef"
     posts = [
-        (f"/v1/principals/{pid_x}/interview", interview_body(), 401),
+        (f"/v1/principals/{pid_x}/interview/begin", None, 401),
         (f"/v1/principals/{pid_x}/blocklist", {"blocklist": []}, 401),
         (f"/v1/principals/{pid_x}/negotiations", {"request_id": "request-0001", "employer_template_id": "t"}, 401),
         (f"/v1/principals/{pid_x}/delete", None, 401),
@@ -501,11 +501,12 @@ async def test_the_principal_id_is_issued_only_by_the_start_page_get_and_never_o
     assert pid_a != pid_b
 
     # 有効なクッキーを持つ POST の応答は、クッキーを上書きしない(付いても、同じ依頼者 ID の期限の延長だけ)。
-    registered = await stranger.post(f"/v1/principals/{pid_a}/interview", interview_body())
-    assert registered.status_code == 200
-    for header in registered.headers.get_list("set-cookie"):
+    begun = await stranger.post(f"/v1/principals/{pid_a}/interview/begin")
+    assert begun.status_code == 200
+    for header in begun.headers.get_list("set-cookie"):
         assert SESSION_COOKIE_NAME in header
     assert stranger.pid == pid_a
+    await submit_interview(web_app.services, pid_a)  # 面談を送った依頼者にする(利用記録を作る。ブロックリストの登録に要る)
     web_app.clock.advance(2 * _HOUR)  # 1 時間たてば、利用記録の更新と一緒に、クッキーの期限が延びる
     extended = await stranger.post(f"/v1/principals/{pid_a}/blocklist", {"blocklist": ["company-x"]})
     assert extended.status_code == 200
@@ -533,7 +534,7 @@ async def test_reopening_the_start_page_with_a_valid_cookie_keeps_the_same_id(we
     assert browser.pid == first
 
     # 面談を送った依頼者は、1 時間後に開き直すと、期限だけが延びる(同じ ID のまま)。
-    await browser.post(f"/v1/principals/{first}/interview", interview_body())
+    await submit_interview(web_app.services, first)
     web_app.clock.advance(2 * _HOUR)
     third = await browser.get("/start")
     assert browser.pid == first
@@ -626,7 +627,7 @@ async def test_other_principals_negotiation_and_ledger_are_forbidden_on_the_stag
     pid_b, nid_b = await _agreed_negotiation_of(web_app, browser_b, "request-0002")
     demo_nid = create_demo_negotiation(web_app.store)
     stages = web_app.default_db.collection("stages")
-    assert (await browser_b.get(f"/v1/negotiations/{nid_b}/stage")).status_code == 200  # 本人なら通る(判定の記録まで進む)
+    assert (await browser_b.get(f"/v1/negotiations/{nid_b}/stage")).status_code == 200  # 本人なら通る(読み出しだけ。段の状態は書かない)
     before = (stages.document(nid_b).get().to_dict(), len(list(web_app.default_db.collection("principals").document(pid_b).collection("ledger").stream())))
 
     for nid in (nid_b, demo_nid, "0123456789abcdef", "not-a-negotiation-id"):

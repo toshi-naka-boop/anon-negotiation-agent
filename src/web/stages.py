@@ -14,7 +14,8 @@ stages/{nid} は、交渉の作成直後に作る。作り損ねても、見回�
 
 【段の遷移】(④。§6.2)
 - 段 0(自動): 見込みと組み合わせを双方に出す。中身はイベント列の最終記録で、web には写さない。合意で終わった交渉だけが、段 1 以降に進める
-  (見込み「なし」は、段 0 の表示で終わり)。判定を見つけたとき(agreed_at)に、段 0 を台帳に記録する。
+  (見込み「なし」は、段 0 の表示で終わり)。判定を見つけたとき(agreed_at)に、段 0 を台帳に記録する。見込み「なし」で終わった交渉も、
+  段 0 の開示(「なし」を双方に出したこと)を台帳に 1 行書く(items は result だけ。台帳 L19-14: FR-38 の「全件」)。
 - 段 1: 双方が「会う」を押した時点で、候補者の匿名職務要約を求人側に出す(非公開求人なら、企業名を候補者に出す。FR-32)。要約は
   候補者本人が書く(本物の候補者は「会う」のときに送る。デモ・攻撃の架空の候補者はフィクスチャのもの)。LLM は通さない(FR-33)。
 - 段 2: 双方が「承認」を押した時点で、氏名と連絡先を出す。実ユーザーの段 2 は模擬表示で、連絡先を集めない(P-2)。
@@ -24,8 +25,17 @@ stages/{nid} は、交渉の作成直後に作る。作り損ねても、見回�
 【架空人物の自動応答】(P-2)
 求人側は、ハッカソンではいつもフィクスチャで、人がいない。フィクスチャの設定(auto_response)に従って、サーバが「会う」「承認」を自動で
 押す(StageFlow)。デモ・攻撃の架空の候補者も、フィクスチャの職務要約・連絡先で、サーバが自動で押す。ほかの訪問者が求人側を操作する経路は
-作らない(API は候補者側の操作だけ)。自動応答は、段の状態を読んだとき・候補者が操作したときに、その場で冪等に行う(判定の後に web が
-落ちても、次に開いたときに行われる)。
+作らない(API は候補者側の操作だけ)。
+
+【決着処理は GET の外で行う】(台帳 X-84)
+判定の検出(agreed_at)・架空人物の自動応答・台帳の書き込み(StageFlow.settle)は、状態を変えるので、GET では行わない(§6.3: 状態を変えるのは
+POST と独自ヘッダに限る。SameSite=Lax のクッキーは外部サイトからのトップレベルの GET に付くので、リンクを踏ませるだけで決着処理と台帳の時刻を先行
+させられてしまう)。GET(StageFlow.view)は、段の状態がなければ作る(冪等な作成。台帳 L9-4)だけの、読み出し。決着処理は、次の 3 つで行う(どれも冪等)。
+- (a) レフェリーの完了のフック(web.referee の RefereeDeps.on_finished → StageSettler。判定の直後)。
+- (b) 見回り(web.sweeper。settled_at が空の段で、金庫の進行中の一覧にないものを拾う。フックが失敗しても、判定の直後に web が落ちても、ここで決着する)。
+- (c) 本人の「会う」「承認」(POST)。
+決着が済んだことは settled_at に残す(判定が出て、決着処理を済ませた時刻。見回りが拾う対象を絞る。作成のときは null で書く: 見回りは
+settled_at が null の文書を引く)。
 
 ログには、競合で書けなかったこと(StageBusy)だけを書く(依頼者 ID・交渉 ID・職務要約は書かない)。
 """
@@ -58,7 +68,9 @@ from vault.models import Likelihood, NegotiationResult
 from web.config import DEFAULT_WEB_CONFIG, RetentionConfig
 from web.fictional_answerer import FixtureCatalog
 from web.ledger import DisclosureLedger, LedgerOperator, LedgerRecipient, LedgerRow
-from web.vault_client import VaultClient, VaultNotFoundError
+from web.locks import PrincipalLocks
+from web.principals_meta import DELETION_ACTIVE, PrincipalsMetaStore
+from web.vault_client import VaultClient, VaultConflictError, VaultNotFoundError
 
 _log = logging.getLogger(__name__)
 
@@ -122,6 +134,8 @@ EMPLOYER_SEES: dict[int, Sequence[Item]] = dict(
 )
 # 合意に至らなかった交渉(見込み「なし」)で、求人側に見えるもの(FR-28: 「なし」だけ。組み合わせは出さない)。
 EMPLOYER_SEES_WITHOUT_AGREEMENT: Sequence[Item] = ("likelihood",)
+# 見込み「なし」で終わった交渉の、段 0 の開示を台帳に書くときの items(台帳 L19-14)。最終結果(「なし」だけ。組み合わせは出さない)を双方に出した。
+UNAGREED_DISCLOSURE_ITEMS: Sequence[str] = ("result",)
 # 非公開求人(confidential)の企業名を候補者に出す段(FR-32)。公開の求人は最初から出す。
 COMPANY_NAME_STAGE = 1
 
@@ -150,6 +164,9 @@ class StageDocument(BaseModel):
     employer_template_id: str | None = None
     candidate_template_id: str | None = None
     agreed_at: dt.datetime | None = None  # 合意で終わった判定を見つけた時刻(段 1 以降に進める印。段 0 の台帳もこのときに書く)
+    # 判定が出て、決着処理(判定の検出・自動応答・台帳)を済ませた時刻(台帳 X-84)。見回りが、空の段で、進行中でないものを拾う。
+    # 見回りが「settled_at が null」で引けるよう、作成のときは null のまま項目を付ける(ほかの任意の項目と違い、空でも消さない)。
+    settled_at: dt.datetime | None = None
     meet: dict[str, bool] = Field(default_factory=_both_sides_off)
     approve: dict[str, bool] = Field(default_factory=_both_sides_off)
     job_summary: str | None = None  # 段 1 の匿名職務要約(候補者の「会う」のときに書く。生の値なので、台帳には書かない)
@@ -183,6 +200,7 @@ class StageState:
     job_summary: str | None
     employer_template_id: str | None
     candidate_template_id: str | None
+    settled: bool = False  # 決着処理を済ませたか(settled_at)
 
     def flags(self, kind: StageKind) -> SideFlags:
         return self.meet if kind == "meet" else self.approve
@@ -220,6 +238,7 @@ def _state_from(nid: str, data: dict) -> StageState:
         job_summary=_optional_str(data.get("job_summary")),
         employer_template_id=_optional_str(data.get("employer_template_id")),
         candidate_template_id=_optional_str(data.get("candidate_template_id")),
+        settled=data.get("settled_at") is not None,
     )
 
 
@@ -231,6 +250,14 @@ class PressOutcome:
     refused: PressRefusal | None = None
     changed: bool = False
     advanced_to: int | None = None  # この呼び出しで段が進んだなら、新しい段
+
+
+@dataclass(frozen=True)
+class UnsettledStage:
+    """決着処理がまだの段(settled_at が null)。見回りが拾う(台帳 X-84)。candidate_principal_id は、候補者が架空人物(デモ・攻撃)なら None。"""
+
+    nid: str
+    candidate_principal_id: str | None
 
 
 def _press_row_id(nid: str, kind: StageKind, side: Side) -> str:
@@ -295,7 +322,7 @@ class StageStore:
         data = document.model_dump(mode="python")
         for optional in ("ttl_at", "employer_template_id", "candidate_template_id", "agreed_at", "job_summary"):
             if data[optional] is None:
-                del data[optional]  # 期限・テンプレート ID・要約は、ないときは項目そのものを付けない
+                del data[optional]  # 期限・テンプレート ID・要約は、ないときは項目そのものを付けない(settled_at だけは null で付ける)
         try:
             # create は「なければ作る」を 1 回の書き込みで行う。すでにあれば何も変えない
             # (段が進んだ文書を、段 0 で上書きしない。冪等)。
@@ -373,6 +400,69 @@ class StageStore:
     async def record_agreement(self, nid: str) -> Literal["recorded", "already", "absent"]:
         """合意で終わった判定を見つけたことを記録する(冪等)。段 1 以降に進める印で、段 0 の表示を台帳(本物の候補者)に 1 回だけ書く。"""
         return await asyncio.to_thread(self._record_agreement_sync, nid)
+
+    def _settle_without_agreement_sync(self, nid: str) -> Literal["recorded", "already", "absent"]:
+        ref = self._ref(nid)
+
+        def txn_fn(txn: firestore.Transaction) -> Literal["recorded", "already", "absent"]:
+            snap = ref.get(transaction=txn)
+            if not snap.exists:
+                return "absent"
+            data = snap.to_dict()
+            if data.get("settled_at") is not None:
+                return "already"  # 決着の印が、台帳の行と同じトランザクションで立つので、行は 1 回しか書かない
+            now = self._clock.now()
+            txn.update(ref, dict(settled_at=now))
+            principal_id = _optional_str(data.get("candidate_principal_id"))
+            if principal_id is not None:  # 台帳は依頼者ごと。架空の候補者(デモ・攻撃)の交渉には、持ち主がいない
+                row = LedgerRow(
+                    principal_id=principal_id,
+                    nid=nid,
+                    action="disclose",
+                    stage=0,
+                    operator="system",
+                    items=list(UNAGREED_DISCLOSURE_ITEMS),
+                    to="both",
+                    at=now,
+                )
+                txn.set(self._ledger.row_ref(principal_id, _stage_row_id(nid, 0)), row.model_dump(mode="python"))
+            return "recorded"
+
+        return self._run_transaction(txn_fn)
+
+    async def settle_without_agreement(self, nid: str) -> Literal["recorded", "already", "absent"]:
+        """見込み「なし」で終わった判定を決着する(冪等。台帳 L19-14): 段 0 の開示(「なし」を双方に出したこと)を台帳(本物の候補者)に 1 行書き、
+        同じトランザクションで決着の印(settled_at)を立てる。段 1 以降には進めない(agreed_at は付けない)。"""
+        return await asyncio.to_thread(self._settle_without_agreement_sync, nid)
+
+    def _mark_settled_sync(self, nid: str) -> Literal["marked", "already", "absent"]:
+        ref = self._ref(nid)
+
+        def txn_fn(txn: firestore.Transaction) -> Literal["marked", "already", "absent"]:
+            snap = ref.get(transaction=txn)
+            if not snap.exists:
+                return "absent"
+            if snap.to_dict().get("settled_at") is not None:
+                return "already"
+            txn.update(ref, dict(settled_at=self._clock.now()))
+            return "marked"
+
+        return self._run_transaction(txn_fn)
+
+    async def mark_settled(self, nid: str) -> Literal["marked", "already", "absent"]:
+        """決着処理(合意の記録と架空人物の自動応答)を済ませたことを記録する(冪等。最初の時刻を残す。台帳 X-84)。"""
+        return await asyncio.to_thread(self._mark_settled_sync, nid)
+
+    def _list_unsettled_sync(self) -> list[UnsettledStage]:
+        query = self._db.collection(STAGES_COLLECTION).where(filter=FieldFilter("settled_at", "==", None))
+        return [
+            UnsettledStage(nid=snap.id, candidate_principal_id=_optional_str(snap.to_dict().get("candidate_principal_id")))
+            for snap in query.stream()
+        ]
+
+    async def list_unsettled(self) -> list[UnsettledStage]:
+        """決着処理がまだの段(settled_at が null)。進行中の交渉の段も含む(見回りが、金庫の進行中の一覧と突き合わせて除く。台帳 X-84)。"""
+        return await asyncio.to_thread(self._list_unsettled_sync)
 
     @staticmethod
     def _disclose_row(principal_id: str, nid: str, stage: int, operator: LedgerOperator, now: dt.datetime) -> LedgerRow:
@@ -667,7 +757,7 @@ class StageFlow:
         return view.counterparty if isinstance(view.counterparty, CandidateAttributeBands) else None
 
     # ------------------------------------------------------------------
-    # 段の状態を整える(段の状態の作成・判定の記録・架空人物の自動応答)
+    # 段の状態を整える(読み出し・決着処理)
     # ------------------------------------------------------------------
 
     async def _read(self, nid: str) -> StageState:
@@ -676,22 +766,38 @@ class StageFlow:
             raise StageBusy  # 作った直後に消えた(削除と競合した)。操作は冪等なので、呼び直してよい
         return state
 
-    async def settle(self, facts: NegotiationFacts) -> Settled:
-        """段の状態を整える。なければ作り(画面で交渉を開いたとき。台帳 L9-4)、合意なら判定を記録して、架空人物の自動応答を行う。すべて冪等。"""
+    async def _load(self, facts: NegotiationFacts) -> Settled:
+        """段の状態を読む。なければ作る(冪等な作成。画面で交渉を開いたとき・決着処理のとき。台帳 L9-4)。ほかは書かない。"""
         state = await self._stages.get(facts.nid)
         if state is None:
             await self._stages.ensure(facts.nid, facts.candidate_principal_id)  # 判定の後に作り損ねた段の状態を、開いたときに作る(台帳 L9-4)
             state = await self._read(facts.nid)
         if state.candidate_principal_id != facts.candidate_principal_id:
             raise CorruptStage("the stage document belongs to another kind of candidate")
-        employer = self._employer_from(state, facts.job_id)
-        candidate = self._candidate_from(state)
+        return Settled(state, self._employer_from(state, facts.job_id), self._candidate_from(state))
+
+    async def settle(self, facts: NegotiationFacts) -> Settled:
+        """決着処理(段の状態を書く。GET からは呼ばない。台帳 X-84)。判定が出ていれば、判定の検出・架空人物の自動応答・台帳の書き込みを行う。すべて冪等。
+
+        - 合意で終わった: 判定を記録し(agreed_at・段 0 の台帳)、架空人物の自動応答を行って、決着の印(settled_at)を立てる。
+        - 見込み「なし」で終わった: 段 0 の開示(「なし」を双方に出したこと)を台帳に 1 行書く(台帳 L19-14)。段 1 以降には進めない。
+        - まだ判定が出ていない: 何もしない(段の状態がなければ作るだけ)。
+        呼ぶのは、レフェリーの完了のフック・見回り(StageSettler)と、本人の「会う」「承認」(POST)。
+        """
+        loaded = await self._load(facts)
+        state = loaded.state
         if facts.agreed:
             if not state.agreed:
                 await self._stages.record_agreement(facts.nid)
                 state = await self._read(facts.nid)
-            state = await self._auto_respond(facts, state, employer, candidate)
-        return Settled(state, employer, candidate)
+            state = await self._auto_respond(facts, state, loaded.employer, loaded.candidate)
+            if not state.settled:
+                await self._stages.mark_settled(facts.nid)
+                state = dataclasses.replace(state, settled=True)
+        elif facts.judged and not state.settled:
+            await self._stages.settle_without_agreement(facts.nid)
+            state = dataclasses.replace(state, settled=True)
+        return Settled(state, loaded.employer, loaded.candidate)
 
     async def _auto_respond(
         self,
@@ -728,8 +834,11 @@ class StageFlow:
     # ------------------------------------------------------------------
 
     async def view(self, facts: NegotiationFacts) -> StageView:
-        """候補者から見た段の状態。見るたびに、段の状態を整える(settle)。"""
-        return self._build_view(facts, await self.settle(facts))
+        """候補者から見た段の状態。純粋な読み出し(台帳 X-84): 段の状態がなければ作る(冪等な作成。台帳 L9-4)だけで、判定の検出・自動応答・台帳は書かない。
+
+        判定の直後で決着処理(settle)がまだの間は、段 0 のまま(求人側の自動応答も、まだ押していない)。決着処理は、レフェリーの完了のフックと見回りが行う。
+        """
+        return self._build_view(facts, await self._load(facts))
 
     @staticmethod
     def _require_agreed(facts: NegotiationFacts) -> None:
@@ -808,3 +917,60 @@ class StageFlow:
             company=company,
             disclosed_to_employer=disclosed,
         )
+
+
+class StageSettler:
+    """決着処理(StageFlow.settle)を、GET の外で行う(台帳 X-84)。レフェリーの完了のフックと、見回りが呼ぶ。
+
+    交渉 ID と、候補者の依頼者 ID(候補者が架空人物のデモ・攻撃なら None)から、金庫の判定を読み、段の状態を整える。
+    - 本物の候補者の交渉は、その依頼者のロックの下で、利用記録(principals_meta)が使える状態(削除中でも削除済みでもない)のときだけ行う。
+      判定の後・一覧を読んだ後に本人の削除が済むと、削除した依頼者の段の状態・台帳を作り直して残してしまうため(台帳 I-4・C-41。web.sweeper の
+      段の状態の作成と同じ)。本人の POST は、ミドルウェアがすでにロックを持っているので、ここを通らない。
+    - 架空の候補者の交渉は、金庫のデモ用の読み出しの口(正本。台帳 X-38)が認めた交渉だけ。
+    ログには何も書かない(呼び出し側が、例外の型名だけを書く)。
+    """
+
+    def __init__(self, *, flow: StageFlow, vault: VaultClient, locks: PrincipalLocks, meta: PrincipalsMetaStore) -> None:
+        self._flow = flow
+        self._vault = vault
+        self._locks = locks
+        self._meta = meta
+
+    async def settle(self, nid: str, candidate_principal_id: str | None) -> bool:
+        """交渉 nid の決着処理を行う(冪等)。行ったら True。
+
+        False(何もしなかった): まだ判定が出ていない・交渉(または依頼者)が金庫にない・依頼者が使えない状態(削除中・削除済み)。
+        金庫・Firestore の失敗は、例外のまま伝える(呼び出し側が、フックなら記録して、見回りなら次の見回りでやり直す)。
+        """
+        if candidate_principal_id is None:
+            return await self._settle_fictional(nid)
+        async with self._locks.lock(candidate_principal_id):
+            meta = await self._meta.get(candidate_principal_id)
+            if meta is None or meta.deletion_state != DELETION_ACTIVE:
+                return False
+            return await self._settle_live(nid, candidate_principal_id)
+
+    async def _settle_fictional(self, nid: str) -> bool:
+        try:
+            events = await self._vault.get_demo_events(nid, "candidate")
+        except VaultNotFoundError:
+            return False  # 金庫が、架空の候補者の交渉と認めない(本物の交渉・消えた交渉)
+        facts = self._flow.facts_for_fictional(nid, events)
+        if not facts.judged:
+            return False
+        await self._flow.settle(facts)
+        return True
+
+    async def _settle_live(self, nid: str, principal_id: str) -> bool:
+        try:
+            summaries = await self._vault.list_principal_negotiations(principal_id)
+        except (VaultNotFoundError, VaultConflictError):
+            return False  # 金庫に依頼者がいない・金庫の側でも削除中
+        summary = next((item for item in summaries if item.nid == nid), None)
+        if summary is None:
+            return False
+        facts = self._flow.facts_for_principal(summary, principal_id)
+        if not facts.judged:
+            return False
+        await self._flow.settle(facts)
+        return True

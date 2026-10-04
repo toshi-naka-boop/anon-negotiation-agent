@@ -6,8 +6,13 @@
   期限か寿命で必ず終わる。
 - タスクがなければ、レフェリーのタスクを作り直す(同じ手番から続く。金庫が状態の正本なので)。
 
+進行中の一覧のあとに、判定が済んだのに段の決着処理(判定の検出・架空人物の自動応答・台帳。web.stages.StageSettler)がまだの段を拾う(台帳 X-84)。
+GET が段の状態を書かなくなった(状態を変えるのは POST に限る。§6.3)ので、決着処理はレフェリーの完了のフックと、ここで行う。フックが失敗した・
+判定の直後に web が落ちた交渉(終わっているので、金庫の進行中の一覧には現れない)も、ここで決着する。拾う対象は、段の状態の settled_at が null
+(決着の印がない)で、金庫の進行中の一覧にないもの。判定が出ていなければ(一覧を読んだ後に作られた交渉など)、StageSettler が何もしない。
+
 一覧の 1 件の処理が失敗しても、ほかの交渉の見回りは続ける(次の見回りでやり直す)。1 件の中でも、
-3 つの処理は互いに独立に失敗を扱う(段階開示の状態を作れなくても、期限切れとタスクの作り直しは行う)。
+3 つの処理は互いに独立に失敗を扱う(段階開示の状態を作れなくても、期限切れとタスクの作り直しは行う)。決着処理の失敗も、1 件ごとに数えて続ける。
 
 最初の 1 回の見回りが終わるまで(first_sweep_done が False の間)は、新しい交渉の作成を受け付けない(503。§8.2・台帳 X-53)。
 進行中の交渉の一覧(レフェリーのタスクの一覧)が、一覧を読み終えて、タスクを作り直すまでは、作成の入場の制限が、進行中の交渉の
@@ -39,6 +44,9 @@ from web.vault_client import VaultClient
 
 _log = logging.getLogger(__name__)
 
+# 段の決着処理を行う口(web.stages.StageSettler.settle): 交渉 ID と候補者の依頼者 ID(架空の候補者なら None)を受け取り、行ったら True。
+SettleStage = Callable[[str, str | None], Awaitable[bool]]
+
 
 @dataclass
 class SweepReport:
@@ -49,6 +57,7 @@ class SweepReport:
     expire_calls: int = 0
     expired: int = 0
     tasks_started: int = 0
+    stages_settled: int = 0  # 判定が済んで、決着処理を行った段(台帳 X-84)
     errors: int = 0
 
 
@@ -66,6 +75,7 @@ class Sweeper:
         config: SweeperConfig = DEFAULT_WEB_CONFIG.sweeper,
         locks: PrincipalLocks | None = None,
         meta: PrincipalsMetaStore | None = None,
+        settle: SettleStage | None = None,
     ) -> None:
         if (locks is None) != (meta is None):
             # 片方だけでは、本物の候補者の段の状態を、確かめずに作る(または、ロックなしで確かめる)ことになる。
@@ -78,6 +88,7 @@ class Sweeper:
         self._config = config
         self._locks = locks
         self._meta = meta
+        self._settle = settle
         self._first_sweep_done = False
 
     @property
@@ -102,8 +113,34 @@ class Sweeper:
         report.listed = len(items)
         for item in items:
             await self._sweep_item(item, report)
-        self._first_sweep_done = True
+        self._first_sweep_done = True  # 進行中の交渉の処理(タスクの作り直し)は済んだ。決着処理の数に、新しい交渉の作成を待たせない
+        await self._settle_ended(items, report)
         return report
+
+    async def _settle_ended(self, open_items: list[OpenNegotiationSummary], report: SweepReport) -> None:
+        """判定が済んで、段の決着処理がまだの段を拾う(台帳 X-84)。settle を渡していなければ(段階開示の部品を持たない組み立て)、何もしない。
+
+        拾うのは、決着の印(settled_at)がなく、金庫の進行中の一覧にない段。進行中の交渉は、レフェリーの完了のフックが決着させる。
+        1 件の失敗は数えて記録するだけで、ほかの段は続ける(次の見回りでやり直す)。
+        """
+        if self._settle is None:
+            return
+        try:
+            unsettled = await self._stages.list_unsettled()
+        except Exception as exc:
+            report.errors += 1
+            _log.error("sweep step failed step=list_unsettled error=%s", type(exc).__name__)
+            return
+        open_nids = {item.nid for item in open_items}
+        for stage in unsettled:
+            if stage.nid in open_nids:
+                continue
+            try:
+                if await self._settle(stage.nid, stage.candidate_principal_id):
+                    report.stages_settled += 1
+            except Exception as exc:
+                report.errors += 1
+                _log.error("sweep step failed step=settle_stage error=%s", type(exc).__name__)
 
     async def _sweep_item(self, item: OpenNegotiationSummary, report: SweepReport) -> None:
         # 段階開示の状態を先に整える: 判定の後に web が落ちても失われないようにするため(§6.2)。

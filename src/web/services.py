@@ -7,6 +7,9 @@
 
 架空人物の自動応答: fixtures(FixtureCatalog。架空人物のフィクスチャの表)を渡すと、段階開示の自動応答(架空の求人の「会う」「承認」)と、
 途中確認の自動回答(answerer を渡さなければ、フィクスチャで答える CatalogAnswerer)が動く。渡さなければ、どちらもない(以前と同じ)。
+
+段の決着処理(判定の検出・架空人物の自動応答・台帳。StageSettler。台帳 X-84)は、GET では行わない。レフェリーの完了のフック(RefereeDeps.on_finished)と、
+交渉の見回り(Sweeper の settle)が呼ぶ。本人の「会う」「承認」(POST)は、StageFlow がその場で行う。
 """
 
 import asyncio
@@ -27,9 +30,9 @@ from web.llm_budget import LlmBudget
 from web.locks import PrincipalLocks
 from web.principal_sweeper import PrincipalSweeper
 from web.principals_meta import PrincipalsMetaStore
-from web.referee import FictionalAnswerer, RefereeDeps, RefereeManager, SendTurn, Sleep
+from web.referee import FictionalAnswerer, NegotiationContext, RefereeDeps, RefereeManager, SendTurn, Sleep
 from web.session import SessionCodec
-from web.stages import StageFlow, StageStore
+from web.stages import StageFlow, StageSettler, StageStore
 from web.sweeper import Sweeper
 from web.vault_client import VaultClient
 
@@ -47,6 +50,7 @@ class WebServices:
     stages: StageStore
     ledger: DisclosureLedger
     stage_flow: StageFlow
+    stage_settler: StageSettler
     llm_budget: LlmBudget
     deletion: PrincipalDeletion
     referees: RefereeManager
@@ -80,6 +84,7 @@ def build_services(
     stages = StageStore(default_db, clock, config.retention)
     ledger = DisclosureLedger(default_db)
     stage_flow = StageFlow(stages=stages, vault=vault, fixtures=fixtures if fixtures is not None else FixtureCatalog())
+    stage_settler = StageSettler(flow=stage_flow, vault=vault, locks=locks, meta=meta)  # 段の決着処理(GET の外。台帳 X-84)
     if answerer is None and fixtures is not None:
         answerer = CatalogAnswerer(stage_flow)  # 架空人物の途中確認は、フィクスチャで自動回答する(§4.4)。渡さなければ、24 時間待つ
     llm_budget = LlmBudget(default_db, clock, config.llm_budget)
@@ -91,6 +96,11 @@ def build_services(
     deletion = PrincipalDeletion(
         vault=vault, meta=meta, stages=stages, ledger=ledger, interview_states=interview.store, locks=locks
     )  # 本人の削除と 30 日の自動削除は、面談の途中状態(メモリ)も消す(台帳 I-26)
+
+    async def settle_finished(context: NegotiationContext) -> None:
+        """レフェリーの完了のフック: 終わった交渉の段を決着させる(判定の検出・架空人物の自動応答・台帳)。失敗は、レフェリーが記録する(見回りが拾う)。"""
+        await stage_settler.settle(context.nid, context.candidate_principal_id)
+
     referees = RefereeManager(
         RefereeDeps(
             vault=vault,
@@ -104,6 +114,7 @@ def build_services(
             max_checks_per_plan=config.llm_budget.max_checks_per_plan,
             attacker_instruction=attack.contexts.instruction_for,
             turn_recorder=attack.llm_context.record,
+            on_finished=settle_finished,
         )
     )
     sweeper = Sweeper(
@@ -115,6 +126,7 @@ def build_services(
         config=config.sweeper,
         locks=locks,
         meta=meta,
+        settle=stage_settler.settle,
     )
     principal_sweeper = PrincipalSweeper(
         meta=meta, deletion=deletion, clock=clock, sleep=sleep, config=config.principal_sweeper
@@ -129,6 +141,7 @@ def build_services(
         stages=stages,
         ledger=ledger,
         stage_flow=stage_flow,
+        stage_settler=stage_settler,
         llm_budget=llm_budget,
         deletion=deletion,
         referees=referees,

@@ -42,9 +42,9 @@ from web.ledger import LedgerEntry, LedgerOperator, LedgerRecipient
 from web.panels_api import build_panels
 from web.stages import DEFAULT_STAGES_CONFIG, CompanyView, EmployerDisclosure, Item, SideFlagsView, StageView
 from web.session import SESSION_COOKIE_NAME
-from web.ui_api import StreamConfig, activity_event_stream, build_ui_router, list_cases, list_jobs
+from web.ui_api import StreamConfig, StreamNotAllowed, activity_event_stream, build_ui_router, list_cases, list_jobs
 from web.vault_client import VaultUnavailableError
-from web_app_helpers import interview_body
+from web_app_helpers import submit_interview
 from web_helpers import create_demo_negotiation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -649,7 +649,7 @@ async def test_the_session_info_shows_the_cookies_principal_and_never_issues_one
 
     pid = await browser.open_start_page()
     assert (await browser.get("/v1/session")).json() == {"principal_id": pid, "registered": False}  # 面談は、まだ送信していない
-    assert (await browser.post(f"/v1/principals/{pid}/interview", interview_body())).status_code == 200
+    await submit_interview(web_app.services, pid)  # 面談の送信(内部の関数。公開面には、直接の送信の口はない。台帳 X-81)
     assert (await browser.get("/v1/session")).json() == {"principal_id": pid, "registered": True}
 
 
@@ -878,6 +878,18 @@ async def test_a_temporary_vault_failure_is_retried_and_any_other_failure_ends_t
     assert json.loads(events[1].data) == {"detail": "stream_failed"}
 
 
+@pytest.mark.anyio
+async def test_the_stream_stops_before_reading_when_the_recheck_says_it_may_not_go_on():
+    # 台帳 X-83: read(各 poll の前の確かめ直しを含む)が StreamNotAllowed を投げたら、次の記録を送らずに、その理由を problem で送って閉じる。
+    # それより前に送った記録は、そのまま届いている。閉じた後は、読まない・待たない。
+    events, positions, clock = await run_stream([_log([_entry(1)], 1), StreamNotAllowed("principal_deleting"), _log([_entry(2)], 2)])
+
+    assert [event.event for event in events] == ["activity", "problem"]
+    assert json.loads(events[1].data) == {"detail": "principal_deleting"}
+    assert positions == [0, 1]  # 2 回目の読みで打ち切られ、3 回目はない
+    assert clock.sleeps == [2.0]
+
+
 @pytest.mark.parametrize(
     ("last_event_id", "after_seq", "expected"),
     [("7", 0, 7), ("7", 9, 9), ("0", 3, 3), ("abc", 4, 4), ("-1", 4, 4), ("٣", 4, 4), (str(2**31), 4, 4), ("", 4, 4)],
@@ -1014,6 +1026,70 @@ async def test_the_own_stream_is_refused_while_the_principals_data_is_being_dele
 
     assert (streamed.status_code, streamed.json()) == (409, {"detail": "principal_deleting"})
     assert (plain.status_code, plain.json()) == (409, {"detail": "principal_deleting"})
+
+
+@pytest.mark.anyio
+async def test_the_own_stream_closes_without_sending_the_next_record_when_the_deletion_starts_after_it_was_opened(
+    fast_stream, web_app, monkeypatch
+):
+    # 台帳 X-83・§6.3: つながった後に本人の削除が始まる(deletion_state=deleting)と、次の poll の前の確かめ直しで気づき、金庫を読まずに、
+    # 次の記録を送らずに閉じる(problem の detail は principal_deleting。画面は GET の再取得に切り替えて、409 で理由を表示する)。
+    browser, pid, nid = await live_negotiation(web_app)
+    store = web_app.store
+    _move(store, nid, "candidate", "check", sample_package())
+    order = []
+    original_meta_get, original_get_events = web_app.services.meta.get, web_app.vault.get_events
+
+    async def recording_meta_get(principal_id):
+        order.append("meta")
+        return await original_meta_get(principal_id)
+
+    async def recording_get_events(*args, **kwargs):
+        order.append("events")
+        return await original_get_events(*args, **kwargs)
+
+    monkeypatch.setattr(web_app.services.meta, "get", recording_meta_get)
+    monkeypatch.setattr(web_app.vault, "get_events", recording_get_events)
+
+    async with Sse(web_app.app, f"/v1/stream/negotiations/{nid}/activity", cookie=browser.cookie) as sse:
+        (first,) = await sse.wait_events(1)
+        assert [entry["seq"] for entry in json.loads(first["data"])["entries"]] == [1]  # 始めの記録は届く(何でも閉じているのではない)
+        web_app.default_db.collection("principals_meta").document(pid).update({"deletion_state": "deleting"})  # 削除が始まった
+        _move(store, nid, "candidate", "check", sample_package(salary=750))  # 削除の途中で増えた記録
+        events = await sse.finished()
+
+    assert [event["event"] for event in events] == ["activity", "problem"]
+    assert json.loads(events[1]["data"]) == {"detail": "principal_deleting"}
+    assert '"seq":2' not in sse.body.decode() and "750" not in sse.body.decode()  # 増えた記録は、送っていない
+    assert order[0] == "meta"  # 始めの確認(authorize_own_stream)
+    assert all(order[index - 1] == "meta" for index, call in enumerate(order) if call == "events")  # 金庫を読む前には、毎回、利用記録を読み直す
+    assert order[-1] == "meta" and order.count("events") >= 1  # 最後は、確かめ直して閉じた(金庫は読んでいない)
+
+
+@pytest.mark.anyio
+async def test_the_own_stream_closes_when_the_usage_record_is_gone_and_when_it_cannot_be_read(fast_stream, web_app, monkeypatch):
+    # 削除が終わって利用記録がない(principal_deleted)ときも、利用記録を読み直せないとき(Firestore の失敗)も、閉じる側に倒す
+    # (読めないまま送り続けない)。後者は、読めない理由を画面に送らない(stream_failed)。
+    gone_browser, gone_pid, gone_nid = await live_negotiation(web_app)
+    unreadable_browser, _, unreadable_nid = await live_negotiation(web_app)
+    original_meta_get = web_app.services.meta.get
+
+    async def failing_meta_get(principal_id):
+        raise RuntimeError("secret detail: principals_meta is down")
+
+    async with Sse(web_app.app, f"/v1/stream/negotiations/{gone_nid}/activity", cookie=gone_browser.cookie) as sse:
+        web_app.default_db.collection("principals_meta").document(gone_pid).delete()  # 削除が最後の段まで終わった
+        gone = await sse.finished()
+    assert [event["event"] for event in gone] == ["problem"]
+    assert json.loads(gone[0]["data"]) == {"detail": "principal_deleted"}
+
+    async with Sse(web_app.app, f"/v1/stream/negotiations/{unreadable_nid}/activity", cookie=unreadable_browser.cookie) as sse:
+        monkeypatch.setattr(web_app.services.meta, "get", failing_meta_get)  # 最初の確認の後で、読めなくなる
+        unreadable = await sse.finished()
+    monkeypatch.setattr(web_app.services.meta, "get", original_meta_get)
+    assert [event["event"] for event in unreadable] == ["problem"]
+    assert json.loads(unreadable[0]["data"]) == {"detail": "stream_failed"}
+    assert "secret detail" not in sse.body.decode()
 
 
 @pytest.mark.anyio

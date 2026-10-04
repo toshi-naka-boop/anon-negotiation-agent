@@ -2,6 +2,8 @@
 
 - 段 0 の表示・「会う」「承認」・段 1・段 2 が開いたこと、が 1 行ずつ。行には、見せたものの種類(items)と相手(to)だけを書き、
   生の値(職務要約の本文・氏名・連絡先)は書かない。操作した依頼者 ID と時刻を残す(§6.3)。
+- 見込み「なし」で終わった交渉も、段 0 の開示(「なし」を双方に出したこと)を 1 行書く(items は result だけ。台帳 L19-14。FR-38 の「全件」)。
+  書くのは決着処理(完了のフック・見回り)で、GET ではない(台帳 X-84)。段 1 以降には進めないので、ほかの行はない。
 - 段の状態と台帳は、同じトランザクションで書く(食い違わない)。同じ出来事は 2 行にならない。
 - 本人が読めるのは自分の台帳だけ(GET /v1/principals/{pid}/ledger。時系列で全件)。段階開示が書いた形でない行は返さない。
 - 削除の連鎖(§3.8・§6.3)に含まれることは tests/test_principal_deletion.py・tests/test_inactive_deletion.py(DV-06・DV-16)で確かめる。
@@ -21,10 +23,12 @@ from test_stages import (  # noqa: F401  (stage_env はフィクスチャ)
     ledger_docs,
     live_negotiation,
     meet,
+    settle,
     stage_doc,
     stage_env,
     stage_of,
 )
+from vault.api_models import ControlRequest
 from vault.fixtures import load_case_fixture
 from web_app_helpers import CANARY, documents_mentioning, plant_canaries
 
@@ -119,18 +123,47 @@ async def test_no_raw_value_is_written_to_the_ledger(stage_env):
 
 
 @pytest.mark.anyio
-async def test_a_negotiation_that_did_not_agree_leaves_nothing_in_the_ledger(stage_env):
-    # 合意で終わらなかった交渉は、段 1 以降に進めない(段 0 は「なし」だけの表示)。台帳には何も書かない。
+async def test_a_negotiation_that_did_not_agree_leaves_only_the_stage_zero_disclosure_in_the_ledger(stage_env):
+    # 合意で終わらなかった交渉は、段 1 以降に進めない(段 0 は「なし」だけの表示)。台帳には、段 0 の開示(「なし」を双方に出したこと)の
+    # 1 行だけを書く(台帳 L19-14。FR-38 の「全件」)。items は result だけ(組み合わせは出していない)。
     env = stage_env()
     browser = env.browser()
     pid, nid = await live_negotiation(env, browser, agreed=False)
     await browser.post(f"/v1/negotiations/{nid}/control", dict(action="cancel"))
 
-    await stage_of(browser, nid)
-    await meet(browser, nid)
-
+    await stage_of(browser, nid)  # 見るだけ(GET)では、書かない
     assert (await browser.get(f"/v1/principals/{pid}/ledger")).json() == []
-    assert ledger_docs(env, pid) == {}
+    assert await settle(env, nid, pid) is True  # 判定の直後の決着処理(完了のフックの代わり)
+    assert (await meet(browser, nid)).status_code == 409  # 段 1 以降には進めない
+
+    entries = (await browser.get(f"/v1/principals/{pid}/ledger")).json()
+    assert as_tuples(entries) == [("disclose", 0, "system", ["result"], "both", False)]
+    assert entries[0]["nid"] == nid
+    assert list(ledger_docs(env, pid)) == [f"{nid}-stage0"]
+    row = ledger_docs(env, pid)[f"{nid}-stage0"]
+    assert row["principal_id"] == pid and row["at"] is not None
+    for _ in range(3):  # 何度決着処理を行っても(完了のフック・見回りの重なり・再送)、行は増えない
+        assert await settle(env, nid, pid) is True
+        await stage_of(browser, nid)
+    await env.services.sweeper.sweep_once()
+    assert ledger_docs(env, pid) == {f"{nid}-stage0": row}
+    assert stage_doc(env, nid)["settled_at"] is not None and "agreed_at" not in stage_doc(env, nid)
+
+
+@pytest.mark.anyio
+async def test_a_negotiation_that_did_not_agree_has_no_ledger_when_no_principal_owns_it(stage_env):
+    # 台帳は依頼者ごと。見込み「なし」で終わったデモ(架空の候補者)の交渉には持ち主がいないので、段 0 の開示も台帳には書かない
+    # (決着の印だけは立つ。見回りが何度も拾わない)。
+    env = stage_env()
+    visitor = env.browser()
+    nid = await demo_negotiation(env, visitor, agreed=False)
+    assert env.store.control(nid, ControlRequest(side="candidate", action="cancel")).status == "judged"
+
+    assert await settle(env, nid) is True
+
+    assert list(env.default_db.collection("principals").stream()) == []
+    assert stage_doc(env, nid)["settled_at"] is not None and "agreed_at" not in stage_doc(env, nid)
+    assert (await visitor.get(f"/v1/demo/negotiations/{nid}/stage")).json()["disclosed_to_employer"]["visible"] == ["likelihood"]
 
 
 @pytest.mark.anyio
@@ -160,7 +193,7 @@ async def test_rows_that_stage_disclosure_did_not_write_are_not_returned(stage_e
     # 段階開示が書いた形でない行(古い形・壊れた行)は返さない。読み出しが、形の違う行で落ちることもない。
     env = stage_env()
     browser = env.browser()
-    pid, nid = await live_negotiation(env, browser)
+    pid, nid = await live_negotiation(env, browser, settled=False)  # 決着処理の前(台帳に、段階開示の行はまだない)。本人の「会う」が、決着処理も行う
     plant_canaries(env, pid, [nid], CANARY)  # {principal_id, stage, note, at} の行(action・nid がない)
 
     before = (await browser.get(f"/v1/principals/{pid}/ledger")).json()
@@ -177,8 +210,7 @@ async def test_a_press_and_its_ledger_rows_are_written_in_one_transaction(stage_
     # 段の状態と台帳は、同じトランザクションで書く。台帳の行を書けなければ、フラグも立たない(食い違わない)。直ったら、同じ操作が通る。
     env = stage_env()
     browser = env.browser()
-    pid, nid = await live_negotiation(env, browser)
-    await stage_of(browser, nid)  # 判定の記録と、求人側の自動応答まで済ませる
+    pid, nid = await live_negotiation(env, browser)  # 判定の記録と、求人側の自動応答まで済ませてある(決着処理)
     stages = env.services.stages
     before = (stage_doc(env, nid), ledger_docs(env, pid))
     original = stages._ledger.row_ref

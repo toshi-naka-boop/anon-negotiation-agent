@@ -18,7 +18,7 @@ from negotiation_core import AXIS_KEYS, Anchor, Policy
 from vault.api_models import PolicyView
 from vault.fixtures import load_case_fixture
 from web.panels_api import build_panels
-from web_app_helpers import dump_documents, interview_body
+from web_app_helpers import dump_documents, submit_interview
 
 
 def panels_path(who: str = "me") -> str:
@@ -197,10 +197,7 @@ async def test_the_panels_are_built_from_the_vault_at_every_call_and_nothing_is_
     assert again.json() == first.json()
     assert dump_documents(web_app.store._db) == vault_before and dump_documents(web_app.default_db) == default_before
     # ポリシーを置き直す(面談をやり直す)と、次の表示にそのまま出る
-    redone = await browser.post(
-        f"/v1/principals/{pid}/interview", interview_body(accept_anchors=[_anchor(salary=900)], reject_anchors=[])
-    )
-    assert redone.status_code == 200
+    await submit_interview(web_app.services, pid, accept_anchors=[_anchor(salary=900)], reject_anchors=[])
     changed = (await browser.get(panels_path())).json()
     assert _cells(changed["worst_case"])["salary"] == [{"low": 850, "high": 900}]
     assert changed != first.json()

@@ -14,6 +14,7 @@ import asyncio
 import datetime as dt
 
 import pytest
+from fastapi import HTTPException
 from vault.api_models import MoveRequest
 from vault_helpers import sample_package
 from web.vault_client import VaultUnavailableError
@@ -21,8 +22,8 @@ from web_app_helpers import (
     CANARY,
     DeletionProbe,
     documents_mentioning,
-    interview_body,
     plant_canaries,
+    submit_interview,
 )
 from test_principal_deletion import (
     _principal_who_disclosed_through_the_stage_api,
@@ -278,6 +279,7 @@ async def test_the_usage_record_is_created_by_the_interview_submit_before_the_fi
 ):
     # DV-16: principals_meta は、面談の送信で金庫に書く前に作られ、開始ページを開いただけでは作られない。
     # 送信が拒否された(不正な入力・利用記録がない依頼者のブロックリストや交渉の作成)場合も作られず、金庫に書かれない。
+    # 送信は、内部の関数(submit_interview。面談の API の /submit が呼ぶものと同じ。台帳 X-81)で行う。
     browser = web_app.browser()
     pid = await browser.open_start_page()
     await browser.get("/start")
@@ -292,8 +294,9 @@ async def test_the_usage_record_is_created_by_the_interview_submit_before_the_fi
         "salary": 1000, "remote_days": 5, "night_duty": 0, "review_months": 6,
         "training": "*", "side_job": "*", "start": "*",
     }  # fmt: skip
-    contradictory = interview_body(reject_anchors=[better_than_the_accepted])
-    assert (await browser.post(f"/v1/principals/{pid}/interview", contradictory)).status_code == 422
+    with pytest.raises(HTTPException) as refused:
+        await submit_interview(web_app.services, pid, reject_anchors=[better_than_the_accepted])
+    assert (refused.value.status_code, refused.value.detail) == (422, "policy_invalid")
     blocked = await browser.post(f"/v1/principals/{pid}/blocklist", {"blocklist": ["company-x"]})
     created = await browser.post(
         f"/v1/principals/{pid}/negotiations",
@@ -313,9 +316,8 @@ async def test_the_usage_record_is_created_by_the_interview_submit_before_the_fi
         return await original_put_policy(principal_id, request)
 
     monkeypatch.setattr(web_app.vault, "put_policy", put_policy_after_checking_the_record)
-    response = await browser.post(f"/v1/principals/{pid}/interview", interview_body())
+    await submit_interview(web_app.services, pid)
 
-    assert response.status_code == 200
     (at_first_vault_write,) = seen
     assert at_first_vault_write is not None  # 金庫に書く前に、利用記録がある
     now = web_app.clock.now()
@@ -329,8 +331,8 @@ async def test_the_usage_record_is_created_by_the_interview_submit_before_the_fi
         raise VaultUnavailableError("vault is down", 503)
 
     monkeypatch.setattr(web_app.vault, "put_policy", failing_put_policy)
-    failed = await other.post(f"/v1/principals/{other_pid}/interview", interview_body())
-    assert failed.status_code == 503
+    with pytest.raises(VaultUnavailableError):  # 面談の API なら 503(web.app の例外の写し)
+        await submit_interview(web_app.services, other_pid)
     assert _meta(web_app, other_pid)["deletion_state"] == "active"
     assert not web_app.store._principal_ref(other_pid).get().exists
 

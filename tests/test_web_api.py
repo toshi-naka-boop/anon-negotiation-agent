@@ -3,17 +3,23 @@
 権限・セッション・削除は tests/test_authz.py・test_session.py・test_principal_deletion.py・test_inactive_deletion.py で
 確かめる。ここでは、API そのものの振る舞い(丸める場所・入力の検証・金庫への橋渡し)を確かめる。
 金庫は本物の vault の app を ASGI のままつなぎ、web の app へは Browser(クッキーを持つ httpx のクライアント)から入る。
+
+面談の送信のロジック(丸め → 利用記録 → 金庫の PUT policy)は、内部の関数 InterviewService.submit_policy で、公開面(HTTP)には出ていない
+(台帳 X-81。本番の経路は面談の API の /submit で、画面の流れは tests/test_interview_api.py)。ここでは、その関数をテストの補助
+(web_app_helpers.submit_interview)から直接呼んで、丸める場所・入力の検証・書き込みの順を確かめる。
 """
 
 import json
 import logging
 
 import pytest
+from fastapi import HTTPException
 from negotiation_core import AXES, Verdict, evaluate
+from pydantic import ValidationError
 from vault.api_models import MoveRequest
 from vault_helpers import put_candidate_and_employer_templates, sample_package
 from web.vault_client import VaultUnavailableError
-from web_app_helpers import CANARY, interview_body, wait_until
+from web_app_helpers import CANARY, interview_body, submit_interview, wait_until
 
 
 def _numeric_values(policy_dict: dict) -> list[tuple[str, object]]:
@@ -40,9 +46,8 @@ async def test_the_interview_submit_rounds_on_the_web_side_and_the_vault_only_re
     browser = web_app.browser()
     pid = await browser.open_start_page()
 
-    response = await browser.post(f"/v1/principals/{pid}/interview", interview_body())
+    await submit_interview(web_app.services, pid)
 
-    assert response.status_code == 200
     stored = (await browser.get(f"/v1/principals/{pid}/policy")).json()
     assert stored["policy"]["accept_anchors"][0]["salary"] == 650
     assert stored["policy"]["reject_anchors"][0]["salary"] == 400
@@ -66,8 +71,7 @@ async def test_the_interview_submit_stores_the_removed_axes_and_replaces_the_pol
     first = (await browser.get(f"/v1/principals/{pid}/policy")).json()
     assert first["removed_axes"] == ["night_duty", "training"]
 
-    again = interview_body(accept_anchors=[], reject_anchors=[])
-    assert (await browser.post(f"/v1/principals/{pid}/interview", again)).status_code == 200
+    await submit_interview(web_app.services, pid, accept_anchors=[], reject_anchors=[])
     second = (await browser.get(f"/v1/principals/{pid}/policy")).json()
     assert (second["removed_axes"], second["policy"]["accept_anchors"]) == ([], [])
 
@@ -88,17 +92,16 @@ async def test_the_interview_submit_stores_the_removed_axes_and_replaces_the_pol
         {"principal_id": "0123456789abcdef"},  # 依頼者 ID は、リクエストでは指定できない
     ],
 )
-async def test_invalid_interview_submissions_are_rejected_without_echoing_the_input_or_writing_anything(web_app, mutation):
-    # §5 の手順 9・§7: 不正な送信は 422。エラーの応答に、入力の値(面談の生の値・カナリア)を返さない。
+async def test_invalid_interview_submissions_are_rejected_by_the_model_before_anything_is_written(web_app, mutation):
+    # §5 の手順 9: 範囲外・型違い・列挙外・未定義の項目・外せない軸・帯の欠け・依頼者 ID の指定は、送信のモデル(InterviewSubmitRequest)の検証で拒否する
+    # (HTTP の口はない。台帳 X-81。入力の値を返さない 422 の応答は、面談の API の側の確認: tests/test_interview_api.py)。
     # 利用記録も作らず、金庫にも書かない。
     browser = web_app.browser()
     pid = await browser.open_start_page()
 
-    response = await browser.post(f"/v1/principals/{pid}/interview", interview_body(**mutation))
+    with pytest.raises(ValidationError):
+        await submit_interview(web_app.services, pid, **mutation)
 
-    assert response.status_code == 422, response.text
-    assert CANARY not in response.text and "5000" not in response.text and "sometimes" not in response.text
-    assert set(response.json()) == {"detail"}
     assert not web_app.default_db.collection("principals_meta").document(pid).get().exists
     assert not web_app.store._principal_ref(pid).get().exists
 
@@ -110,10 +113,12 @@ async def test_a_contradictory_interview_is_rejected_by_the_policy_check(web_app
     pid = await browser.open_start_page()
     better = {"salary": 1000, "remote_days": 5, "night_duty": 0, "review_months": 6, "training": "*", "side_job": "*", "start": "*"}
 
-    response = await browser.post(f"/v1/principals/{pid}/interview", interview_body(reject_anchors=[better]))
+    with pytest.raises(HTTPException) as refused:
+        await submit_interview(web_app.services, pid, reject_anchors=[better])
 
-    assert (response.status_code, response.json()) == (422, {"detail": "policy_invalid"})
+    assert (refused.value.status_code, refused.value.detail) == (422, "policy_invalid")
     assert not web_app.default_db.collection("principals_meta").document(pid).get().exists
+    assert not web_app.store._principal_ref(pid).get().exists
 
 
 @pytest.mark.anyio
@@ -274,23 +279,23 @@ async def test_the_demo_endpoint_creates_a_demo_negotiation_from_templates_only(
 
 @pytest.mark.anyio
 async def test_interview_values_and_the_cookie_never_appear_in_the_logs(web_app, caplog):
-    # §7: ログに、組み合わせの値・クッキー・依頼者の入力を書かない。面談の送信(成功と、拒否されるもの)の間に出た
-    # ログ(すべてのレベル)に、生の値(丸める前の 623.5 万・417.25 万)も、クッキーの値も、入力に混ぜた文字列もない。
+    # §7: ログに、組み合わせの値・クッキー・依頼者の入力を書かない。面談の送信(成功と、拒否されるもの。内部の関数で行う)と、クッキーを付けた
+    # 読み出しの間に出たログ(すべてのレベル)に、生の値(丸める前の 623.5 万・417.25 万)も、クッキーの値も、入力に混ぜた文字列もない。
+    # (面談の API の送信の側は、tests/test_interview_api.py の AC-18 の試験。)
     caplog.set_level(logging.DEBUG)
     browser = web_app.browser()
     pid = await browser.open_start_page()
     raw_accept = {**interview_body()["accept_anchors"][0], "salary": 623.5}
     raw_reject = {**interview_body()["reject_anchors"][0], "salary": 417.25}
 
-    submitted = await browser.post(
-        f"/v1/principals/{pid}/interview", interview_body(accept_anchors=[raw_accept], reject_anchors=[raw_reject])
-    )
-    rejected = await browser.post(
-        f"/v1/principals/{pid}/interview",
-        interview_body(accept_anchors=[{**raw_accept, "note": CANARY}], reject_anchors=[raw_reject]),
-    )
+    await submit_interview(web_app.services, pid, accept_anchors=[raw_accept], reject_anchors=[raw_reject])
+    with pytest.raises(ValidationError):
+        await submit_interview(
+            web_app.services, pid, accept_anchors=[{**raw_accept, "note": CANARY}], reject_anchors=[raw_reject]
+        )
+    read = await browser.get(f"/v1/principals/{pid}/policy")  # クッキーを付けたリクエスト(ミドルウェア・ルートのログを出させる)
 
-    assert (submitted.status_code, rejected.status_code) == (200, 422)
+    assert read.status_code == 200
     assert caplog.records  # ログは出ている(空だから通るのではない)
     for secret in ("623.5", "417.25", CANARY, browser.cookie):
         assert secret not in caplog.text, secret
