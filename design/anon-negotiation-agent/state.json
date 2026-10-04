@@ -10,18 +10,14 @@
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
   "openIssueIds": [
-    "P-15",
-    "P-16",
-    "P-17",
-    "P-18",
-    "P-19"
+    "P-20"
   ],
   "requiredReads": [
     "design.md",
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v20 を起草した（2026-10-04。v19 承認済み 298da78d4ee4 に、実装で決まった細部 I-21〜I-30 を写した。意図は変えない）。M（deploy_check・canary・README）と L2（画面の後半）の取り込みを待って、その内容も v20 に足し、批評 19 巡目（design-critic + codex。1 巡）→ 承認 CP（指紋は再計算）。ユーザー待ち: 手順 A の結果、依存の追加の可否（Cloud Trace の exporter、sse-starlette・uvicorn の明示）。",
+  "nextAction": "v20 の下書き（実装の反映）が揃った（M まで取り込み。全体 3,442 件通過、15484fe）。批評 19 巡目（design-critic + codex）を回し、L2（画面の後半）の取り込み後に承認 CP。ユーザー待ち: 手順 A の結果、依存の追加の可否（Cloud Trace の exporter、sse-starlette・uvicorn・opentelemetry-sdk の明示）、P-20。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",

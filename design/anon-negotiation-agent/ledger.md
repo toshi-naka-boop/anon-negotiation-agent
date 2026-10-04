@@ -7,7 +7,18 @@
 
 ## 未解決
 
-（未解決の指摘はない。2026-10-04、v20 の下書き時点。P-8〜P-19 は確定、I-21〜I-30 は v20 に反映）
+### P-20（前提 / 公開 / 2026-10-04。ユーザーの確認待ち。既定は「そのまま載せる」）期待する主体の正本に、オーナーのメールを載せてよいか
+
+- `deploy/expected-kms-principals.json`（§10 (b) の正本）は公開リポジトリと web のイメージに入る。中身はプロジェクトのオーナーのメール（運営者）。
+- 推奨: そのまま載せる。オーナーのメールは git のコミットの作者としてすでに公開されている。別名（Google グループ）にすると、Policy Analyzer の列挙との照合が複雑になる。
+- 初回の `deploy_check` で、Policy Analyzer が `projectOwner:` やグループで返す場合は、その表記を正本に足す（M）。
+
+### I-31（実装時の気づき / 文面 / low。v20 に反映済み・一部は手順書）デプロイの確認とカナリア検査（M）で分かったこと
+
+- Cloud Run の `*.run.app` は末尾が z のパスを予約していてコンテナに届く前に 404 を返す → 死活確認は `/health` に改めた（3 サービス・試験・設計書・`deploy_check.sh` の既定）。
+- 手順 G の確認は `gcloud iam policies get`（`list` は rules を返さない）。手順 A の API に `cloudasset.googleapis.com`。§10 (b): 組織の配下なので `ORG_ID` 必須。(g): Encrypt・Decrypt は DATA_READ、subject はインスタンス ID で変わる。AC-22 の (h) は `--reset-vault`。スクリプトの外の確認は SKIP で出る（利用枠・思考の量・R-7・提出物のチェックリスト）。
+- `canary_scan.py` は `tests/` の部品（スタブの LLM・エミュレータ）を読む（`src` に試験用の部品を置かない）。`opentelemetry-sdk` を直接 import する（google-adk の推移的な依存。P-12 の流儀では明示の対象。承認待ちの依存の一覧に足す）。
+- shellcheck はこの Mac に無く未実行（試験はあれば実行する）。
 
 ## 解決済み（一行索引）
 
