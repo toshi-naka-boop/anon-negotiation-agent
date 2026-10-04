@@ -1,6 +1,10 @@
 # anon-negotiation-agent 設計書
 
-- 版: v19（v18 に、批評 18 巡目 design-critic の medium C-62・C-63 と low L18-1〜7 の直しを入れた。18 巡目は両批評とも新規の high なし。C-64 は前提 P-14 としてユーザーに聞く。承認済みの版は v14（指紋 `v14:4109a75c582c`、2026-10-02））
+- 版: v20（v19（承認済み。指紋 `v19:298da78d4ee4`、2026-10-03）に、③④⑤ の実装で決まった細部（台帳 I-21〜I-30）を写した。設計の意図は変えない。承認は改めて取る）
+- v19 からの主な変更（実装の反映。台帳 I-21〜I-30。設計の意図は変えない）
+  - 実装済みの印: `PlanEnvelope` の 2 段の読み（§2.7・§4.1）、`own_move_number`、回答後の `last_check`、`max_prompt_tokens` の config 化、封印の組み込み（DV-19）、テンプレートの起動時の投入（§3.7）、面談（§5）、段階開示（§6.2）、攻撃モード・3 枚の壁・レート制限（§8.1・§8.2）、メーター（§8.3）、リプレイ（§8.4）、画面（§7・§10）
+  - web の API の一覧を §3.3b に起こした。SSE と静的ファイルはセッションのミドルウェアの外（§4.1）。本人の削除で面談の途中状態も消す（§6.3）。レート制限の表に「攻撃モードの交渉の作成」「推定区間メーター」を足し、交渉の出力の上限を 3,072 に（§8.2。最悪額は約 1.25 倍）
+  - 前提 P-8〜P-19 はすべて確定（§13）。トレースの出力先（Cloud Trace の exporter）と `sse-starlette`・`uvicorn` の明示は、依存の追加の承認待ち（§10）
 - v18 からの主な変更（批評 18 巡目 design-critic。台帳 C-62〜C-64、L18-1〜L18-7）
   - WIF の principalSet はプール単位なので、プールのプロバイダは 1 件だけとし、発行元・audience・mapping・条件を完全一致で照合する。プロバイダを足せる主体はオーナーだけで、その道の記録の読み解きは運営者に限ると書いた（C-62。§9・§10）
   - 版の切り替えの順序の先頭に「プロバイダを本番の条件に更新する」を置き、debug の条件に戻したら手順 D の全体をやり直す・live の後は戻さない、置かれた DEK の検出（監査ログの主体）を足した（C-63）
@@ -26,8 +30,8 @@
 - v14 からの主な変更（台帳 I-19、C-55、L15-1、L15-2、X-63）
   - **出力の形の制約**: 計画・決定とも、応答スキーマ（グリッド値の列挙）は使わず JSON モードで出させる。本物の Vertex AI では応答スキーマの制約付きデコードが 11〜55 秒かかり、手番が落ちた（I-19）。グリッド値・`check` がないこと・checks は最大 3 件、は指示文で伝え、レフェリーが `Plan`・`Move` で検証する（§2.7・§4.2・§4.3）
   - 指示文の要点に「相手の提案が『本人確認が必要』なら本人へ聞く」を足した（C-55。§4.1 の図の経路）
-  - 途中確認の回答の後、答えた側の `last_check` を、聞いた組み合わせとその新しい評価にする（L15-1。§4.4。実装は ③）
-  - `own_move_number` はエージェントの手の数（レフェリーの確かめは含まない）と定めた（L15-2。§2.7。実装は ③）
+  - 途中確認の回答の後、答えた側の `last_check` を、聞いた組み合わせとその新しい評価にする（L15-1。§4.4。実装済み）
+  - `own_move_number` はエージェントの手の数（レフェリーの確かめは含まない）と定めた（L15-2。§2.7。実装済み）
   - `max_output_tokens` の許す範囲（256〜4,096）と、デプロイの確認項目（aiohttp・`llm_call_counters` の TTL・`MAX_PROMPT_TOKENS`）を足した（X-63・§10）
 - v13 からの主な変更（批評 14 巡目の指摘 C-52〜C-54・X-55〜X-59・L14-1〜L14-7）
 - v13 からの主な変更（台帳 C-52〜C-54、X-55〜X-59、L14-1〜L14-7）
@@ -328,7 +332,7 @@ flowchart LR
 - **`Plan`**（計画の出力。エージェント → レフェリー）
   - `schema: "plan/v1"`
   - `checks`: 確かめたい組み合わせの並び（0〜3 件。出したい順）
-  - `move`・`package`: `checks` が空のときだけ手を出す（意味と規則は `Move` と同じ）。`checks` があるときは `move` を null にする。両方あるときは、レフェリーは `checks` を実行して `move` を無視する（計画を優先する寛容な読み。無効手にすると手がかりのない `last_invalid` で同じ計画を繰り返すため。C-51）。どちらもないとき、`checks` が空で `move=check` のときは、`schema_invalid` の無効手として登録する（L12-3）。`checks` が有効なら、`move`・`package` の中身（`check`・グリッド外）で計画を無効にしない（JSON モードでは `move` の形の違反が計画全体を手がかりのない `schema_invalid` にしてしまうため。履歴の `check` はレフェリーの確かめで、エージェントの手ではないことを指示文にも書く。L16-1。実装は ③）。読み方は 2 段で、`Plan` 型を 1 回で当てない: (1) `PlanEnvelope`（`schema` と `checks`（`Package` の並び、最大 3 件）だけを持つ strict な型。ほかの項目は受け流す）で検証する。(2) `checks` が空でなければ、残りの項目（`move`・`package`）は型検証せずに捨てる。空なら `move`・`package` を `Move` の規則（strict）で検証する。どちらの段の違反も `schema_invalid`（X-74・X-79。実装は ③。`off_grid` は型と試験からも除く）
+  - `move`・`package`: `checks` が空のときだけ手を出す（意味と規則は `Move` と同じ）。`checks` があるときは `move` を null にする。両方あるときは、レフェリーは `checks` を実行して `move` を無視する（計画を優先する寛容な読み。無効手にすると手がかりのない `last_invalid` で同じ計画を繰り返すため。C-51）。どちらもないとき、`checks` が空で `move=check` のときは、`schema_invalid` の無効手として登録する（L12-3）。`checks` が有効なら、`move`・`package` の中身（`check`・グリッド外）で計画を無効にしない（JSON モードでは `move` の形の違反が計画全体を手がかりのない `schema_invalid` にしてしまうため。履歴の `check` はレフェリーの確かめで、エージェントの手ではないことを指示文にも書く。L16-1。実装済み）。読み方は 2 段で、`Plan` 型を 1 回で当てない: (1) `PlanEnvelope`（`schema` と `checks`（`Package` の並び、最大 3 件）だけを持つ strict な型。ほかの項目は受け流す）で検証する。(2) `checks` が空でなければ、残りの項目（`move`・`package`）は型検証せずに捨てる。空なら `move`・`package` を `Move` の規則（strict）で検証する。どちらの段の違反も `schema_invalid`（X-74・X-79。`negotiation_core.parse_plan`。`off_grid` は型と試験からも除いた）
   - **出力の形の制約（v15、I-19）**: `Plan`・`Move` とも、LLM には応答スキーマを渡さず、JSON モード（`response_mime_type=application/json`）だけで出させる。グリッド値の列挙・`check` がないこと・checks は最大 3 件は、指示文で伝え、レフェリーが pydantic の `Plan`・`Move`（strict、グリッド値の列挙）で検証する。違反は `schema_invalid`（形）・`off_grid`（グリッド外）の無効手になり、`last_error` で次の呼び出しに伝わる。数値軸が文字列で返ったときは、受信口が整数に戻す
 - **`AttackerTurnInput`**（攻撃モードの求人エージェント専用）
   - `TurnInput` に、`principal_instruction`（400 文字以内の自由文）を足した別の型にする。
@@ -378,6 +382,7 @@ flowchart LR
 
 - 状態が変わる操作ごとに、同じトランザクションで `negotiations/{nid}/events/{version}` に記録を書く。`version` は記録 1 件ごとに進むので、1 つの操作で 2 件書く場合も含めて、記録どうしが同じ文書 ID になることはない。
 - 記録は、側ごとの見え方と番号を持つ: `views: {candidate: {seq, payload} または null, employer: {seq, payload} または null}`。
+  - 封印するとき（live の交渉。§9 の 2）は `views.<side>` が `{seq, payload(封印した bytes)}` の形。封印しないとき（デモ・攻撃・Cloud Run 版）はフラットなまま（I-22）。金庫のイベントに時刻の項目はない（リプレイの時刻は記録する側が付ける。§8.4）。
   - `payload` に入るのは、構造化された値とグリッド上の値だけ。
   - ある側の見え方が null の記録は、その側の `seq` を進めない。そのため、相手に見えない操作は、番号の飛びからも推測されない。
 - **操作ごとの見え方**
@@ -394,7 +399,7 @@ flowchart LR
 | 終了（合意・取消・期限切れ・上限での停止・エージェントの終了） | 最終結果 `{likelihood, package}`（合意でなければ「なし」だけ） | 同じ |
 
 - 読み出すときは、必ず側を指定する（`GET .../events?side=&after_seq=`）。金庫は、その側の見え方と番号だけを返す。
-- `web` はイベントを写さない。`TurnInput.history`、活動ログ（FR-37）、画面の配信は、どれもこの口から読む。
+- `web` はイベントを写さない。`TurnInput.history`、活動ログ（FR-37）、画面の配信は、どれもこの口から読む。画面向けの整形（活動ログの 1 件の形。§7）は `web` が読むたびに行い、保存しない（I-23）。
   - 画面は `seq` で重複を除き、最終結果（段 0）は 1 回だけ表示する（FR-26）。
 - デモ・攻撃モードでは、架空人物の側の見え方をデモ画面に出してよい（推定区間メーター、§8.3）。本物の利用者の交渉では、本人の側の見え方だけを本人に見せる。
 
@@ -425,8 +430,20 @@ flowchart LR
 | POST | `/v1/negotiations/{nid}/control` | `{side, action: pause\|resume\|cancel\|stop_cost_limit}`（§3.4）。`stop_cost_limit` は `web` の費用の歯止め（§8.2）だけが使い、画面からは呼べない |
 | POST | `/v1/negotiations/{nid}/expire` | 期限（`deadline`・`expires_at`・最長の停止時間）を過ぎていれば、終了処理（`timeout`）を行う。過ぎていなければ何もしない |
 | GET | `/v1/attestation?nonce=` | TEE 実施時だけ（Cloud Run 版にはない）。認証なし（`web` は、この応答を確かめるまで金庫を信用しないので、ID トークンをまだ送らない）。`nonce` は base64url の 16〜74 文字。金庫は launcher に、固定の audience と nonce 2 つ（呼び手の nonce と、自分の TLS 証明書の DER の SHA-256）で attestation トークンを求め、`{token, certificate_sha256}` を返す。形違いは 400、1 秒に 1 回を超えると 429、launcher に届かなければ 503（§9 の 3。契約 §3） |
+| GET | `/healthz` | 認証なし（TEE 版でも `caller_verifier` の外。素の経路は `/v1/attestation` とこれだけ）。`{"status":"ok"}`。`web`・`agents` にも同じ口がある（§10） |
 
 - 任意の組み合わせを評価するだけの口は作らない。評価は必ず手（`check`・`propose`・`accept`・`ask_principal`）の一部として、状態機械の中で行う。
+
+### 3.3b `web` の API の一覧（画面が使う口。本人のセッションが要るものは §6.3 の確認を通る。POST は `X-Requested-With` 必須）
+
+| 群 | 口 | 要点 |
+|---|---|---|
+| 入口・セッション | `GET /start`（依頼者 ID の発行はこれだけ）、`GET /v1/session`（自分の依頼者 ID。クッキーは HttpOnly）、`GET /v1/interview/notice`（入口の注記。状態を作らない）、`GET /v1/jobs`（フィクスチャの求人。非公開求人は企業名を伏せる）、ページ `/`・`/interview`・`/me`・`/demo`・`/attack`、`/static/`（セッションを見ない） | §5・§6.1・§6.3 |
+| 面談 | `/v1/principals/{pid}/interview/` の `begin`・`state`・`profile`・`salary/answers`・`salary/confirm`・`axes`・`choices`・`choices/answer`・`comment`・`reason`・`confirmation`・`anchors/{key}/active`・`confirm`・`worst-case`・`worst-case/approve`・`companies`・`blocklist`・`submit`・`discard` | §5。LLM を呼ぶ 3 つは `interview_llm` の枠（§8.2） |
+| 本人の交渉 | `GET/POST /v1/principals/{pid}/negotiations`、`POST /v1/principals/{pid}/delete`、`GET /v1/negotiations/{nid}/activity?after_seq=`、`GET .../panels`（本人の側だけ）、`POST .../control`、`POST .../principal-answer`、`GET .../stage`・`POST .../stage/meet`・`POST .../stage/approve`、`GET /v1/principals/{pid}/ledger`、`GET /v1/principals/{pid\|me}/panels`（FR-39） | §3.3・§4.4・§6.2・§7 |
+| デモ・攻撃（セッションなし。架空人物の交渉だけ） | `GET /v1/demo/cases`、`POST /v1/demo/negotiations`、`GET /v1/demo/negotiations/{nid}/activity\|panels\|stage`、`GET /v1/demo/replays/{case}`、`POST /v1/demo/meter`・`GET /v1/demo/meter/simulation`、`/v1/demo/attack/` の `negotiations`・`negotiations/{nid}/instruction`・`negotiations/{nid}/events`・`walls/1/example`・`walls/1`・`walls/2/{nid}`・`walls/3/{nid}`・`bisection` | §8.1〜§8.4 |
+| 配信 | `GET /v1/stream/negotiations/{nid}/activity`（本人）、`GET /v1/stream/demo/negotiations/{nid}/activity?side=`（SSE。2 秒ごとに読み、30 秒で切って画面がつなぎ直す。ミドルウェアの外。§4.1） | §7 |
+| TEE | `GET /api/tee/attestation?nonce=`（§9 の 6）、`GET /healthz` | §9・§10 |
 
 ### 3.4 期限・寿命・一時停止
 
@@ -508,13 +525,14 @@ flowchart LR
   - 交渉が終われば、コピーは終了処理で消える。
 - 本物の依頼者（面談から始めた人）の交渉では、本物の依頼者の本体から写す。
 - ハッカソンでは求人はすべてフィクスチャなので（U-08）、求人側はいつもテンプレートから写す。
+- **投入（P-15）**: 金庫は起動のたびに、イメージ内の `fixtures/case*.toml` を全部読んで検証し、`templates/{template_id}` に冪等に書く（同じ内容なら書かない、違えば上書き、削除はしない。1 つでも壊れていれば 1 件も書かずに起動失敗）。TEE 版は鍵の解放と `VaultStore` の後・自己試験の前（検証済みのワークロードだけが書く）。Cloud Run 版は `VAULT_SEED_TEMPLATES`（既定 true）。封印しない。`case<N>.toml` の `template_id` はファイル間で一意（I-25）。
 
 ### 3.8 保存・保持期間・削除
 
 - `vault-db`
   - `principals/{pid}`: side、丸め済みポリシー、外した軸、候補者の属性帯（I-2）、ブロックリスト、`deleting` フラグ、累計カウンタ、24 時間の予算の窓（I-3）
   - 作成の冪等キー（`request_id`）の文書: 同じキーは上書きし、デモ・攻撃のものには交渉と同じ TTL を付け、本人の削除で消す（I-8）
-  - `templates/{tid}`: 架空人物のテンプレート（読み取り専用）
+  - `templates/{tid}`: 架空人物のテンプレート（読み取り専用。金庫が起動時に投入。封印しない。I-25）
   - `negotiations/{nid}`: §3.1 の状態と、その下のイベント列
 - **保持期間**
   - デモ・攻撃モードの交渉は、交渉の文書と、イベント列の各記録の両方に TTL（暫定 96 時間）を付ける。Firestore の TTL は下の階層に及ばないので、各記録にも期限の項目を持たせる。
@@ -550,6 +568,7 @@ flowchart LR
 - **依頼者の見回り**（交渉の見回りとは別。暫定 10 分ごと）: `web` の `principals_meta` を直接調べ、次を行う（§6.3。P-6）。30 日使っていない依頼者は、進行中の交渉を持たないので、交渉の一覧からは拾えないため。
   - `delete_after` を過ぎていて、削除中でない依頼者: トランザクションで `delete_after` が読んだ値から変わっていないことを確かめてから、`deletion_state=deleting` にする。その後、削除の流れ（§6.3）を進める。
   - `deletion_state=deleting` のまま残っている依頼者: 削除の流れを最初からやり直す（各段は冪等）。
+- **セッションの外の経路**: `/static/` と SSE（`/v1/stream/...`）は、依頼者のロックを持つミドルウェアの外で配信する（SSE が 30 秒つながっている間、同じ依頼者の操作とレフェリーの金庫操作を止めないため）。本人用の SSE は、署名クッキー・削除中でないこと・当事者であることを始めに 1 回確かめる（I-23・L）。攻撃モードの指示（`web` のメモリ）が再起動で消えた交渉は、攻撃者の手番で `control(cancel)` して「なし」で終える（P-17・I-26）。
 - **1 手ごとの流れ**（LLM の呼び出しは 1 手番に最大 2 回。I-15・I-16）
   1. 手番の側の残りの手数が 0 なら、LLM を呼ばずに `end` を登録して、金庫の停止の判定（`stopped_budget`）を効かせる（L9-3）。
   2. **計画**: 金庫の `view` と、イベント列のその側の見え方から `TurnInput`（`phase=plan`）を組み立て、A2A で送り、計画の JSON を受け取って 2 段で読む（§2.7: `PlanEnvelope` → `checks` があれば残りを未検証で捨てる → 空なら `move`・`package` を `Move` の規則で検証。X-79）。
@@ -670,7 +689,7 @@ sequenceDiagram
      - P はグリッド上の値なので、人間の回答が漏らす情報もグリッドの粒度に収まる。
   2. 答えた側について、保存済みの評価を、追記後のコピーで評価し直して書き換える（評価回数には数えない）。
      - その側が受け手の `pending_offer.receiver_evaluation`
-     - その側の `last_check`。あわせて、聞いた組み合わせ P が `last_check` でなければ、`last_check` を P とその新しい評価に置き換える（答えた結果が次の `TurnInput` に必ず出るように。L15-1。実装は ③）。置き換えで、元の `last_check`（Q）を評価し直した結果は見え方から消える（Q を後で確かめ直すと評価を 1 回使う。P の評価のほうが次の手に要るので、この代償を受け入れる。X-69・L16-3）
+     - その側の `last_check`。あわせて、聞いた組み合わせ P が `last_check` でなければ、`last_check` を P とその新しい評価に置き換える（答えた結果が次の `TurnInput` に必ず出るように。L15-1。実装済み）。置き換えで、元の `last_check`（Q）を評価し直した結果は見え方から消える（Q を後で確かめ直すと評価を 1 回使う。P の評価のほうが次の手に要るので、この代償を受け入れる。X-69・L16-3）
   3. `status=active` に戻し、`version` を進め、記録をイベント列に書く（答えた側の見え方にだけ入れる）。
 - **追記先**
   - 本物の候補者: 依頼者本体のポリシーと、交渉用コピーの両方に追記する。
@@ -688,7 +707,7 @@ sequenceDiagram
 
 1. **プロフィール**: 経験年数、地域、職種を入力する。すぐに帯へ変換し（§2.6）、正確な値は捨てる。
 2. **年収の正規化**（FR-01）: 3 問に自由記述で答えてもらう。
-   - 面談エージェント（ADK、`output_schema` は `SalaryBasis`）が、額面か手取りか・固定残業代・賞与月数を取り出す。
+   - 面談エージェント（ADK。JSON モードで出させ、`SalaryBasis` で検証する。I-30）が、額面か手取りか・固定残業代・賞与月数を取り出す。換算: 比較基準年収 ＝ 額面の年間総額（賞与込み）− 固定残業代の月額 × 12。月収は × 12 ＋ 月収 × 賞与の月数。手取りは 0.8 で額面に逆算（前提の文に出す。K）。
    - 比較基準年収への換算式と前提を画面に出し、本人に確かめてもらう。
 3. **軸を外すかどうか**（FR-05）: 離散軸（§2.1。年収以外のすべて）ごとに、次を示す。
    - 「この軸は条件そのものが知られ得る」と表示する。
@@ -698,7 +717,7 @@ sequenceDiagram
    - 外した軸は、順序のある軸なら最も悪い値で、順序のない区分軸なら「どちらでも」で見せ、その旨を設問文に書く。
    - 各組の A と B それぞれに「行く／行かない／迷う」を付けてもらう。
    - 「行く」は受けるアンカー、「行かない」は受けないアンカーに、決定的コードで変換する。「迷う」はアンカーにしない。外した軸がある場合の「行かない」は保存しない（§2.4）。
-   - 自由コメントは、面談エージェント（`output_schema` は `ConstraintList`）が発言単位で構造化する。アンカーへの変換は §2.3・§2.4 の規則で、決定的コードが行う。
+   - 自由コメントは、面談エージェント（JSON モードで出させ、`ConstraintList` で検証する）が発言単位で構造化する。辞めた理由の `reject` の値は「避けたい状態」そのものの値（望む側の値ではない。例: フルリモートの禁止 → リモート 0 日。I-30）。アンカーへの変換は §2.3・§2.4 の規則で、決定的コードが行う。
 5. **辞めた理由**（FR-06）: 任意で「次は避けたい条件」を聞く。
    - 面談エージェントが発言単位で構造化し、§2.3・§2.4 の規則でアンカーに変換する。
    - 本人が確認した時点で、原文は保持しない。
@@ -712,11 +731,19 @@ sequenceDiagram
    - 面談セッションを破棄する。セッションは ADK の InMemorySessionService を使い、永続化しない。面談エージェントの各呼び出し（正規化の 3 問、自由コメント、辞めた理由）は新しいセッションで行い、会話を積まない（構造化の抽出に履歴は要らず、1 回の入力を本文の上限内に保つため。L14-3）。
    - 画面のフォームの状態も消す。
 
-- LLM の呼び出しには Vertex AI を使う。面談エージェントのトレースでは、メッセージ内容のキャプチャを切る。面談の呼び出しは、コンテキストキャッシュを使わない（§1.2）。面談の構造化出力（`SalaryBasis`・`ConstraintList`）は列挙が小さいので応答スキーマで出させる予定だが、交渉エージェントと同じく遅くなるなら JSON モードにして検証で守る（I-19。実装時に 1 回測る）。
+- LLM の呼び出しには Vertex AI を使う。面談エージェントのトレースでは、メッセージ内容のキャプチャを切る（面談のモジュールは、環境変数が未設定なら false にする）。面談の呼び出しは、コンテキストキャッシュを使わない（§1.2）。面談の構造化出力（`SalaryBasis`・`ConstraintList`）は JSON モードで出させ、pydantic で検証する（I-19 と同じ。知らない項目は無視し、検証に通らない発言だけを捨てる。本物の Gemini で 1 回確かめた。I-30）。
 - 面談の入口に、Vertex AI 側の記録、AI の処理は Google Cloud の global エンドポイントで行われ処理される国が決まらないこと（I-10）、30 日使わなければデータが自動で消えること、について短い注記を出す（§1.2・§6.3。P-4・P-6 の回答）。
 - 面談の LLM 呼び出しにも、§8.2 のレート制限と 1 日の物理の数を掛ける。Vertex AI の一時的なエラーは、§4.1 と同じく再試行する。
 - 面談の LLM に向かう入力（自由記述の 3 問、自由コメント、辞めた理由）は、リクエスト本文 32 KB までに制限し、面談エージェントにも `max_output_tokens`（暫定 2,048）を置く（C-49。1 日の最悪の金額を面談を含めて決めるため。§8.2）。
 - デモはプリセットの人物で進め、生の面談は 1 項目だけ見せる。
+
+- **実装で決めた細部**（K・L・I-26・I-28・I-30）
+  - 入口の注記は `GET /v1/interview/notice` で読む（`begin` は状態を作るので入口では呼ばない）。依頼者 ID の発行は「面談を始める」を押して `GET /start` を呼んだときだけ。
+  - 軸は複数外せる（§2.4 の規則の複数版）。プロフィールは経験年数・都道府県・職種の大分類。
+  - 二択は雛形（年収と 1 つの軸のトレードオフ 6 組 ＋ 年収だけの 5 組）と、本人の年収に最も近いグリッド点を土台に 50 万円刻みで作り、6 組出す。確認に進むには 5 組（A・B の両方）に答える。受けるアンカーが 0 件の警告は、外した軸が原因でないとき（全部「行かない」「迷う」）にも出す。
+  - 面談の途中の状態は `web` のメモリ（依頼者 ID ごと。送信・破棄・本人の削除・30 日の自動削除で消え、1 時間のアイドルで読めなくなる。同時 500 件まで）。原文（3 問の回答・自由コメント・辞めた理由）は LLM に送った後は持たない。
+  - LLM を呼ぶ 3 つの API は §8.2 の `interview_llm` の枠（クライアント IP ごと）と、1 日の物理の数で守る。本文 32 KB、`max_output_tokens` 2,048。
+  - 面談の LLM 呼び出し（最長 60 秒）の間も依頼者のロックを持つ（面談中は交渉がないので実害はない）。
 
 ---
 
@@ -727,7 +754,7 @@ sequenceDiagram
 - **求人の一覧**は企業名込みで公開する（FR-32）。
   - `confidential: true` の求人は「非公開求人（会うと決めた後に企業名を開示）」と表示し、段 1 で企業名を開示する。
 - **交渉を始められるのは候補者側だけ。** 求人を 1 件選んで始める。本物の候補者は、進行中の交渉を同時に 1 件までしか持てない（§3.5）。終わったら、次の求人を選ぶ。
-  - ブロック先の求人は、一覧に出さない。
+  - ブロック先の求人は、選んでも作成時に拒否される（409 `blocked`。金庫のブロックリストを `web` が読む口は作らず、一覧から除く表示も作らない。FR-13 の担保は作成の拒否と AC-16。L）。
   - 求人側には、候補者を探す機能も、件数を見る機能もない。
   - そのため、ブロックされた企業はその候補者と一度も接点を持たず、構造上「存在しない」のと区別できない（FR-13）。
 - 1 日の予算が足りないと、作成は断られる。画面は「本日の交渉の上限に達しました」と出す。本人の評価予算が交渉の途中で尽きることはない（予約済みのため）。費用の上限（§8.2）で途中で止まることは、入場の制限により通常の運用では起きないが、起きれば結果は「なし」になる（L13-2）。
@@ -755,6 +782,7 @@ sequenceDiagram
   - ほかの訪問者が求人側を操作する経路は作らない。
 - **FR-33 の担保**: LLM への入力は、すべて `llm_gateway` の型付き関数（`TurnInput`・`AttackerTurnInput`・面談用入力）を通す。これらの型には、段 1 以降の内容を入れるフィールドがない。
 - 段の遷移は、それぞれの依頼者の開示台帳に追記する。
+- **実装で決めた細部**（G。I-27）: 段ごとに見えるものの表は `web.stages.EMPLOYER_SEES` を正とし、AC-14 で固定する。`stages/{nid}` には `agreed_at`・側ごとの `meet`・`approve`・`job_summary`、デモだけ `candidate_template_id`・`employer_template_id` を持つ（求人の企業名は本物の候補者の交渉では `job_id` から、デモ・攻撃ではテンプレート ID から引く）。架空の求人の自動応答は、判定の瞬間ではなく、候補者が段の状態を読んだ・操作したときに冪等に行う（GET が書く。サーバが決める値だけ）。デモ・攻撃の架空の候補者も、フィクスチャの職務要約と連絡先でサーバが自動で押す（デモで段 2 まで見せる）。攻撃モードの求人は攻撃者なので自動応答はなく段 0 のまま。見込み「なし」は段 0 の表示で終わり、台帳に書かない。段 2 の「氏名と連絡先」は候補者の分を求人側へ出す（求人側の連絡先はフィクスチャにない）。要約は 400 文字、本文は 32 KB。求人側を押す HTTP の口は作らない。
 
 ### 6.3 本人の確認・権限・削除
 
@@ -780,9 +808,10 @@ sequenceDiagram
 - **デモ・攻撃モード**
   - 架空人物の交渉は、デモ用のエンドポイントからだけ操作でき、必ずテンプレートからのコピー（§3.7）を使う。
   - デモ用のエンドポイントは、本物の依頼者には触れない。`web` と `vault` の両方で確かめる。
-- **監査**: 開示台帳の各行に、操作した依頼者 ID と時刻を残す。
+- **監査**: 開示台帳の各行に、操作者の種類（`principal`／`fictional_employer`／`fictional_candidate`／`system`）と時刻を残す（生の値は書かない。行の項目は §7。I-27）。
+- 画面は自分の依頼者 ID を `GET /v1/session` で知る（クッキーは HttpOnly）。本人向けの経路は `me` の別名も受ける。依頼者 ID の発行は `/start` の GET だけで、HTML のページの GET は発行しない（L・H2）。
 - **削除の流れ**（`web` 側。金庫側は §3.8）: 本人の「データを消す」ボタンと、30 日の自動削除の両方が、この同じ流れを使う。
-  1. `principals_meta` の `deletion_state` を `deleting` にする（削除中の印）。以後、その依頼者の操作はすべて拒否する。利用記録がなければ（面談を送っていなければ）、サーバにデータはないので、クッキーを消すだけで終える。
+  1. `principals_meta` の `deletion_state` を `deleting` にする（削除中の印）。以後、その依頼者の操作はすべて拒否する。あわせて、面談の途中状態（`web` のメモリ）を消す（利用記録の有無にかかわらず。30 日の自動削除でも同じ。I-28）。利用記録がなければ（面談を送っていなければ）、ほかにデータはないので、クッキーを消して終える。
   2. 金庫の削除を呼ぶ（冪等。すでに消えていても成功）。
   3. `web` 側で、開示台帳と、本人が当事者の段の状態（段 1 の職務要約を含む）を消す。段の状態は、`stages/{nid}` に持たせた候補者の依頼者 ID で引く（§6.2）。
   4. 最後に `principals_meta` を消す。本人のボタンからのときは、あわせてクッキーも消す。
@@ -795,16 +824,18 @@ sequenceDiagram
 
 - **交渉の記録**: 正本は金庫のイベント列（§3.2）。`web` は写さず、側を指定して読む。
 - **交渉の一覧**: 本人の画面の交渉一覧は、金庫の `GET /v1/principals/{pid}/negotiations` から作る（返す項目は §3.3 のとおりに限る）。
-- **活動ログ**（FR-37）: 自分の側の見え方を並べる。
-- **開示台帳**（FR-38）: `principals/{pid}/ledger`（`(default)`）に、段の遷移を記録する。途中確認の回答は、イベント列の自分の側の見え方から読んで、同じ画面に並べる。
+- **活動ログ**（FR-37）: 自分の側の見え方を並べる。`GET /v1/negotiations/{nid}/activity?after_seq=` が画面向けの形（`{seq, actor: self|counterparty|system, action, package, own_evaluation, answer, reason, attempted_move, result}`）で返し、`version`・残り回数・終了理由・期限・相手の評価は出さない。時刻はない（I-23）。
+- **開示台帳**（FR-38）: `principals/{pid}/ledger`（`(default)`）に、段の遷移を記録する。行は `nid`・`action`（disclose／meet／approve）・`stage`・`operator`・`items`・`to`・`simulated`・`at`（生の値なし。文書 ID は交渉 ID と出来事で決まる固定の文字列）。途中確認の回答は、イベント列の自分の側の見え方から読んで、同じ画面に並べる（I-27）。
 - **並べて見る画面**（FR-39）
   - 「最悪漏れてもここまで」は、表示のたびに金庫の読み出し口（`GET /v1/principals/{pid}/policy`）から作る。`web` には保存しない。
   - 「まだ隠しているもの」は、実ユーザーでは値を持たない。丸め済みポリシーから「種類」と「どのマスの中か」だけを示す。
     - 例:「正確な最低年収（600〜650 万のマスの中のどこか）」「辞めた理由（面談時に破棄済み）」「当直の条件（外しています）」
   - デモの架空人物では、フィクスチャの生の値を見せる。
   - どちらの場合も、ブラウザの保存領域（sessionStorage・localStorage・IndexedDB）には生の値を書かない。
+  - API は `GET /v1/principals/{pid|me}/panels` → `worst_case`（アンカーが条件を付けている値だけを丸めたマスで。多次元のポリシーを軸ごとに射影するので組の情報は落ちる＝画面の文言で誤読させない）と `still_hidden`（7 軸。年収は隠れているマスの種類数、外した軸は値の数、ほかの離散軸は 0。値は持たない。I-27）。
+  - これとは別に、デモ・攻撃の候補者側・求人側の 2 パネル（`GET /v1/demo/negotiations/{nid}/panels`。§3.2 の末尾）がある。AC-19 の「2 つのパネル」はこの 2 種類を指す（I-23）。
 - **管理画面**（FR-40）: 一時停止・再開・取消を、金庫の `control` に送る。取消の結果は「なし」になる。
-- **トレース**（FR-41）: OpenTelemetry で Cloud Trace に送る。
+- **トレース**（FR-41）: OpenTelemetry で Cloud Trace に送る（出力先の exporter は依存の追加の承認待ち。承認まではスパンの出力先なし）。
   - ADK のメッセージ内容キャプチャは切る（`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`。既定値は調査事項 R-2）。
   - レフェリーは独自のスパンを出す。属性は side、手、軸名、グリッド上の値。
   - 金庫のスパンは回数と結果だけ。面談のスパンには内容を載せない。
@@ -823,6 +854,7 @@ sequenceDiagram
   - 有効な `TurnInput` が届いた場合は、LLM が動き、返ってきた `Plan`（または `Move`）を画面に出す。これは金庫に登録しないので、どの交渉にも影響しない（L13-3）。
 - **壁 2**: 候補者側エージェントの直近の手番について、LLM の文脈の全文（固定の前文＋TurnInput。計画と決定の 2 回ぶん。§4.2）を表示する。生の数値も ID も自由文も入っていないことが見える。
 - **壁 3**: 金庫は丸め済みでしか答えない。推定区間メーターで見せる。
+- **実装で決めた細部**（F。I-26）: 壁 1 は `GET /v1/demo/attack/walls/1/example` と `POST .../walls/1`（止める順は 回数 → 32 KB → JSON の形 → 当日の物理の数 → 送信。応答は `{wall, outcome: rejected|accepted|failed, stopped_at, llm_called, registered_in_vault: false, sent_bytes, rejection, result, usage}`）。壁 2 は `GET .../walls/2/{nid}`（固定の前文と、計画・決定の `TurnInput` の JSON そのもの、自由文・ID・グリッド外の数値の機械的な検査 `inspection`。記録は `web` のメモリで再起動で 404）。壁 3 は `GET .../walls/3/{nid}`（攻撃者の提案ごとの候補者側の金庫の 3 値の答え。区間は §8.3 のメーター API）。
 
 ### 8.2 攻撃モードとレート制限（FR-46・47）
 
@@ -840,19 +872,22 @@ sequenceDiagram
 | ライブ交渉の作成 | 10 回 |
 | 攻撃モードの指示 | 30 回 |
 | 壁 1 の生メッセージ | 20 回 |
+| 攻撃モードの交渉の作成 | 10 回（1 件で LLM を約 28 回呼ぶ） |
+| 推定区間メーター | 60 回（1 回で金庫を最大 20 件読む） |
 
 - 上の表とは別に、全入口の合計で、全体として 10 分あたり 300 回までに抑える。IP の取り方が崩れても効く。
+- **実装で決めた細部**（F・K2。I-26・I-28）: 入口名は `interview_llm`・`demo_run`・`live_negotiation_create`・`attack_create`・`attack_instruction`・`raw_message`・`meter`（`[web.limits]` の `rate_*` と `per_client`）。窓は固定の区切り（境目で最大 2 倍通る）。拒否した要求は枠に数えない。429 の本文は `{"detail": {"code": "rate_limited", "entrance", "scope": "client|overall", "limit", "window_seconds", "retry_after_seconds"}}`（1 日の上限の 429 は文字列 `daily_limit_reached`。画面は両方を扱う）。カウンタは `(default)` の `rate_limits`（文書 ID は入口と IP の SHA-256 の先頭 32 桁。`ttl_at`）。面談の枠はクライアント IP ごとなので、会場の同じ Wi-Fi では 10 分に面談 10 人ほどが上限（発表の日は `interview_llm`・`meter` も上げる）。
 - **LLM の呼び出し数の上限**（I-15、X-46・X-47。上の表と全体の上限は入口の回数を数えるだけで、1 回の交渉が LLM を 20 回以上呼ぶことが見積もりに入っていなかった。理論上は 10 分で 300 交渉、約 100 ドル分まで使えた）
   - **保証は物理の数で行う。** `web` は、LLM に向けて送るすべての呼び出し（交渉エージェントの計画・決定、面談、壁 1 の生メッセージ。再試行を含む）を、送る前に `(default)` のトランザクションで数える（上限に達していなければ 1 進め、達していれば進めずに断る。429・5xx が返っても戻さない。§4.1）。上の時間窓カウンタと同じ仕組みで、窓を 1 日（日本時間の 0 時区切り）にした枠を 1 つ足す（暫定 1 日 1,500 回。文書には 7 日の TTL。1 文書への書き込みは 1 秒に 1 回程度が目安なので、発表の日に上限を大きく上げるときは分散カウンタにする。L14-7）。あわせて、交渉ごとの数も数える（暫定 44 回。`stages/{nid}` の項目に持つので、TTL と削除は段の状態と同じ。L13-5）。
   - どちらかの上限の数まで送っていたら、次の呼び出しは行わない。面談・生メッセージは断り（画面は「本日の上限に達しました」）、進行中の交渉は、金庫の `control{action: stop_cost_limit}` で「なし」にする（§3.4・§4.1。一時停止中・途中確認中でも効く）。日付をまたいで動く交渉の呼び出しは、翌日の数に入る（翌日に作れる件数が減る形で収まる）。計上の直後に日付が変わって送った分は前日の数に残るが、同時に送れるのは進行中の交渉 1 件につき 1 回なので、超える量は進行中の件数（34 件以下）で抑えられる。
-  - **1 日の最悪の金額**（X-50・C-49・X-56）: 1 要求の入力は、前文（約 2,000 トークン）と本文（交渉の `TurnInput` も面談の入力も、本文 32 KB の上限から多くても約 10,000 トークン）、出力＋思考は `max_output_tokens`（2,048。交渉・面談とも）で抑えられる。R-9 の単価（入力 $1.50・出力 $9.00／100 万トークン）で、1 要求の最悪は約 $0.037、1 日は 1,500 回に日付またぎの持ち越し（34 回以下）を足して約 $57（約 8,500 円）。通常は 1 要求 $0.006〜0.012 なので 1 日 $9〜18。単価の版と上限の値は設定ファイルに置き、変えたらこの見積もりを直す。
+  - **1 日の最悪の金額**（X-50・C-49・X-56）: 1 要求の入力は、前文（約 2,000 トークン）と本文（交渉の `TurnInput` も面談の入力も、本文 32 KB の上限から多くても約 10,000 トークン）、出力＋思考は `max_output_tokens`（交渉 3,072・面談 2,048。I-29）で抑えられる。R-9 の単価（入力 $1.50・出力 $9.00／100 万トークン）で、1 要求の最悪は約 $0.046（交渉。2,048 のときの約 1.25 倍。面談は約 $0.037）、1 日は 1,500 回に日付またぎの持ち越し（34 回以下）を足して約 $57（約 8,500 円）。通常は 1 要求 $0.006〜0.012 なので 1 日 $9〜18。単価の版と上限の値は設定ファイルに置き、変えたらこの見積もりを直す。
   - **入場の制限**（保証ではない。読むだけで、予約の記録は持たない。C-45・X-53）: 交渉の作成（ライブ・デモ・攻撃）は、`その日の物理の数 ＋ 進行中の交渉の未消化分（44 − その交渉の物理の数）の合計 ＋ 44` が 1 日の枠を超えるなら断る。進行中の交渉は、`web` が持つ進行中の一覧（レフェリーのタスクの一覧。作成した交渉は、見回りを待たずにその場で入る）から数える。何も書かないので、応答が落ちた後の再送・金庫が断った作成（`already_active`・`budget_exhausted`）は、どれも枠を消費しない。並行した作成が同時に判定を通ることはあるが、保証は物理の上限が受け持つ。こうして、作った交渉が物理の上限で途中で止まることを、通常の運用では起こさない。1 日 1,500 回なら、新しい交渉を同時に 34 件まで受けられる。発表の日は設定で上げる。
     - 同じ `request_id` の再送は、入場の判定を通さずに同じ交渉を返す。冪等キーの正本は金庫にあり（§3.5）、`web` は作成の前に `GET /v1/negotiations/by-request/{request_id}`（§3.3）で引く。金庫の作成が成功した直後に `web` が落ちても、再送はこの口で同じ交渉を見つける（X-57）。
     - 起動時は、見回りが進行中の一覧を読み終えるまで、新しい作成を受け付けない（503。1 分以内）。既知のキーの再送は、この間も同じ交渉を返す。読み終える前に新規を受け付けると、未消化分を少なく数えるため。
   - レフェリーは、交渉ごとの物理の呼び出し数を、終了時にログに残す（値は含まない）。
   - 予算アラートは事後の通知で、止めるのはこの枠。
-- 指示は 400 文字まで。生メッセージは本文 32 KB まで。
-- **クライアントの見分け方**: キーは、Cloud Run のフロントエンドが `X-Forwarded-For` に追記したクライアント IP（利用者が送れない末尾側の値）とする。先頭側の、利用者が書ける値は使わない（正確な位置は調査事項 R-7）。
+- 攻撃の API の本文は 32 KB まで（413）。指示は 400 文字まで（422）。
+- **クライアントの見分け方**: キーは、Cloud Run のフロントエンドが `X-Forwarded-For` に追記したクライアント IP（利用者が送れない末尾側の値）とする。先頭側の、利用者が書ける値は使わない（`web.client_ip`: 最後の要素。空なら接続元。複数行はつなげた全体の最後。分からなければ `unknown` の共有キー。外部ロードバランサの背後では末尾が LB の IP になるので、デプロイの確認項目で確かめる。R-7・I-21）。
 - 回数は Firestore の時間窓カウンタに、トランザクションで数える。再起動や新しいリビジョンでも消えない。
 - 請求アカウントに予算アラートを設定する（事後の通知で、上の上限が実際の歯止め）。
 - **発表の日の運用**（発表者だけの別枠は作らない。秘密の URL が漏れたときに、全体の歯止めを迂回されるため）
@@ -869,7 +904,8 @@ sequenceDiagram
   - 同じ攻撃画面の中で作った攻撃交渉をまたいで、区間を積み上げる。攻撃画面は、自分が作った交渉の ID を画面の中（メモリ）だけに持つ。訪問者を見分けるための ID は作らない（L7-3）。
   - 区間は `web` が計算する。画面は交渉 ID の一覧（暫定 20 件まで）を渡すだけにする。`web` は、デモ・攻撃の交渉についてだけ、それぞれの候補者側の見え方（受け手としての評価）を読んで区間を返し、本物の利用者の交渉の ID は拒否する。`web` は一覧を覚えない。こうすると、AC-12 の検査（`tests/test_meter.py`）が本物の計算のコードを通る（L8-2）。
   - 画面には「金庫の答えをすべて見られたとしても、ここまで」と書く。最悪の場合の攻撃者を想定した表示にする。
-- **FR-45 の二分探索の実演**は、台本の攻撃者で行う（ボタン 1 つで動かす）。交渉が終わったら次の交渉で続け、1 マスになったら止める。
+- **FR-45 の二分探索の実演**は、台本の攻撃者で行う（ボタン 1 つで動かす）。交渉が終わったら次の交渉で続け、1 マスになったら止める。実装は `POST /v1/demo/attack/bisection`（台本の攻撃者をサーバ側で動かし、1 マスになるか交渉 3 件で止めて ID の一覧と区間を返す。`attack_create` の枠。L2）。
+- **メーター API**（H2。I-27）: `POST /v1/demo/meter {"negotiation_ids": [1〜20 件]}`。1 件でも本物の利用者の交渉なら 403、別の候補者の答えが食い違えば 422。攻撃者の提案（候補者側の `offer_received` と受け手としての評価）を「年収以外の軸の組」でまとめ、組ごとに区間 `(lower, upper]` と `cells` を返す（観測の多い順。`observations` は「本人確認が必要」を含む。`narrowest` と文言 `note`）。最悪の攻撃者（金庫の答えを全部見られる、年収だけの二分探索）は 5 手で 1 マスに達し、評価上限 17 より手数上限 6 が先に効く（候補者が受けて終わる台本なら 3 交渉。I-24）。`web` は `rate_limits` のカウンタ以外は書かない。シミュレーションは `GET /v1/demo/meter/simulation?value=`（純粋な計算。どの値も 7 手以内。620 万は 7 手）。
 - 区間は常に真の値を含み、最後はグリッド 1 マス（例: 600〜650 万）で止まる。
 - ケース 3 のフィクスチャには、「台本の探索線（他の軸の固定値）の上で、受ける境目と受けない境目が隣り合うマスにある」性質を持たせる。「本人確認が必要」の隙間があると、メーターが複数マスで止まるため。
 - **防御なし**: ブラウザ上のシミュレーションで、画面に「シミュレーション」と明示する。
@@ -888,10 +924,10 @@ sequenceDiagram
       - **36 通りの始め方**（7 巡目のシミュレーション `reviews/round-7-sim/` と同じ）: 候補者の最初の手（年収 800・900・1000 万 × リモート 3・5 日、当直なし）の 6 通り × 求人の最初の手（年収 400・500 万 × 当直 2・4・8 回、リモート 0 日）の 6 通り。
       - **合否に入れる探し方**: 指示文どおりの探し方（最初の譲歩から年収と他の軸を一緒に動かす。7 巡目の表の 1・2 行目）と、片側だけが外れる探し方（7 巡目の表の 5 行目。候補者が 2 行目の型・求人が 4 行目の型という、7 巡目と同じ向き。向きを入れ替えると 29/36 なので、入れ替えた向きは記録だけにする。I-12）。それぞれ 36 通り中 34 通り以上で合格。
       - **結果を記録するだけの探し方**: 年収を先に譲る型、確認せずに譲歩案を出す型など（7 巡目の表の 3・4・6 行目）。指示文が禁じる振る舞いなので、合否には入れない。
-  - ケース 2: 両者が受けられる組み合わせがない。
-  - ケース 3: 攻撃（§8.2・§8.3）。探索線の性質は §8.3。
+  - ケース 2: 両者が受けられる組み合わせがない（18,000 通りの総当たりで交わりが 0。候補者の最低 750 万、求人の最高 700 万。I-24）。
+  - ケース 3: 攻撃（§8.2・§8.3）。探索線の性質は §8.3。候補者が受けられる組み合わせはケース 1 の候補者と同じ 5,328 通り、求人は全部受ける。`auto_response` は false（審査員が操作する求人）。`case<N>.toml` の `template_id` はファイル間で一意（I-24・I-25）。ケースの説明文は `web.ui_api.CASE_TEXTS`（フィクスチャの形に項目がない。U-09）。
 - どのケースも、テンプレートから写したコピーで動かす。実行のたびに同じ初期状態から始まる。
-- **リプレイ**: 本番の実行で出たイベント（見え方ごと）を JSONL（`fixtures/replays/case{1,2,3}.jsonl`）に記録しておき、記録どおりの時間間隔で流す。画面には「リプレイ」と表示する。
+- **リプレイ**: 本番の実行で出たイベント（見え方ごと）を JSONL（`fixtures/replays/case{1,2,3}.jsonl`）に記録しておき、記録どおりの時間間隔で流す。画面には「リプレイ」と表示する。形はヘッダ 1 行（`{"header": true, "case", "source": "live"|"scripted", "recorded_at", "schema": "replay/v1"}`）＋ 1 行 1 イベント（`{"side", "seq", "observed_at", "event"}`。時刻は記録する側が付ける。P-18）。`scripts/run_demo.py --case N --record PATH`（`--live` で本物の Gemini）で記録し、`--replay [PATH] --speed` で流し、`scripts/replay_check.py` が 3 回再生してハッシュ一致を確かめる（AC-21）。いまの 3 ファイルは台本の記録（`source: scripted`。0.5 秒ほど）で、本物の Gemini の記録は `--live --record` で取り直す（同じパスは上書き）。画面は `GET /v1/demo/replays/{case}` で取り、倍率 ×0.1〜×10 で流す（I-24・L）。
 - ライブ実行は temperature 0 で行う（§4.2）。② の DV-15 では、temperature 0 でも道筋は毎回同じにならなかった（合意した組み合わせは同じ。I-13）。
 
 ---
@@ -902,7 +938,7 @@ sequenceDiagram
 
 | # | 確かめること | やり方（決めたこと） |
 |---|---|---|
-| 1 | `vault` のイメージを Confidential Space で動かす | 金庫専用のイメージ（`Dockerfile.vault`。`ENTRYPOINT` 固定・`CMD []`、`EXPOSE 8443`、launch policy は `log_redirect=always` だけ許し、環境変数・コマンドの上書きとメモリ監視は許さない）。機密 VM は N2D + AMD SEV（`n2d-standard-2`、東京 `asia-northeast1-b`。P-8）。本番イメージは SSH もログも既定で無いので、先に debug イメージで通す。TEE 版の金庫は環境変数を使わず、プロジェクト ID・番号・ゾーンは実行時にメタデータサーバから取る（公開リポジトリに書かない） |
+| 1 | `vault` のイメージを Confidential Space で動かす | 金庫専用のイメージ（`Dockerfile.vault`。`ENTRYPOINT` 固定・`CMD []`、`EXPOSE 8443`、launch policy は `log_redirect=always` だけ許し、環境変数・コマンドの上書きとメモリ監視は許さない）。機密 VM は N2D + AMD SEV（`n2d-standard-2`、東京 `asia-northeast1-b`。P-8）。本番イメージは SSH もログも既定で無いので、先に debug イメージで通す。TEE 版の金庫は環境変数を使わず、プロジェクト ID・番号・ゾーンは実行時にメタデータサーバから取る（公開リポジトリに書かない）。イメージには `fixtures/`（テンプレートの投入。§3.7）と `config/params.toml` も入るので、それらの変更でもダイジェストが動く（対応表への追記と principalSet の付け直しが要る。I-25・I-26） |
 | 2 | 保存データの鍵を、検証済みのワークロードにだけ渡す | Cloud KMS の鍵 1 本（KEK）。権限は Workload Identity Pool の principalSet（イメージダイジェスト）にだけ付け、VM のサービスアカウントには付けない（付けると、運営者が同じ SA で別の VM を作って復号できる）。プロバイダの条件は `swname`・`STABLE`・`dbgstat`・`hwmodel`・プロジェクト・SA。金庫は起動時に、launcher が置く既定の attestation トークンを STS で交換し、KMS で DEK（AES-256-GCM）を包む・開く（どちらも httpx で REST を直接呼ぶ）。DEK はメモリにだけ置く。`_tee/dek` には包んだ鍵の版（`kek_version`）を記録し、起動時に 1 バイトの探りを encrypt して分かる primary の版（応答の `name`。鍵の GET は `cryptoKeyEncrypterDecrypter` にない権限が要るので使わない。C-60）と一致しなければ、復号せずに起動しない。切り替えの順序（X-70・C-59・C-63）: プロバイダの条件を本番用に更新する → debug の VM を消す → KMS の権限を外す → **65 分以上待つ**（debug の間に出た連携トークンと attestation トークンは最長 1 時間で切れる。待たないと、debug の VM で得たトークンで新しい版に自分の DEK を包める）→ 権限を付け直す → 新しい版を primary にして古い版を無効化する（無効化してから本番を起動するので、最初の DEK が古い版で包まれることはない）→ debug の DEK を消す → 本番の VM を初めて起動する → Cloud KMS の Data Access ログで、新しい版を作った後に成功した Encrypt・Decrypt の主体が本番の VM の subject だけであることを確かめる（置かれた DEK の検出。`sealing self-test ok` だけでは見分けられない。C-63）。規則: debug の条件に戻したら手順 D の全体をやり直す。live のデータが入った後は debug の条件に戻さない。live のデータが入った後の版の更新は、動いている金庫が、起動時に開いた DEK を primary で包み直す（10/5 以降）。WIF のプールにはプロバイダを 1 件だけ置く（principalSet と subject はプール単位で、プロバイダを区別しない。別のプロバイダを足せば、TEE を通らずに同じ principalSet になれる。C-62）。テスト用の WIF の条件にも、プロジェクトと SA を入れる。**オーナーの限界（C-58）**: プロジェクトのオーナーは基本ロールに `cloudkms.cryptoKeyVersions.useToDecrypt` を含むので、IAM を変えずに KEK で DEK を復号できる。これは Confidential Space でも防げない。抑止は Cloud KMS の Data Access 監査ログ（設定が有効で除外がない間、Decrypt の呼び出し主体が残る。§10 で有効にし、(g) で確かめる。X-78）。組織の配下なら IAM の拒否ポリシーでオーナーの復号を拒める（P-13）。**何を暗号化するか（I-14 の 2 番）**: 本物の依頼者の機微な項目だけ（`principals/{pid}` の policy・blocklist・removed_axes・attribute_bands、`negotiations/{nid}`（live）の snapshots・pending_offer・last_check・pending_question・result・`participants.candidate.attribute_bands`、`events/{version}` の `views.*.payload`）。索引・制御に使う項目（依頼者 ID・テンプレート ID・`job_id`・架空かどうか・`status`・`end_reason`・`to_move`・`paused`・`paused_at`・期限・`version`・`seq`・`mode`・`request_id`・TTL・カウンタ）は平文（L17-1。DV-19 の期待値はこの列挙）。**平文で残るメタデータ**（説明文に書く）: どの依頼者 ID が、いつ、どの求人（`job_id`）と交渉し、手数・評価回数がいくつか、は Firestore を直接読める者に見える（X-66。DV-19 で、封印した項目以外に値が現れないことを確かめる）。デモ・攻撃・テンプレートは公開フィクスチャなので暗号化しない。AAD は「文書のパス + 項目名」（暗号文の差し替えを防ぐ）。Firestore の CMEK は使わない（Firestore 自身が復号する仕組みで、attestation の条件が入らない）。`store.py` への組み込み（約 40 か所）はスパイクの後（10/5 以降） |
 | 3 | `web` から `vault` へ、ワークロード内で終端する TLS でつなぐ | **「検証してからピン留め」（I-14 の 3 番）**: 金庫は起動のたびに P-256 の鍵と自己署名の証明書を作る。`web` は、(1) 証明書を検証なしで控えて DER の SHA-256 を計算し、(2) その 1 枚だけを信用する接続で `GET /v1/attestation?nonce=` を呼び、(3) 返った JWT を Google の鍵で検証し、`eat_nonce` に自分の nonce と証明書ハッシュの両方があること、`swname`・`dbgstat`・`STABLE`・`hwmodel`・ダイジェスト（`deploy/vault-releases.json` の許可リスト）・プロジェクト・SA を確かめ、(4) 通ったときだけその証明書をピン留めし、以後の API に ID トークンを付けて呼ぶ。中継者は本物の証明書の秘密鍵を持たないので TLS を張れず、自分の証明書を出せばハッシュが合わない。金庫の再起動（証明書が変わる）は、接続エラーのたびに再検証して付け替える（間隔の下限 2 秒。Google Cloud Attestation は 1 プロジェクト・1 リージョンで毎秒 5 件まで）。検証は transport 単位で直列化し、同時の要求は同じ結果を共有する（X-67）。接続エラーがなくても 10 分ごとに検証し直す。ピンを外すのは、トークンを検証した結果が否定のとき（debug・失効・許可リストにない・`swname` が `GCE`・期限切れ・nonce 不一致）だけで、一時的な失敗（429・503・接続・タイムアウト）では外さずに今の接続を使い続け、2 秒間隔で再検証をやり直す。ただし、最後に検証が通ってから 30 分（`max_unverified_seconds`）を超えたら、証明書は保持したまま業務の要求を閉じ（レフェリーは待つ）、attestation だけを再試行する（一時的な失敗が続く金庫に秘密を無期限に送らない。X-77）。失効したイメージが動き続けうる時間は、最長およそ 40 分（再検証の間隔 10 分 ＋ 一時的な失敗の猶予 30 分。L18-7）。外した後・閉じた後も、以後の要求が 2 秒間隔で再検証を試み、通ったら復帰する（「次の 10 分まで」待たない）。公開 API の nonce の転送は 10 秒に 1 回に制限し、匿名の利用者が金庫の発行枠（毎秒 1 回）を使い切れないようにする（C-57・C-61）。公式に TLS と attestation を結ぶ手順はないので自前の設計（最も危ない点）。EKM 方式は Python の標準 `ssl` に API がなく採らない |
 | 4 | `vault` が呼び出し元を自分で確かめる | Cloud Run の起動元 IAM は効かない（Compute Engine の VM）。金庫は `Authorization: Bearer` の Google ID トークンを、Google の OAuth2 の証明書（1 時間キャッシュ。未知の `kid` のときだけ取り直す）で検証する。`aud` は固定の文字列（`caller_audience`。URL から作らない）、`iss` は Google、`email` は `web` の SA と一致し `email_verified`。それ以外は 401・403（固定文）。`/v1/attestation` だけは認証なし。`web` は ID トークンをメタデータサーバから `format=full` で取る（これがないと `email` が入らず、全呼び出しが 403 になる。L16-5）。手元の試験は IAP のトンネル経由で、SA の impersonation のトークンで行う |
@@ -945,7 +981,7 @@ sequenceDiagram
 | itsdangerous | セッションクッキーの署名 | BSD-3-Clause | 標準の hmac でも書ける。Starlette の SessionMiddleware が推移的に使う |
 | google-auth | ID トークンと attestation トークンの検証（`google.auth.jwt`。TEE 時。発行はメタデータサーバから httpx で） | Apache-2.0 | 自前の JWT 検証は危ない。Firestore のクライアントが推移的に使う。直接 import するので明示する（P-12） |
 | cryptography | 金庫の封印（AES-256-GCM）と TLS の自己署名の証明書（TEE 時） | Apache-2.0 または BSD-3-Clause | 標準ライブラリには AES-GCM も X.509 の生成もない。pyOpenSSL・Tink は新しい依存になる。google-auth が推移的に使う。直接 import するので明示する（P-12） |
-| sse-starlette | 画面への配信（SSE） | BSD-3-Clause | 自前の実装は接続の後始末が増える（ユーザーの承認、2026-09-29） |
+| sse-starlette | 画面への配信（SSE。`/v1/stream/`） | BSD-3-Clause | 自前の実装は接続の後始末が増える（ユーザーの承認、2026-09-29）。uv.lock にはあるが pyproject の明示は承認待ち（`uvicorn` も同じ） |
 | httpx（開発用） | テストの HTTP クライアント | BSD-3-Clause | a2a-sdk が推移的に使う。テストでだけ直接使う |
 | pytest | テスト（開発用） | MIT | 標準の unittest でも可。記述量で pytest を選ぶ |
 
@@ -961,20 +997,21 @@ sequenceDiagram
   - `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`（面談・交渉エージェントの両方。既定では、トレースにメッセージの内容が入る）
   - ログは INFO 以上（a2a-sdk と ADK は、DEBUG でリクエストの本文を出す）
   - `web` は uvicorn を workers=1 で動かす（依頼者ごとのロックがプロセスの中にあるため。I-4）
-  - Firestore の TTL ポリシー: `web` の `stages` の `ttl_at`、金庫のデモ・攻撃の交渉と各記録の期限の項目、冪等キーの文書
+  - Firestore の TTL ポリシー: `web` の `stages` の `ttl_at`、金庫のデモ・攻撃の交渉と各記録の期限の項目、冪等キーの文書、`(default)` の `rate_limits.ttl_at`（§8.2）
   - 環境変数: `SESSION_SIGNING_KEY`（Secret Manager から）、`VAULT_BASE_URL`、`agents` の URL、`SERVICE_AUTH_ENABLED`（既定で有効）、`GOOGLE_GENAI_USE_VERTEXAI=TRUE`、`GOOGLE_CLOUD_PROJECT`、`GOOGLE_CLOUD_LOCATION=global`
   - Cloud Run IAM: `agents` の起動元を `web` のサービスアカウントだけにする（§1.1）。金庫は、Cloud Run 版なら同じく IAM で、TEE 版ならアプリの中の ID トークン検証で（§9 の 4。L16-4）
-  - 金庫の本番の起動は、Cloud Run 版が `uvicorn vault.app:create_app_from_env --factory`、TEE 版が `python -m vault.tee.main`（イメージの `ENTRYPOINT`。§9 の 1）
+  - 金庫の本番の起動は、Cloud Run 版が `uvicorn vault.app:create_app_from_env --factory`、TEE 版が `python -m vault.tee.main`（イメージの `ENTRYPOINT`。§9 の 1）。Cloud Run 版の `VAULT_SEED_TEMPLATES`（既定 true。§3.7）
   - Vertex AI の利用枠: ② の DV-15 で、新しいプロジェクトでは交渉 1 回に 429 が 3 回出た（再試行で回復）。Gemini 2.0 以降のモデルは動的共有クォータ（DSQ）で、プロジェクトごとの枠を申請する仕組みがないので、申請はしない（I-20。確かめ方: コンソールの「割り当て」に `gemini-3.5-flash` の行がないこと）。429 は §4.1 の再試行と §8.2 の計上のまま受ける
   - プロジェクトの `cacheConfig.disableCache=true`（spec〔29〕・§1.2。`roles/aiplatform.admin` で PATCH し、GET で確かめる。R-9）
   - 思考の量の設定（§4.2）が効いていることを、起動後の 1 回の呼び出しの `usage_metadata`（思考トークン数）で確かめる
   - `google-genai[aiohttp]`（aiohttp）を入れない。入れると google-genai が接続エラーを内部で 1 回再試行し、「1 計上 = 要求 1 回」（§4.1）が崩れる（③-0 の実装で分かった）。`uv pip show aiohttp` が未インストールであることを確認項目にする
   - Firestore の TTL ポリシーに、`web` の `llm_call_counters` の `ttl_at`（§8.2）も足す
-  - 応答の `usage` の `prompt_tokens` の上限（暫定 20,000。本文 32 KB の見積もり）は `agents.client.MAX_PROMPT_TOKENS` にある（③ で config に移す）
+  - 応答の `usage` の `prompt_tokens` の上限（暫定 20,000。本文 32 KB の見積もり）は `config/params.toml` の `[agents] max_prompt_tokens`（`AgentsConfig`。`send_turn(config=)`。I-21）
   - レフェリーが金庫に届かないとき（ID トークンを取れない・宛先違いを含む）、理由（ステータス・通信エラーの型名）を 1 回だけ WARNING で書く（I-7・I-20。`1c2ad6d`）。運用はこのログで気づく
   - Cloud Run の基盤のリクエストログ（`run.googleapis.com/requests`）には、依頼者 ID・交渉 ID の入った URL がそのまま残り、アプリからは変えられない（I-9）。`web`・`agents`（金庫を Cloud Run で出す場合はそれも）のリクエストログを、Log Router の `_Default` シンクの除外フィルタで外す（例: `logName:"run.googleapis.com%2Frequests" AND resource.type="cloud_run_revision"`。コマンドはデプロイの段で確かめる）。エラーの調べはアプリのログ（ID を伏せてある）で行う。説明文には「Google の基盤側のログは除外設定に頼る」と書く
   - TEE 実施時の `web` の環境変数: `VAULT_TEE=true`、`VAULT_BASE_URL=https://10.10.0.10:8443`、`VAULT_SERVICE_ACCOUNT`（金庫の SA のメール）、`GOOGLE_CLOUD_PROJECT`、`VAULT_RELEASES_FILE`（契約 §7）。金庫の TEE 版は環境変数を使わない（launch policy で `tee-env-*` を許さないため）
-  - TEE 実施時の `scripts/deploy_check.sh` の照合（X-65・X-71・C-56・C-58。期待値は設定ファイルと `deploy/vault-releases.json` から作り、`gcloud` の出力と完全一致で比べる）: (a) WIF のプール `vault-tee-pool` に有効なプロバイダが `attestation-verifier` の 1 件だけで、その発行元（`https://confidentialcomputing.googleapis.com/`）・許す audience（`https://sts.googleapis.com`）・`attribute-mapping`・`attribute-condition` が本番の文字列と完全一致（C-62）、(b) Policy Analyzer（`gcloud asset analyze-iam-policy --full-resource-name=//cloudkms.googleapis.com/<鍵の名前> --permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt` に、組織の配下なら `--organization=<組織 ID>`、そうでなければ `--project=<プロジェクト ID>` を付ける。P-13 の答えで決める）が列挙する主体が、`deploy/expected-kms-principals.json`（承認済みのオーナーのメールの一覧と、`active` なダイジェストの principalSet の形。現在の IAM から自動で採らず、手で書く正本）と完全一致で、ほかに 1 件もない。解析が未完了（`fullyExplored=false`）なら不合格（全階層・custom role 込み。X-71・X-75）。あわせて、プールとプロバイダを変えられる主体（`iam.workloadIdentityPoolProviders.create/update/delete`、`iam.workloadIdentityPools.update`）を同じ方法で列挙し、承認済みのオーナーだけであること（C-62）、(c) 金庫の VM の SA と `web` の SA が (b) に現れない、(d) KEK の primary の版が本番切り替え後の版で、それより古い版はすべて `DISABLED` か `DESTROY_SCHEDULED`、(e) VM に外部 IP がなく、本番イメージ（`confidential-space`）で、`tee-image-reference` が `active` なダイジェスト、(f) `allow-iap-to-vault` の規則が消えている、(g) Cloud KMS の Data Access 監査ログ（DATA_READ・DATA_WRITE）がプロジェクトで有効で `exemptedMembers` が空（L18-2）。新しい版を作った後に成功した Encrypt・Decrypt の主体が、本番の VM の subject だけ（C-63）、(h) `_tee/dek.kek_version` が primary の版と一致し、金庫を強制再起動しても `sealing self-test ok`（既存の暗号文が開く）
+  - 画面（§7・§10 の `static/`）: `Dockerfile` に `COPY static`。ページの応答に CSP（`default-src 'none'; script-src 'self'; …; frame-ancestors 'none'`）・nosniff・no-referrer・no-cache を付ける。`/static/` と `/v1/stream/` はセッションのミドルウェアの外（§4.1）。`agents`・`vault` の `/healthz` は IAM で守られるので、確認では ID トークンを付けて呼ぶ（I-23）。R-7 の確認: `X-Forwarded-For` の末尾がクライアント IP であること（外部ロードバランサの背後では崩れる。I-21）
+  - TEE 実施時の `scripts/deploy_check.sh` の照合（X-65・X-71・C-56・C-58。期待値は設定ファイルと `deploy/vault-releases.json` から作り、`gcloud` の出力と完全一致で比べる）: (a) WIF のプール `vault-tee-pool` に有効なプロバイダが `attestation-verifier` の 1 件だけで、その発行元（`https://confidentialcomputing.googleapis.com/`）・許す audience（`https://sts.googleapis.com`）・`attribute-mapping`・`attribute-condition` が本番の文字列と完全一致（C-62）、(b) Policy Analyzer（`gcloud asset analyze-iam-policy --full-resource-name=//cloudkms.googleapis.com/<鍵の名前> --permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt` に、組織の配下なら `--organization=<組織 ID>`、そうでなければ `--project=<プロジェクト ID>` を付ける。P-13 の答えで決める）が列挙する主体が、`deploy/expected-kms-principals.json`（承認済みのオーナーのメールの一覧と、`active` なダイジェストの principalSet の形。現在の IAM から自動で採らず、手で書く正本）と完全一致で、ほかに 1 件もない。解析が未完了（`fullyExplored=false`）なら不合格（全階層・custom role 込み。X-71・X-75）。あわせて、プールとプロバイダを変えられる主体（`iam.workloadIdentityPoolProviders.create/update/delete`、`iam.workloadIdentityPools.update`）を同じ方法で列挙し、承認済みのオーナーだけであること（C-62）、(c) 金庫の VM の SA と `web` の SA が (b) に現れない、(d) KEK の primary の版が本番切り替え後の版で、それより古い版はすべて `DISABLED` か `DESTROY_SCHEDULED`、(e) VM に外部 IP がなく、本番イメージ（`confidential-space`）で、`tee-image-reference` が `active` なダイジェスト、(f) `allow-iap-to-vault` の規則が消えている、(g) Cloud KMS の Data Access 監査ログ（DATA_READ・DATA_WRITE）がプロジェクトで有効で `exemptedMembers` が空（L18-2）。新しい版を作った後に成功した Encrypt・Decrypt の主体が、本番の VM の subject だけ（C-63）、(h) `_tee/dek.kek_version` が primary の版と一致し、金庫を強制再起動しても `sealing self-test ok`（既存の暗号文が開く）、(i) 拒否ポリシー `vault-kek-deny`（P-13。手順 G）があり、本文が期待と一致
 - **リポジトリ**: 実装着手時に `git init` し、`~/.claude/templates/gitignore` を `.gitignore` にする。
   - GitHub はリポジトリ全体を公開する（P-10 の推奨。§9）。公開前に、履歴に秘密（鍵・トークン・`.env`）が混ざっていないことを確かめる（GCP のプロジェクト ID は秘密ではない）。
 
@@ -1038,7 +1075,7 @@ tenshokuagent/
 
 | AC | 実行するもの | 合格基準 |
 |---|---|---|
-| AC-01 | `uv run pytest tests/test_interview_flow.py` | 正規化 3 問と二択 5 問以上が終わるまで確認画面に進めない。確認前に `vault` への書き込みが 0 件 |
+| AC-01 | `uv run pytest tests/test_interview_api.py tests/test_interview_logic.py tests/test_interview_agent.py` | 正規化 3 問と二択 5 組（A・B の両方）以上が終わるまで確認画面に進めない。確認前に `vault` への書き込みが 0 件 |
 | AC-02 | `uv run python scripts/canary_scan.py` と `scripts/check_no_web_storage.sh` | 生の値のカナリア（例: 623 万、`CANARY-7F3A`）を流した後、`vault` の保存内容・`web` の保存内容・ログ・スパンのどこにも出てこない。`static/` のコードに、生の値をブラウザの保存領域へ書く呼び出しがない |
 | AC-03 | `uv run pytest tests/test_agent_context.py` | ケース 1 の全手番で、LLM に渡す入力（固定の前文＋TurnInput。計画・決定の両方）に、フィクスチャの生の値も ID も自由文も入っていない |
 | AC-04 | `uv run pytest tests/test_validation.py` | 次の 8 種すべてが、全受信口とレフェリーの両方で拒否される: TextPart、未定義の項目、列挙外の値、範囲外の数値、グリッド外の値、`TurnInput` 用の受信口への `principal_instruction`、ID の形式違反、32 KB を超える本文。計画の `move`・`package` に限っては P-14 の答えに従う（推奨: `checks` があるときは捨てる＝どこにも渡らない。`checks` 自体と、`checks` が空のときの `move`・`package` は従来どおり拒否）。③ の後は、`Plan` 型を直接ではなく、レフェリーの実際の読み方（`PlanEnvelope` → `Move`）を通して検査する（C-64） |
@@ -1047,29 +1084,29 @@ tenshokuagent/
 | AC-07 | `uv run pytest tests/test_jit.py` | 途中確認は側ごとの上限（合計で 2）を超えない。回答が追記先の規則どおりに追記され、同じ組み合わせ（または支配される組み合わせ）には以後、金庫が答える。次の交渉では、前の交渉の回答（外した軸について中立でないものを除く。P-5）が使われる |
 | AC-08 | `uv run pytest tests/test_referee_output.py` | 見込みは最終記録にしか現れない。最終記録の中身は双方とも同じ `{likelihood, package}` だけで、理由を含まない |
 | AC-09〜11 | `uv run python scripts/run_demo.py --case N --live`（本物の Gemini）と `--replay`、`uv run pytest tests/test_fixtures.py` | ケース 1 が「中」以上で組み合わせ 1 つ（フィクスチャの性質はテストで確認）。ケース 2 は双方に「なし」だけ。ケース 3 は 3 枚の壁がすべて画面で確認できる |
-| AC-12 | `uv run pytest tests/test_meter.py` | シミュレーションは 7 手で特定される。実システムでは、候補者側が対案を返す台本や、受けて終わる台本でも、区間が常に真の値を含み、最後はグリッド 1 マスになる |
-| AC-13 | `uv run pytest tests/test_attack_mode.py` | 次がすべて成り立つ<br/>・401 文字の指示と 32 KB を超える生メッセージは拒否<br/>・入口ごとの上限を超えると 429<br/>・ある入口の枠を使い切っても、別の入口は使える<br/>・`X-Forwarded-For` の先頭側を偽っても別枠にならない<br/>・全体で 301 回目は 429<br/>・アプリを作り直しても（再起動の模擬）数えた回数が残る<br/>・架空人物以外の相手には攻撃モードの交渉が作れない<br/>・候補者側の受信口に届くのは `TurnInput` だけ |
+| AC-12 | `uv run pytest tests/test_meter.py` | シミュレーションはどの値も 7 手以内で特定される（620 万は 7 手）。実システムでは、候補者側が対案を返す台本や、受けて終わる台本でも、区間が常に真の値を含み、最後はグリッド 1 マスになる |
+| AC-13 | `uv run pytest tests/test_attack_mode.py tests/test_attack_walls.py tests/test_limits.py tests/test_interview_api.py tests/test_meter.py` | 次がすべて成り立つ<br/>・401 文字の指示と 32 KB を超える生メッセージは拒否<br/>・入口ごとの上限を超えると 429<br/>・ある入口の枠を使い切っても、別の入口は使える<br/>・`X-Forwarded-For` の先頭側を偽っても別枠にならない<br/>・全体で 301 回目は 429<br/>・アプリを作り直しても（再起動の模擬）数えた回数が残る<br/>・架空人物以外の相手には攻撃モードの交渉が作れない<br/>・候補者側の受信口に届くのは `TurnInput` だけ |
 | AC-14 | `uv run pytest tests/test_stages.py` | 段 1・段 2 は双方の操作なしでは開かない。段 1 は双方が「会う」を押した時点で開く |
-| AC-15 | `uv run pytest tests/test_llm_inputs.py` | 段 1 の要約に入れたカナリアが、記録した LLM 入力のどこにも出てこない |
+| AC-15 | `uv run pytest tests/test_stages_llm_inputs.py` | 段 1 の要約に入れたカナリアが、記録した LLM 入力のどこにも出てこない |
 | AC-16 | `uv run pytest tests/test_blocklist.py` | ブロック先の企業には、交渉もイベントも件数も一切生まれない |
 | AC-17 | `scripts/canary_scan.py`（辞めた理由のカナリア）と `uv run pytest tests/test_deletion.py` | 次がすべて成り立つ<br/>・辞めた理由がどこにも残っていない<br/>・終わった交渉のコピーが、終了処理の後に残っていない（合意・取消・期限切れ・上限での停止のどれでも）<br/>・誰も操作しない交渉でも、見回りだけで期限切れになり、コピーが消える<br/>・デモ・攻撃の交渉の文書とイベントの各記録に TTL が付き、本物の利用者の交渉には付かない |
 | AC-18 | `scripts/canary_scan.py`（スパン）と、クラウドでは `gcloud logging read` でカナリアを検索 | 0 件 |
 | AC-19 | 画面の確認手順（`tests/manual/ui_checklist.md`） | 活動ログ・開示台帳の閲覧、2 つのパネルの並列表示、一時停止・取消がすべてできる |
 | AC-20 | `uv run pytest tests/test_employer_view.py` | 「市場全体に知られ得る」が表示される。粒度の差は U-12 の決定待ち（保留） |
 | AC-21 | `uv run python scripts/replay_check.py` | 3 回再生して、イベント列のハッシュが一致する |
-| AC-22 | `scripts/deploy_check.sh` | Cloud Run のサービス（TEE 時は `web`・`agents` の 2 つ、Cloud Run 版なら 3 つ）の `/healthz` が 200。TEE 時は金庫を `web` 経由で確かめ（`/api/tee/attestation` が `verified=true`）、§10 の TEE の照合 (a)〜(h) がすべて一致する（(h) は、再起動の前にあった `_tee/selftest` が再起動の後に開くことまで。X-76）。デモ URL が開ける、提出物 6 点のチェックリストが埋まっている（L16-4） |
+| AC-22 | `scripts/deploy_check.sh` | Cloud Run のサービス（TEE 時は `web`・`agents` の 2 つ、Cloud Run 版なら 3 つ）の `/healthz` が 200。TEE 時は金庫を `web` 経由で確かめ（`/api/tee/attestation` が `verified=true`）、§10 の TEE の照合 (a)〜(i) がすべて一致する（(h) は、再起動の前にあった `_tee/selftest` が再起動の後に開くことまで。X-76）。デモ URL が開ける、提出物 6 点のチェックリストが埋まっている（L16-4） |
 | AC-23 | `uv run python scripts/verify_attestation.py --web <web の URL> --project <プロジェクト ID> --service-account <金庫の SA>`（TEE 実施時。`--project`・`--service-account` は必須で、README に書いた値を渡す。開発者は IAP トンネルの出口に `--direct https://localhost:8443`。`--direct` は、控えた証明書だけを信用する接続で呼び、自分で計算した証明書ハッシュで `eat_nonce` を照合する。`--web` は金庫の証明書を観測できないので、証明書との結び付きは確かめない（出力にそう書く。L16-6・X-73） | 終了コード 0: JWT が Google の鍵で検証でき、`eat_nonce` に渡した nonce があり、`swname`・`dbgstat`・`STABLE`・`hwmodel`・プロジェクト・SA が本番の条件で、イメージダイジェストが `deploy/vault-releases.json` の `active` な要素にある（証明するのは §9 の 1 段目と許可リストまで。コミットとの対応は L0 では運営者の記録。`web` がその金庫にだけ送っていることは証明しない）。異常系（署名の破損・nonce 違い・表にない／`revoked` のダイジェスト・debug・期限切れ）は pytest で終了コード 1。「ID トークンのない呼び出しは拒否される」は、金庫の認可の判定を pytest で、IAP 経由の `curl` の 401 を `tests/manual/tee-spike.md` で確かめる |
 
 ### 12.2 設計から来る追加の検証
 
 | 番号 | 実行するもの | 合格基準 |
 |---|---|---|
-| DV-01 | `uv run pytest tests/test_authz.py` | 次がすべて成り立つ<br/>・他人の依頼者 ID・交渉 ID を指定した閲覧・操作がすべて 403<br/>・デモ用エンドポイントから本物の依頼者に触れられない<br/>・`X-Requested-With` のない状態変更は拒否<br/>・本物の利用者の交渉では、ポリシーとイベント列は本人の側としてしか読めない（デモ・攻撃では架空人物の側を読んでよい）<br/>・本人向けの交渉一覧に、終了理由・相手の回数・`version` が現れない<br/>・依頼者 ID は開始ページの GET でしか発行されず、POST の応答で上書きされない<br/>・有効なクッキーがあるまま開始ページを開き直しても、ID が変わらない<br/>・メーターの区間の API は、本物の利用者の交渉の ID を拒否する |
-| DV-02 | `uv run pytest tests/test_concurrency.py` | 次がすべて成り立つ<br/>・同じ `expected_version` の手の操作（`check` を含む）を並行して 10 本送ると、1 本だけが通り、残りは何も消費せず 409 になる<br/>・上限を超える消費が起きない<br/>・途中確認の回答、「会う」、段 2 の承認も、並行・再送で 1 回しか効かない<br/>・`control` と `expire` は何度呼んでも同じ結果で、交渉が進んでいる最中でも 409 にならない<br/>・`accept` の直後に取消を並行して送っても、結果が 2 通りにならない<br/>・手・一時停止・再開・期限切れを交互に起こしても、イベント列の記録が上書きされず、1 件ずつ残る |
+| DV-01 | `uv run pytest tests/test_authz.py tests/test_meter.py tests/test_activity_api.py` | 次がすべて成り立つ<br/>・他人の依頼者 ID・交渉 ID を指定した閲覧・操作がすべて 403<br/>・デモ用エンドポイントから本物の依頼者に触れられない<br/>・`X-Requested-With` のない状態変更は拒否<br/>・本物の利用者の交渉では、ポリシーとイベント列は本人の側としてしか読めない（デモ・攻撃では架空人物の側を読んでよい）<br/>・本人向けの交渉一覧に、終了理由・相手の回数・`version` が現れない<br/>・依頼者 ID は開始ページの GET でしか発行されず、POST の応答で上書きされない<br/>・有効なクッキーがあるまま開始ページを開き直しても、ID が変わらない<br/>・メーターの区間の API は、本物の利用者の交渉の ID を拒否する |
+| DV-02 | `uv run pytest tests/test_concurrency.py tests/test_stages_concurrency.py`（段階開示はエミュレータの競合待ちのため 2〜4 本で確かめる） | 次がすべて成り立つ<br/>・同じ `expected_version` の手の操作（`check` を含む）を並行して 10 本送ると、1 本だけが通り、残りは何も消費せず 409 になる<br/>・上限を超える消費が起きない<br/>・途中確認の回答、「会う」、段 2 の承認も、並行・再送で 1 回しか効かない<br/>・`control` と `expire` は何度呼んでも同じ結果で、交渉が進んでいる最中でも 409 にならない<br/>・`accept` の直後に取消を並行して送っても、結果が 2 通りにならない<br/>・手・一時停止・再開・期限切れを交互に起こしても、イベント列の記録が上書きされず、1 件ずつ残る |
 | DV-03 | `uv run pytest tests/test_invalid_move_recovery.py` | 次がすべて成り立つ<br/>・台本エージェントの無効な手（スキーマ違反と、金庫で分かる無効手の両方）が金庫に記録される<br/>・次の `TurnInput.last_error` に理由が入り、直した手で交渉が続く<br/>・ガードで拒否された提案も評価回数を消費する<br/>・受け手としての評価・`accept` の確かめ直し・判定・回答後の評価し直しは、評価回数を消費しない。相手が提案を重ねても、自分の評価上限を超えない<br/>・同じ側の無効手が 3 回続いたときだけ終わる。間に有効な `check` を挟んでも、連続は切れない（C-46・X-48）<br/>・無効な決定の後、次の手番の計画と、確かめを挟んだ同じ手番の決定の両方の `TurnInput` に、`last_error`・`last_invalid` が入り、直した手で続く（X-51）<br/>・Vertex AI の一時的なエラーは再試行され、無効手にならない |
 | DV-04 | `uv run pytest tests/test_attacker_isolation.py` | `AttackerTurnInput` は `/a2a/attacker` でしか受け付けられない。`/a2a/attacker` は攻撃モードの交渉からしか呼ばれない |
 | DV-05 | `uv run pytest tests/test_remove_axis.py` | 次がすべて成り立つ<br/>・外した軸があっても、全 18,000 通りで「受けられない」が「受けられる」に変わらない<br/>・代表的な面談フィクスチャで離散軸（順序のある軸・順序のない区分軸のそれぞれ）を 1 つ外しても、受けるアンカーが 1 件以上残る<br/>・外した軸に触れる発言と、その軸で中立でない途中確認の回答が、本体に保存されない |
-| DV-06 | `uv run pytest tests/test_principal_deletion.py` | 次がすべて成り立つ<br/>・削除の後、`vault-db` と `(default)` に、その依頼者のポリシー・コピー・自分側の見え方・台帳・段の状態・カナリアが残らない（カナリアは、面談の入力と段 1 の職務要約の両方に入れる）<br/>・相手が本物なら、相手側の見え方と「なし」の最終記録は残る<br/>・相手が架空人物なら、交渉の文書もその下のイベント列の記録も 1 件も残らない<br/>・削除中の操作は拒否される<br/>・終わっていない交渉は取消になる<br/>・各段の間で失敗させても、本人が押し直さずに、依頼者の見回りが最後まで進める<br/>・`principals_meta` は最後に消え、それより先に消えることはない |
+| DV-06 | `uv run pytest tests/test_principal_deletion.py` | 次がすべて成り立つ<br/>・削除の後、`vault-db` と `(default)` に、その依頼者のポリシー・コピー・自分側の見え方・台帳・段の状態・カナリアが残らない（カナリアは、面談の入力と段 1 の職務要約の両方に入れる）<br/>・相手が本物なら、相手側の見え方と「なし」の最終記録は残る<br/>・相手が架空人物なら、交渉の文書もその下のイベント列の記録も 1 件も残らない<br/>・削除中の操作は拒否される<br/>・終わっていない交渉は取消になる<br/>・各段の間で失敗させても、本人が押し直さずに、依頼者の見回りが最後まで進める<br/>・`principals_meta` は最後に消え、それより先に消えることはない<br/>・面談を途中まで進めてから削除すると、面談の途中状態も消え、`GET .../interview/state` が `interview_not_started` になる（I-28） |
 | DV-07 | `uv run pytest tests/test_demo_isolation.py` | 2 つのデモを並行して動かしても、回数・途中確認の追記が互いに影響しない。実行の後、テンプレートが変わっていない |
 | DV-08 | `uv run pytest tests/test_referee_resume.py` | 次がすべて成り立つ<br/>・レフェリーのタスクを途中で止めて作り直すと、見回りが一覧 API から拾い、同じ手番から続く<br/>・一時停止中は手番の期限が進まず、再開しても期限切れにならない<br/>・一時停止と再開を繰り返しても、`expires_at` で必ず終わる<br/>・誰も操作しなくても、見回りの `expire` で期限切れになる<br/>・取消は `awaiting_principal` 中でも効く<br/>・合意の直後に `web` を落としても、段階開示の状態が作り直され、段 0 が表示される |
 | DV-09 | `uv run pytest tests/test_statement_conversion.py` | §2.3 の例の 2 文が、両方とも矛盾なく書き込める。受けるアンカーの補完は最も良い値になる。架空人物への途中確認の回答は交渉用コピーにだけ入り、テンプレートを変えない |
@@ -1079,10 +1116,11 @@ tenshokuagent/
 | DV-13 | `uv run pytest tests/test_move_limit.py` | 片方の側が最後の手で提案したとき、相手は自分の残りがあれば accept・reject で答えられる。手番が回ってきた側の残りが 0 のときだけ終わる。3 回目の連続無効手で終わるとき、無効手の記録と終了の記録が別々の `version` で 2 件残る |
 | DV-14 | `uv run pytest tests/test_fixtures.py -k case1_reachability` | ケース 1 のフィクスチャで、§8.4 の 36 通りの始め方について、合否に入れる探し方（指示文どおりの型と、片側だけが外れる型。向きは §8.4 のとおり）がそれぞれ 34 通り以上、側ごとの上限（手数 6・評価 17・途中確認 1）の中で合意に届く。台本のエージェントは計画・決定の形で動かし、レフェリーの確かめの実行条件（§4.1）を通す（v14。X-59）。記録だけの型（入れ替えた向きを含む）の結果も出力する。② では評価 16・1 手 1 呼び出しの形で 3 つの型とも 36/36（I-12） |
 | DV-15 | `uv run python scripts/run_demo.py --case 1 --live` | 本物の Gemini で、ケース 1 が上限内の合意まで通る（② で 2 回合格。I-13）。**v13 の再実行（③-0 の完了条件）**: `uv run python scripts/run_demo.py --case 1 --live --runs 2 --judge` の 1 コマンドで、2 回続けて次がすべて成り立つ（基準の値は `config/params.toml` の `[agents.cost_targets]` に置き、判定はスクリプトが行う。X-54）<br/>・合意に届く<br/>・交渉 1 回の 200 応答の呼び出し（`usage` が返ったもの）が、手の数（無効手と有効な途中確認を含む）× 2 以下、かつ 28 以下（② の合意の筋は手 8〜9 なので、16〜18 回の見込み）。物理の送信の数（429・5xx の分を含む）は別に記録し、合否には入れない（② では 429 が交渉 1 回に 3 回出た。C-50）。クライアント側の自動再試行がないことは DV-17 の偽の HTTP 層で確かめる（C-54）<br/>・費用が 0.15 ドル以下（見積もり 0.11〜0.15。§4.2）。費用は、`agents` 側の `usage_metadata`（入力・キャッシュ済み・思考・出力のトークン数）に、設定ファイルの単価（版付き）を掛けてスクリプトが計算する（手計算にしない。C-44・L12-5）。`usage_metadata` が取れない呼び出しが 1 つでもあれば不合格<br/>・1 呼び出しあたりの思考トークン数の平均が、基準値 820 の半分以下（基準値は ② の実測から固定した値。台帳 I-15: 思考 $0.63 ÷ 単価 $9／100 万 ÷ 約 85 回。設定ファイルに置く）。`finish_reason` が `MAX_TOKENS` の呼び出し（出力が切れた）が 1 つもない（C-53）<br/>・記録（`tmp/demo_runs/*.jsonl`）に、モデル ID・設定（思考の量・temperature・`max_output_tokens`・キャッシュの有無）のハッシュ・単価の版・呼び出しごとのトークン数・レフェリーが数えた物理の呼び出し数・判定の結果が機械可読で残る<br/>届かなければ、思考の量（LOW → MINIMAL）→ 前文を短くする → 明示のキャッシュ（P-7 をユーザーに聞き、実機で両立を確かめてから）の順に調整して再実測し、結果を台帳に記録する。キャッシュを使う構成では、`cached_content_token_count > 0` の呼び出しが半数以上であることも合否に入れる |
-| DV-16 | `uv run pytest tests/test_inactive_deletion.py` | 次がすべて成り立つ<br/>・`delete_after` を過ぎた依頼者は、進行中の交渉がなくても依頼者の見回りに拾われ、削除の流れで `vault-db` と `(default)` にデータが残らない（DV-06 と同じカナリアで確かめる。相手が本物なら、相手側の見え方と「なし」の最終記録は残る）<br/>・有効なクッキーを持つリクエスト（閲覧だけの GET を含む）のたびに、1 時間に 1 回まで `last_active_at` と `delete_after` が更新され、クッキーの期限はそれと同時にだけ延びる。閲覧だけで使い続けた依頼者は消えない<br/>・どの時点でも、有効なクッキーを持つ依頼者の `delete_after` は過ぎていない（境目の前後で消えない）<br/>・見回りが読んだ後に `delete_after` が延びたら、削除中にしない<br/>・`principals_meta` は、面談の送信で金庫に書く前に作られ、開始ページを開いただけでは作られない<br/>・金庫の削除の後で失敗させても、次の見回りで段の状態（職務要約を含む）と開示台帳まで消し切り、`principals_meta` は最後に消える |
+| DV-16 | `uv run pytest tests/test_inactive_deletion.py` | 次がすべて成り立つ<br/>・`delete_after` を過ぎた依頼者は、進行中の交渉がなくても依頼者の見回りに拾われ、削除の流れで `vault-db` と `(default)` にデータが残らない（DV-06 と同じカナリアで確かめる。相手が本物なら、相手側の見え方と「なし」の最終記録は残る）<br/>・有効なクッキーを持つリクエスト（閲覧だけの GET を含む）のたびに、1 時間に 1 回まで `last_active_at` と `delete_after` が更新され、クッキーの期限はそれと同時にだけ延びる。閲覧だけで使い続けた依頼者は消えない<br/>・どの時点でも、有効なクッキーを持つ依頼者の `delete_after` は過ぎていない（境目の前後で消えない）<br/>・見回りが読んだ後に `delete_after` が延びたら、削除中にしない<br/>・`principals_meta` は、面談の送信で金庫に書く前に作られ、開始ページを開いただけでは作られない<br/>・金庫の削除の後で失敗させても、次の見回りで段の状態（職務要約を含む）と開示台帳まで消し切り、`principals_meta` は最後に消える<br/>・30 日の自動削除でも、面談の途中状態（メモリ）が消える（I-28） |
 | DV-17 | `uv run pytest tests/test_turn_protocol.py` | 次がすべて成り立つ（LLM は、受けた要求（`LlmRequest`）を記録するスタブの BaseLlm）<br/>・1 手（無効手を含む）につき、エージェントの呼び出しは最大 2 回。側ごとの正常な手番は 7 回以下で、交渉 1 回の呼び出しは 28 回以下（台本のエージェントでケース 1 の 36 通りを通して数える）<br/>・`checks` は並びの順に確かめ、「受けられる」が出たら残りは確かめない（null になる）<br/>・自分側の見え方にすでにある「受けられる」「受けられない」の組み合わせは、金庫を呼ばずに埋まり、評価を消費しない。「本人確認が必要」の記録は、その後に自分側の途中確認の回答があるときだけ確かめ直し、なければ埋まる（C-48）<br/>・残りの評価回数が「残りの手数 ＋ 残りの途中確認数」以下なら確かめず、途中確認（「受ける」の回答）の後の提案を含めて、残りの手のすべてで提案のガードが通る（C-47）<br/>・`checks` が空のときの手はそのまま登録され、`checks` と `move` の両方がある `Plan` は `checks` を実行して `move` を無視し、どちらもない `Plan` と、`checks` が空で `move=check` を出した `Plan`・`move=check` の `Move` は `schema_invalid` になり、`checks` が有効なら `move`・`package` に `check` やグリッド外があっても計画は有効で `checks` だけが実行される（C-51・L16-1。後者は ③ で実装）<br/>・計画が無効手になった手番では決定を呼ばず、決定の無効手が 3 回続くと、間に確かめがあっても `stopped_invalid` で止まる<br/>・決定の `TurnInput` は、確かめの後に読み直した `view`（残りの評価回数が確かめの分だけ減っている）から作られ、`checked` が確かめた結果と順序どおりに一致する<br/>・確かめの途中で 409 が返る・レフェリーを止めて作り直す（再起動の模擬）のどちらでも、同じ手番から続き、済んだ確かめは履歴から埋まって金庫の評価を重ねて消費しない（間に自分側の途中確認の回答がはさまった「本人確認が必要」だけは確かめ直し、その分は消費する。X-54・C-48）<br/>・無効な決定の後、確かめを挟んだ同じ手番の決定と次の手番の計画の `TurnInput` に、`last_error`・`last_invalid` が残る（X-51）<br/>・スタブの BaseLlm が受けた要求の数が、レフェリーが数えた送信の数と一致する（X-50）。あわせて、本物の `Gemini` モデルの下の HTTP 層を、429・503 を返す偽の transport に差し替えて、HTTP の要求が 1 回だけ出ることを確かめる（`retry_options.attempts=1`。X-55）<br/>・応答の封筒の検証: `usage` の欠落・負の値・設定と違うモデル ID・余分な artifact や metadata は `schema_invalid` になる（X-58）<br/>・計画・決定の両方で、スタブが受けた要求の system_instruction が側ごとの前文とハッシュで一致し、contents は `TurnInput` の JSON 1 件だけで、`thinking_config.thinking_level` と temperature が設定ファイルの値と一致する（AC-03 の検査を含む）<br/>・JSON モード: 計画・決定とも、スタブが受けた `LlmRequest` の `response_mime_type` が `application/json` で `response_schema` がなく、偽の HTTP 層の実ペイロードの `generationConfig` に `responseMimeType` があり `responseSchema`・`responseJsonSchema` がない（`tests/test_agent_output_schema.py`・`tests/test_agent_http_retry.py`。X-68） |
 | DV-18 | `uv run pytest tests/test_llm_budget.py` | 次がすべて成り立つ（送信を止めて待つスタブで、送っている最中に永続のカウンタがすでに進んでいることを見る。X-54）<br/>・交渉エージェントの計画・決定、面談、壁 1 の生メッセージのすべてで、送る前に 1 日の物理の数と（交渉なら）交渉ごとの数が 1 進む。レフェリーの再試行も 1 回と数え、429・5xx が返っても戻らない（X-56）<br/>・金庫の作成が成功した直後に `web` を落として（障害の注入）同じ `request_id` を再送しても、同じ交渉が返る（X-57）<br/>・面談の LLM に向かう入力が本文 32 KB を超えると拒否され、面談エージェントの要求に `max_output_tokens` が付く（C-49）<br/>・交渉ごとの上限（44）まで送った後の次の呼び出しは送られず、`control{stop_cost_limit}` で「なし」になり、ログに残る。途中確認中・直前の操作が 409 になった後のどれでも止まり、一時停止中に（ほかの交渉で）1 日の上限に達した交渉は再開後の最初の送信の前で止まり、最終記録は 1 件だけ（X-52・L14-5）<br/>・出力が `max_output_tokens` で切れた呼び出しは `output_truncated` の無効手になり、次の `TurnInput.last_error` に入る（C-53）<br/>・1 日の上限に達すると、面談と生メッセージは断られ、進行中の交渉は次の呼び出しの前で止まる<br/>・カウンタに書けない（Firestore の失敗の模擬）ときは送られず、回復すると続く（X-50）<br/>・作成の入場の制限: 「その日の物理の数 ＋ 進行中の未消化分 ＋ 44」が枠を超えるときだけ断られる。枠が埋まっていても、同じ `request_id` の再送は同じ交渉を返す。金庫が断った作成（`already_active`）・入場で断られた作成は、入場の判定にも物理の数にも影響しない（何も書かない。C-45・X-53）<br/>・作成した交渉は、次の見回りを待たずに未消化分に入る。起動時の見回りが終わるまで作成は 503 になる（X-53）<br/>・アプリを作り直しても（再起動の模擬）数えた値が残る<br/>・日付が変わると 1 日の数は 0 に戻り、前日に作って持ち越した交渉の呼び出しは翌日の数に入る |
-| DV-19 | `uv run pytest tests/test_tee_sealing_coverage.py`（TEE 実施時。封印を `store.py` に組み込んだ後） | live の依頼者 2 人（候補者・求人）で交渉を 1 つ進め、途中確認に答えた後に、エミュレータの `vault-db` の全文書（`principals`・`negotiations`・`events`・冪等キー）を dict として全探索する。丸め済みの値・属性帯・回答のカナリアは、封印した項目（§9 の 2 の表）以外のどこにも平文で現れない。平文で残る項目の集合は、§9 の 2 の「平文のまま」の列挙と一致する（X-66） |
+| DV-19 | `uv run pytest tests/test_tee_sealing_coverage.py`（封印の組み込み済み。E） | live の候補者の交渉（API 経由）と、本物の求人の依頼者を相手にする交渉（現状の API では作れないので、文書を封印レイヤ経由で直接置く）の 2 つを進め、途中確認に答えた後に、エミュレータの `vault-db` の全文書（`principals`・`negotiations`・`events`・冪等キー）を dict として全探索する。丸め済みの値・属性帯・回答のカナリアは、封印した項目（§9 の 2 の表）以外のどこにも平文で現れない。平文で残る項目の集合は、§9 の 2 の「平文のまま」の列挙と一致する（X-66） |
+| DV-20 | `uv run pytest tests/test_seed.py` | テンプレートの起動時の投入（§3.7）: 初回に全ケースのテンプレートが入る。再起動で書き込みが 0 回。中身を変えると上書きされる。壊れたフィクスチャでは 1 件も書かずに例外になり、TEE 版の起動が止まる（I-25） |
 
 ---
 
@@ -1118,13 +1156,14 @@ tenshokuagent/
   - P-7: spec の制約〔29〕は「キャッシュを無効にする」で、面談に限っていない。既定（案 2）はこれに従い、交渉エージェントもキャッシュを使わない（§4.2）。呼び出し数・思考の量・前文の長さで費用の目標（DV-15）に届かず、明示のキャッシュ（秘密を含まない前文だけを、TTL の間 Google 側に保管する）を使いたくなったときは、〔29〕の読み替えになるので、ユーザーに聞く。案 1: 前文だけの明示のキャッシュを認める（面談の生の値は引き続きキャッシュしない。`cacheConfig.disableCache` と両立するかは実機で確かめる）。案 2（既定）: 使わない。案 3: 面談だけ別のプロジェクトで呼び、交渉のプロジェクトではキャッシュを許す
 - モデルの選択（I-20。ユーザーの委任による判断）: ハッカソンは `gemini-3.5-flash` のまま（DV-15 で 2 回連続合格・無効手 0 件。費用は 1 交渉 $0.10〜0.15 で目標の中）。3.6〜3.8 Flash は 2026-12-31 まで導入価格（入力 $0.75・出力 $3.75）で半額（R-9）だが、JSON モード・思考の量での振る舞いは未計測。TEE スパイクの後（10/5 以降）に、設定だけ `gemini-3.8-flash` に替えて DV-15 を 2 回流し、2 回とも合格して無効手が増えず、呼び出しの時間が同等なら切り替える。3.7・3.8 Flash は MINIMAL を持たない（決定の思考量は LOW なので影響しない）
 - TEE のスパイクで置いた前提（P-8〜P-12。ユーザーの確認待ち。推奨を既定として進める。全文は台帳）
-  - P-8: 機密 VM の種類 → 推奨 N2D + AMD SEV（公式例・安い・ライブマイグレーション）。TDX は 2.2 倍の費用
-  - P-9: 合否のルール → 推奨 1・2・4・5 は必須、3・6 は縮退版でも可（弱い版だと明記）
-  - P-10: 公開の範囲 → 推奨 リポジトリ全体を公開。プロジェクト ID は伏せない（attestation の表示に含まれる）
-  - P-11: 予算アラート → 推奨 20,000 円（50%・90%・100% で通知）。TDX なら 30,000 円
-  - P-12: 依存の明示 → 推奨 `cryptography`・`google-auth` を `pyproject.toml` に明示（`requests` は不要）
-  - P-14（C-64）: 計画の寛容な読み（`checks` があれば `move`・`package` を捨てる。L16-1・X-74・X-79）は、AC-04 の「未定義の項目やグリッド外の値を含むメッセージはレフェリーでも拒否する」と両立しない。案 1（推奨）: 計画の `move`・`package` に限って AC-04 を読み替える（捨てた値はどこにも渡らないので FR-16 の目的は保てる。`checks` と、`checks` が空のときの手は従来どおり拒否）。案 2: 寛容な読みをやめ、`move` の違反も `schema_invalid` にする（`last_invalid` に生の値を写して手がかりにする。無効手を 1 つ使う）。答えが出るまで ③ の L16-1 の実装は保留
-  - P-13（C-58）: プロジェクトが組織の配下か。配下なら、IAM の拒否ポリシーで `cloudkms.cryptoKeyVersions.useToDecrypt` をダイジェストの principalSet 以外（オーナーを含む）に拒否する案を取るか（運営者の抑止を「記録」から「拒否」に強められる。拒否ポリシーの変更も監査ログに残る）。配下でなければ既定（記録による抑止）のまま
+  - P-8（確定、2026-10-03）: 機密 VM の種類 → 推奨 N2D + AMD SEV（公式例・安い・ライブマイグレーション）。TDX は 2.2 倍の費用
+  - P-9（確定、2026-10-03）: 合否のルール → 推奨 1・2・4・5 は必須、3・6 は縮退版でも可（弱い版だと明記）
+  - P-10（確定、2026-10-03）: 公開の範囲 → 推奨 リポジトリ全体を公開。プロジェクト ID は伏せない（attestation の表示に含まれる）
+  - P-11（確定、2026-10-03）: 予算アラート → 推奨 20,000 円（50%・90%・100% で通知）。TDX なら 30,000 円
+  - P-12（確定、2026-10-03）: 依存の明示 → 推奨 `cryptography`・`google-auth` を `pyproject.toml` に明示（`requests` は不要）
+  - P-14（確定、2026-10-03）（C-64）: 計画の寛容な読み（`checks` があれば `move`・`package` を捨てる。L16-1・X-74・X-79）は、AC-04 の「未定義の項目やグリッド外の値を含むメッセージはレフェリーでも拒否する」と両立しない。案 1（推奨）: 計画の `move`・`package` に限って AC-04 を読み替える（捨てた値はどこにも渡らないので FR-16 の目的は保てる。`checks` と、`checks` が空のときの手は従来どおり拒否）。案 2: 寛容な読みをやめ、`move` の違反も `schema_invalid` にする（`last_invalid` に生の値を写して手がかりにする。無効手を 1 つ使う）。答えが出るまで ③ の L16-1 の実装は保留
+  - P-15〜P-19（確定、2026-10-03。実装の着手前に置いた前提。推奨どおり実装）: テンプレートは金庫が起動時にイメージ内のフィクスチャから投入（§3.7）／メーターの計算は Python（`negotiation_core.estimate_interval`）／攻撃の指示は `web` のメモリ／リプレイの時刻は記録する側が付ける／求人・企業の一覧はフィクスチャからの読み取り専用 API（§3.3b）
+  - P-13（確定、2026-10-03）（C-58）: プロジェクトが組織の配下か。配下なら、IAM の拒否ポリシーで `cloudkms.cryptoKeyVersions.useToDecrypt` をダイジェストの principalSet 以外（オーナーを含む）に拒否する案を取るか（運営者の抑止を「記録」から「拒否」に強められる。拒否ポリシーの変更も監査ログに残る）。配下でなければ既定（記録による抑止）のまま
 
 ---
 
@@ -1190,6 +1229,10 @@ tenshokuagent/
 | A2A の受信口 | a2a-sdk の自前 AgentExecutor | ADK の `to_a2a` | parts の型と検証を確実に制御できる（R-1 の調査で置き換え可） |
 | 画面 | 静的 HTML と素の JS | SPA フレームワーク | ビルド工程と依存が増えない |
 | サービスの分け方 | 3 サービス、1 イメージ | 1 サービス | 金庫を切り離すことが TEE 移行と信頼境界の前提になる |
+| テンプレートの投入（v20） | 金庫が起動時にイメージ内のフィクスチャから冪等に書く | 運営者の手元のスクリプト・web からの API | TEE の外から書く経路を増やさない。ダイジェストがフィクスチャの中身まで覆う（P-15） |
+| 面談の途中の状態（v20） | `web` のメモリ（依頼者 ID ごと。送信・破棄・削除・1 時間で消える） | Firestore に途中の状態を書く | 生の値を保存しない（§1.2）。web は 1 インスタンス |
+| 画面の配信（v20） | SSE（`sse-starlette`）をセッションのミドルウェアの外に置き、権限は始めに 1 回確かめる。つながらなければ 2 秒ごとの再取得 | ミドルウェアの中の SSE／再取得だけ | 依頼者のロックを 30 秒持ち続けない |
+| 計画の読み方（v20） | `PlanEnvelope` → `Move` の 2 段（`checks` があれば残りを捨てる） | `Plan` 型を 1 回で当てる | JSON モードの形の違反で計画全体を手がかりなく無効にしない（P-14 案 1） |
 
 ---
 
@@ -1208,5 +1251,5 @@ tenshokuagent/
   - サブコレクションの一括削除の手順と、1 回のトランザクション・バッチの上限。
 - **R-5**: Cloud Run の SSE の制約。`web` を 1 インスタンスにしたときの同時接続数。
 - **R-6**: Confidential Space のスパイク項目（§9 の 6 点）。研究報告 `research/tee-spike.md`（2026-10-02）と契約 `research/tee-spike-contract.md`（2026-10-03）。結果はスパイクの後に §9 へ写す。
-- **R-7**: Cloud Run が `X-Forwarded-For` にクライアント IP をどの位置で追記するか（利用者が書ける部分との境目）。
+- **R-7**: Cloud Run が `X-Forwarded-For` にクライアント IP をどの位置で追記するか（利用者が書ける部分との境目）。実装は末尾の値（`web.client_ip`）。外部ロードバランサの背後では崩れるので、デプロイの確認項目で確かめる（I-21）。
 - **R-8**: Cloud Run の CPU 常時割り当て（インスタンス課金）と min-instances=1 で、リクエスト外の非同期タスクと見回りが止まらないこと。そのときの費用。

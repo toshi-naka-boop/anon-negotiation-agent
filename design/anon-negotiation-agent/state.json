@@ -1,12 +1,12 @@
 {
-  "currentNode": "実装",
+  "currentNode": "改訂",
   "status": "in_progress",
-  "designVersion": "v19",
-  "approvedDesignVersion": "v19",
-  "approvedDesignSha256": "298da78d4ee4c3813d014ecc3509180e22c6cf8956dcf914c75c5a0010ced532",
-  "approvedAt": "2026-10-03T23:30:00+09:00",
-  "approvalEvidence": "v19:298da78d4ee4　承認します。\n２明示して\n３組織の配下\n４推奨で進めて\n５なし\n６ opusで良い",
-  "requiredApprovalFingerprint": "v19:298da78d4ee4",
+  "designVersion": "v20",
+  "approvedDesignVersion": null,
+  "approvedDesignSha256": null,
+  "approvedAt": null,
+  "approvalEvidence": null,
+  "requiredApprovalFingerprint": "v20:9f84072b020d",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
   "openIssueIds": [
@@ -21,7 +21,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "③④⑤ の実装（2026-10-04）。取り込み済み: D・E・J・I・H・K・F・G・H2・K2・L（全体 3,244 件通過、e70efb9）。DV-15 は max_output_tokens 3,072 で 2/2 合格、ケース 3 の攻撃者も本物の Gemini で動作。進行中（sonnet・worktree）: M（deploy_check.sh・canary_scan.py・README・expected-kms-principals.json）、L2（段階開示・台帳・2 パネル・メーター・シミュレーション・二分探索の実演の画面と API）。次: 設計書 v20（I-21〜I-29 の反映。批評 1 巡 → 承認）、面談の指示文 2 本を本物の Gemini で 1 回確認、デモ動画、提出物（信頼境界図・説明文・Zenn）。ユーザー待ち: 手順 A の結果、依存の追加の可否（Cloud Trace の exporter、sse-starlette・uvicorn の明示）。",
+  "nextAction": "v20 を起草した（2026-10-04。v19 承認済み 298da78d4ee4 に、実装で決まった細部 I-21〜I-30 を写した。意図は変えない）。M（deploy_check・canary・README）と L2（画面の後半）の取り込みを待って、その内容も v20 に足し、批評 19 巡目（design-critic + codex。1 巡）→ 承認 CP（指紋は再計算）。ユーザー待ち: 手順 A の結果、依存の追加の可否（Cloud Trace の exporter、sse-starlette・uvicorn の明示）。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
