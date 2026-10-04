@@ -1,0 +1,6 @@
+{
+  "owners": [
+    "<オーナーのメール>"
+  ],
+  "principal_set_pattern": "principalSet://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/vault-tee-pool/attribute.image_digest/{digest}"
+}
