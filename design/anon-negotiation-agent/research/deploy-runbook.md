@@ -174,3 +174,12 @@ uv run python scripts/verify_attestation.py --web "$WEB_URL"
 ```
 
 ブラウザで `WEB_URL` を開き、入口・デモ（ケース 1）・攻撃・面談を一通り動かす（`tests/manual/ui_checklist.md`）。TEE の表示（attestation の内容と GitHub のコミットへのリンク）が出ること。
+
+## 実施記録（2026-10-05 朝）
+
+- ユーザー: 権限 1〜4 を付与（`agents-run`・`web-run` に `aiplatform.user`、`web-run` に `(default)` 限定の `datastore.user`、署名鍵の `secretAccessor`）。
+- agents: `agents-00001-zlw`（非公開）。URL は `https://agents-341888860511.asia-northeast1.run.app`（決定的な URL）と `https://agents-n3chcoijpq-an.a.run.app` の 2 つ。設定の `public_base_url` と一致。
+- 金庫の VM を開始（DA カウンタ +1）。web: `web-00001-62r`（非公開、min/max 1、CPU 常時、concurrency 200、Direct VPC egress、`VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE` つき）。`/health` 200、`/api/tee/attestation` は `verified: true`（本番条件の claims、release は commit ca5791a、`url` は null＝`GITHUB_REPO_URL` 未設定）。
+- TTL 6 本（作成中）、`_Default` シンクに除外 `run-requests`、`cacheConfig.disableCache=true`（GET で確認）。
+- deploy_check 全項目（1 回目）: OK 20・NG 8・SKIP 7。NG: iam-agents（権限 5 待ち）、ttl-default・ttl-vault（CREATING）、healthz-web・healthz-vault・demo-url（非公開で 403。公開待ち）、healthz-agents（web の SA の ID トークンを作る権限を昨夜の片付けで外したため。付けるならユーザー）、tee-i（I-37。組織が無いので作れない）。
+- リポジトリにリモートが無い（GitHub に未 push）。公開前の履歴の検査: 秘密らしいファイル名なし、秘密の形（秘密鍵・Google の API キー・GitHub/Slack のトークン・個人のメール）なし。`ya29.` の 1 件は試験の偽の値（`tests/test_tee_key_release.py` の `ACCESS_TOKEN`）。
