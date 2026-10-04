@@ -17,7 +17,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v21 承認済み。TEE スパイク進行中（記録: research/tee-spike-step-a.md §5）。A・B・C 完了（点 4 合格、sealing self-test ok）。D 前半完了（本番条件、負の試験 1 合格、debug VM 削除、旧 dek 控え、KMS 権限を外した 08:38Z）。次（09:44Z 以降）: D 後半: 権限を戻す → 版 2 を primary・版 1 無効化 → tee_reset_dek --yes → 本番 VM（@digest、cloud_logging、OnFailure）→ sealing self-test ok → reset → 負の試験 C-56（旧 dek を PATCH → reset → non-primary key version）→ reset_dek → reset。その後 E（tee-probe Job、外部 IP なしの確認）、F、G。P-20 は (b)（design.md は v22。I-35）。",
+  "nextAction": "v21 承認済み。TEE スパイク進行中（記録: research/tee-spike-step-a.md §5）。A〜E 完了（D: 本番条件で self-test ok、既存暗号文が開く、C-56 の拒否を確認。E: tee-probe 合格、外部 IP なし）。残り: 復帰の起動の self-test の確認、OnFailure の再起動の観察（13:13Z 以降をフィルタなしで）、負の試験 3（impersonate で PERMISSION_DENIED、オーナーは INVALID_ARGUMENT、監査ログ）、Firestore REST で暗号文の確認、負の試験 2（別 digest→KMS 403）、F（停止→開始、OnFailure、権限の取り消し、IAP 規則の削除）、G（拒否ポリシー）。その後: web・agents のデプロイ（E の最後の services update）、点 6（画面）、deploy_check（EXPECTED_KMS_PRINCIPALS_FILE）。P-20 は (b)（design.md は v22。I-35）。",
   "lastUpdated": "2026-10-04",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
