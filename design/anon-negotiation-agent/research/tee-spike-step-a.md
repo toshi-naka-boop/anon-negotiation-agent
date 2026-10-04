@@ -291,3 +291,9 @@ gcloud projects get-iam-policy "$PROJECT_ID" --flatten="bindings[].members" --fi
 - 負の試験 3（13:21Z）: 金庫の SA を impersonate した `kms decrypt` は `PERMISSION_DENIED`（`cloudkms.cryptoKeyVersions.useToDecrypt` なし。合格）。オーナー自身は `INVALID_ARGUMENT: Decryption failed: the ciphertext is invalid`（権限の検査は通る＝C-58 の構造的な限界、期待どおり）。Data Access 監査ログに 2 件: 13:21:24Z 金庫の SA（status 7）、13:21:32Z オーナー（status 3）。
 - 手元から `_tee/selftest` を REST で読むと `probe` は `bytesValue`（暗号文）、`probe_sha256` は検査用のハッシュ。合格。
 - 13:2x UTC: VM を停止（夜間。課金はディスクだけ）。
+
+## 6. 2 日目（2026-10-04 深夜。ユーザーの指示で Claude が端末にコマンドを送って進めた。方式 B）
+
+- 組織の有無: `gcloud projects get-ancestors` はプロジェクト 1 行だけを返した（組織もフォルダも無い）。P-13 の答え「組織の配下」は実際と違う。拒否ポリシー（手順 G）が作れるかは実測で確かめる。`deploy_check` は ORG_ID 無し＝`--project` の範囲で動く（祖先に組織があれば NG にする作りなので、そのままで整合する）。
+- 負の試験 2（13:37Z）: `_COMMIT` だけ変えたイメージ `vault:negative`（digest `sha256:c0f169d0…`。spike と違う）で本番イメージの VM `vault-tee-negative` を作成。ログ: `exchanged the claims token for an access token`（STS は通る。プロバイダの条件は digest を見ない）→ `key release: KMS encrypt (primary probe) was refused (status 403)` → `startup failed at the step 'key release'` → launcher exiting。digest の結び付きが KMS の側で効いている。合格。VM とイメージは削除。
+- 注意: `gcloud logging read --freshness` は `--order=asc` と組み合わせると古い行から返した（窓が効かない）。時刻は `timestamp>="…"` をフィルタに書く。
