@@ -2,6 +2,7 @@
 
 - 書いた日: 2026-10-04 深夜（TEE スパイクの A〜F が済んだあと）。設計書 §10「本番の必須設定」と `scripts/deploy_check.sh` の項目に合わせてある。
 - 前提: 手順 A〜E が済んでいる（金庫の VM `vault-tee` が本番イメージで動き、`vault-vpc` と `run-egress-subnet`、Artifact Registry の `vault` リポジトリ、Firestore の `vault-db` と `(default)` がある）。
+- 実施記録（2026-10-05 朝）: Secret Manager・Vertex AI の API を有効化、`agents-run` を作成、`session-signing-key` の版 1（値は表示していない）、`[agents] public_base_url` をコミット（44af9f6）、アプリのイメージ `app:44af9f6` をビルド。
 - 実行者: gcloud はユーザーのアカウントで動く。権限を付ける（`add-iam-policy-binding`）ブロックは、Claude の自動実行では安全確認に止まるので、ユーザーが Run を押す。それ以外は Claude が端末に送ってよい（方式 B）。
 - 費用の目安: web は min 1・CPU 常時割り当てなので、1 vCPU・1 GiB で 1 時間およそ $0.07（≈ 10 円）、1 日およそ 250 円。agents は min 0。
 
@@ -21,7 +22,9 @@ Cloud Run の URL は決定的（サービス名・プロジェクト番号・�
 export AGENTS_URL="https://agents-${PROJECT_NUMBER}.${REGION}.run.app" WEB_URL="https://web-${PROJECT_NUMBER}.${REGION}.run.app"
 ```
 
-## 1. サービスアカウントと権限（ユーザーが実行）
+## 1. サービスアカウントと権限（権限の付与はユーザーが実行）
+
+注意: プロジェクトの IAM には条件つきの束縛（`vault-db-only`）があるので、`gcloud projects add-iam-policy-binding` には `--condition=None` か `--condition=...` を必ず付ける（付けないと対話の選択肢が出て止まる）。
 
 agents 用のサービスアカウントを作る（web・金庫とは分ける。§10）。
 
@@ -32,13 +35,13 @@ gcloud iam service-accounts create agents-run --display-name="agents (Cloud Run)
 agents の SA に Vertex AI（Gemini）を呼ぶ権限を付ける。
 
 ```bash
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${AGENTS_SA}" --role=roles/aiplatform.user
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${AGENTS_SA}" --role=roles/aiplatform.user --condition=None
 ```
 
 web の SA にも Vertex AI の権限を付ける（面談エージェントは web の中で動く。§5）。
 
 ```bash
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${WEB_SA}" --role=roles/aiplatform.user
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${WEB_SA}" --role=roles/aiplatform.user --condition=None
 ```
 
 web の SA に、Firestore を `(default)` だけで使える権限を付ける（金庫の `vault-db` には触れない。条件つき）。
@@ -92,10 +95,10 @@ gcloud run services describe agents --region="$REGION" --format="value(status.ur
 ## 5. web をデプロイする（公開。Direct VPC egress で金庫へ）
 
 ```bash
-gcloud run deploy web --region="$REGION" --image="${REPO}/app:$(git rev-parse --short HEAD)" --service-account="$WEB_SA" --allow-unauthenticated --min-instances=1 --max-instances=1 --no-cpu-throttling --concurrency=200 --memory=1Gi --cpu=1 --timeout=300 --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --set-secrets="SESSION_SIGNING_KEY=session-signing-key:latest" --set-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_LOCATION=global,ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false,GITHUB_REPO_URL=<GitHub のリポジトリの URL>"
+gcloud run deploy web --region="$REGION" --image="${REPO}/app:$(git rev-parse --short HEAD)" --service-account="$WEB_SA" --no-allow-unauthenticated --min-instances=1 --max-instances=1 --no-cpu-throttling --concurrency=200 --memory=1Gi --cpu=1 --timeout=300 --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --set-secrets="SESSION_SIGNING_KEY=session-signing-key:latest" --set-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_LOCATION=global,ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false,GITHUB_REPO_URL=<GitHub のリポジトリの URL>"
 ```
 
-- `--allow-unauthenticated` は公開の意味。最初は付けずにデプロイし、ID トークンつきの `curl` で `/health` を確かめてから公開に切り替えてもよい（`gcloud run services add-iam-policy-binding web --member=allUsers --role=roles/run.invoker`）。
+- 公開（`allUsers` への `roles/run.invoker`）は権限の付与で、Claude の自動実行では止まる。デプロイは `--no-allow-unauthenticated` で行い、確かめてからユーザーが公開する（`gcloud run services add-iam-policy-binding web --region=asia-northeast1 --member=allUsers --role=roles/run.invoker`）。
 - イメージの CMD（`uvicorn web.app:create_app_from_env --factory --workers 1`）をそのまま使う。
 - `GITHUB_REPO_URL` は、画面の「コミットへのリンク」の土台（点 6）。公開リポジトリの URL を入れる。
 
