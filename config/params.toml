@@ -244,10 +244,20 @@ max_company_id_length = 100
 # ライブ実演が 429 になったら、リプレイ(§8.4)に切り替える。上げたら元に戻す。LLM の呼び出し数の上限([web.llm_budget])は別の
 # 歯止めで、こちらを上げても外れない。
 rate_window_seconds = 600
-# 全入口の合計の上限(窓あたり)。クライアント IP の取り方が崩れても効く
+# 全体の枠(LLM を呼ぶか交渉を作る入口の合計。窓あたり)。クライアント IP の取り方が崩れても効く。LLM を呼ばず読むだけの入口
+# (meter・session_start・interview_begin)は、数えず、この枠が埋まっていても断らない(web.limits の CLIENT_ONLY_ENTRANCES。台帳 L19-7)
 rate_overall_limit = 300
 # カウンタの文書の TTL(窓の終わりから。秒)。Firestore の TTL ポリシー(コレクション rate_limits のフィールド ttl_at)はデプロイの段で設定する
 rate_counter_ttl_seconds = 3600
+
+# --- SSE の同時本数の上限(design.md §4.1・§8.2。台帳 C-65。web.limits の SseConnectionLimiter。web.ui_api の /v1/stream/ に掛ける) ---
+# web は min・max とも 1 インスタンスで、SSE は 1 本が最長 30 秒つながり続ける(デモ・攻撃の画面は 1 交渉につき 2 本)。上限がないと、匿名の 1 クライアントが
+# 同時リクエストの枠(Cloud Run の既定は 80)を SSE で埋めて、面談・画面・リプレイまで止められる。いまつないである本数を、メモリの中で数える
+# (時間窓の回数ではないので、Firestore には触れず、全体の枠 rate_overall_limit にも数えない)。超えたら 429(入口 sse。Retry-After 2 秒)で、画面は
+# 通常の GET の再取得(2 秒ごと)に切り替える。全体は、同時実行数の半分以下にして、静的ファイル・リプレイ・面談の分を残す。
+# 【発表の日の運用】会場の同じ Wi-Fi は同じクライアント IP になる(デモの 2 パネルで 2 本)。聴衆が同時に見るなら、per_client を上げる(全体と合わせて)。
+sse_max_connections = 20
+sse_max_connections_per_client = 2
 
 # --- 面談(design.md §5・§8.2。src/web/interview/)の暫定値 ---
 # モデル名と temperature は [agents] の値を使う(キーを持たない)。LLM の一時的なエラーの再試行の回数・待ち時間・1 呼び出しの上限は
@@ -291,8 +301,13 @@ attack_instruction = 30
 # 壁 1 の生メッセージ(POST /v1/demo/attack/walls/1)
 raw_message = 20
 # 推定区間メーター(POST /v1/demo/meter。1 回で金庫と Firestore を最大 20 件ずつ読むので、1 要求の重みが大きい。GET .../meter/simulation は
-# 純粋な計算なので掛けない)
+# 純粋な計算なので掛けない)。LLM を呼ばず金庫を読むだけなので、全体の枠には数えない(台帳 L19-7)
 meter = 60
+# 開始ページの GET(GET /start。クッキーのない訪問者に新しい依頼者 ID を発行する。台帳 C-66)。LLM は呼ばない。全体の枠には数えない(台帳 L19-7)
+session_start = 20
+# 面談を始める口(POST .../interview/begin。面談の状態をサーバのメモリに作る。同時 500 件の上限を、匿名の 1 クライアントに埋められないようにする。台帳 C-66)。
+# LLM は呼ばない。全体の枠には数えない(台帳 L19-7)。会場の同じ Wi-Fi では同じ IP になるので、10 分に面談 10 人ほどが上限(発表の日は上げる)
+interview_begin = 10
 
 # --- 攻撃モード(design.md §8.2・§3.7。台帳 P-17) ---
 [web.attack]

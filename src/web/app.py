@@ -15,6 +15,9 @@
   (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
   乱数でない鍵)でも拒否する。create_app_from_env・create_app のどちらでも同じ。
 - GET /health(死活確認。AC-22): 認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(利用記録の Firestore にも触れない)。
+- FastAPI の既定の /docs・/redoc・/openapi.json は、本番の起動口(create_app_from_env)では出さない(台帳 L19-10)。/docs は CDN の Swagger UI の JS を読み込み、
+  ページに付けている CSP が掛からないので、セッションのクッキーと同じ配信元で第三者の JS が動いてしまうため。開発用(scripts/serve_local.py や試験)だけ、
+  create_app(docs=True) で出せる(既定は出さない。金庫の app が /docs・/openapi.json を出さないのと同じ)。
 - 画面(static/。静的な HTML と素の JS・CSS。ビルド工程なし。§10): /static で静的ファイルを、ページの経路(/・/interview・/me・/demo・/attack)で対応する
   HTML を返す。どれも依頼者 ID を発行しない(発行は開始ページの GET /start だけ。画面の JS が呼ぶ。§6.3)。/static はセッションを見ない。
   SSE(/v1/stream/。web.ui_api)もセッションを見ない: 依頼者ごとのロックを、応答を送り終えるまで持つミドルウェアを通すと、つながっている間
@@ -159,6 +162,7 @@ def create_app(
     tee: TeeAttestationConfig | None = None,
     send_raw: RawMessageSender | None = None,
     rate_limits: RateLimitConfig = DEFAULT_RATE_LIMIT_CONFIG,
+    docs: bool = False,
 ) -> FastAPI:
     """web の FastAPI アプリを作る。
 
@@ -167,6 +171,7 @@ def create_app(
     agents.client.send_turn を使う(本番の経路。token_provider があれば、agents の呼び出しに ID トークンを付ける)。
     テストは、スタブの send_turn か、agents の app につないだ経路を差し込む。金庫への認証は、vault の AsyncClient 側に
     付ける(create_app_from_env)。tee を渡すと(TEE モード)、GET /api/tee/attestation も動く(渡さなければ、このルートはなく 404)。
+    docs を True にすると、FastAPI の /docs・/redoc・/openapi.json も出す(開発用。既定は出さない。台帳 L19-10。本番の起動口は渡さない)。
     """
     services = build_services(
         vault=vault,
@@ -196,7 +201,9 @@ def create_app(
             await asyncio.gather(*workers, return_exceptions=True)
             await services.referees.stop_all()
 
-    app = FastAPI(title="web", lifespan=lifespan)
+    # /docs・/redoc・/openapi.json は、docs のときだけ(None にすると、3 つとも、経路ごと作られない。台帳 L19-10)
+    docs_urls = {} if docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    app = FastAPI(title="web", lifespan=lifespan, **docs_urls)
     app.state.services = services
     app.include_router(build_router(services, tee))
     add_pages(app)
@@ -358,4 +365,5 @@ def create_app_from_env(environ: Mapping[str, str] | None = None) -> FastAPI:
         fixtures=FixtureCatalog.load(),  # 架空人物の自動応答(途中確認の回答・段階開示の「会う」「承認」)の元。fixtures/case*.toml
         token_provider=token_provider,
         tee=tee,
+        docs=False,  # 本番は、/docs・/redoc・/openapi.json を出さない(台帳 L19-10)
     )

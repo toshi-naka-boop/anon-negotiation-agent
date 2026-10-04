@@ -27,6 +27,13 @@ SSE(sse-starlette)
   (利用記録がない)なら、次の記録を送らずに、`event: problem`(detail は principal_deleting・principal_deleted)を送って閉じる(画面は通常の GET の
   再取得に切り替え、その GET が 409 などで理由を示す)。読み直せないとき(Firestore の失敗)も、閉じる側に倒す(problem の stream_failed)。
   デモの経路は、/v1/demo/negotiations/{nid}/activity と同じ 2 段の確認(web の段の状態と金庫のデモ用の読み出しの口。台帳 X-38)を行う。
+- 同時本数の上限(台帳 C-65): SSE は 1 本が最長 30 秒つながり、web は 1 インスタンスなので、匿名のクライアントが、同時リクエストの枠を SSE で埋められる
+  (面談・画面・リプレイまで止まる)。そこで、つなぐ前に、いまつないである本数を、全体(sse_max_connections。既定 20)と、クライアント IP ごと
+  (sse_max_connections_per_client。既定 2。web.client_ip)に数える(web.limits の SseConnectionLimiter。メモリの中だけ。Firestore には触れず、
+  入口の枠 rate_overall_limit にも数えない)。超えたら 429(detail は {"code": "rate_limited", "entrance": "sse", "scope", "limit", ...}、
+  Retry-After は 2 秒)で、画面の EventSource はつなぎ直さず、通常の GET の再取得(2 秒ごと)に切り替わる。席は、権限の確認(Firestore・金庫を読む)
+  より先に取る(上限を超えた要求が、バックエンドを読まないように)。確認が失敗しても、接続が終わっても(自分で閉じた・クライアントが切った・例外)、
+  必ず戻す(_SlotEventSourceResponse)。デモ・攻撃の画面は 1 交渉につき側ごとに 2 本つなぐので、既定では、クライアント IP 1 つが 1 交渉ぶんを見られる。
 
 ログには、例外の型名だけを書く(組み合わせの値・評価・依頼者 ID を、ここから出さない)。
 """
@@ -44,6 +51,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from sse_starlette import EventSourceResponse, ServerSentEvent
+from starlette.types import Receive, Scope, Send
 
 from negotiation_core import Side
 
@@ -51,6 +59,7 @@ from vault.api_models import EventViewItem
 
 from web.activity_api import ActivityLog, to_activity_log
 from web.interview.templates import FIXTURES_DIRECTORY
+from web.limits import SseSlot
 from web.principals_meta import DELETION_DELETING
 from web.services import WebServices
 from web.session import SESSION_COOKIE_NAME
@@ -117,6 +126,24 @@ class StreamNotAllowed(Exception):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+class _SlotEventSourceResponse(EventSourceResponse):
+    """応答が終わったとき(自分で閉じた・クライアントが切った・例外)に、取っておいた席(SseSlot)を必ず戻す EventSourceResponse(台帳 C-65)。
+
+    戻すのは、ストリームの generator の finally ではなく、応答の呼び出し全体の finally で行う: generator が 1 度も動き出さないうちに応答が終わっても
+    (動き出さない generator の finally は動かない)、席が残らないように。SseSlot.release は何度呼んでも 1 回しか戻さない。
+    """
+
+    def __init__(self, content: AsyncIterator[ServerSentEvent], *, slot: SseSlot) -> None:
+        super().__init__(content)
+        self._slot = slot
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._slot.release()
 
 
 # ----------------------------------------------------------------------
@@ -314,25 +341,43 @@ def build_ui_router(services: WebServices, stream: StreamConfig = DEFAULT_STREAM
         """本人の活動ログの SSE(本人の側 = 候補者側だけ)。権限は /v1/negotiations/{nid}/activity と同じ(401・409・403)。
 
         つながった後は、各 poll の前に、本人の削除が始まっていないかを読み直す(台帳 X-83)。
+        同時本数の上限(全体・クライアント IP ごと)を超えていれば、権限の確認の前に 429(台帳 C-65)。
         """
-        principal_id = await authorize_own_stream(request, nid)
+        slot = services.stream_limiter.acquire_for_request(request)  # テストが差し替えられるよう、リクエストごとに取り出す
+        try:
+            principal_id = await authorize_own_stream(request, nid)
 
-        async def read(position: int) -> ActivityLog:
-            await ensure_principal_still_active(principal_id)  # 削除中・削除済みなら、金庫を読まずに閉じる
-            return to_activity_log("candidate", await vault.get_events(nid, "candidate", position), position)
+            async def read(position: int) -> ActivityLog:
+                await ensure_principal_still_active(principal_id)  # 削除中・削除済みなら、金庫を読まずに閉じる
+                return to_activity_log("candidate", await vault.get_events(nid, "candidate", position), position)
 
-        return EventSourceResponse(activity_event_stream(read, resume_position(request, after_seq), config=stream))
+            return _SlotEventSourceResponse(
+                activity_event_stream(read, resume_position(request, after_seq), config=stream), slot=slot
+            )
+        except BaseException:
+            slot.release()  # 確認の失敗(401・409・403 など)でも、席を残さない。つないだ後は、応答が終わるときに戻す
+            raise
 
     @router.get(f"{STREAM_PATH_PREFIX}demo/negotiations/{{nid}}/activity")
     async def stream_demo_activity(
         nid: str, side: Side, request: Request, after_seq: int = Query(default=0, ge=0, le=MAX_SEQ)
     ) -> EventSourceResponse:
-        """デモ・攻撃の活動ログの SSE(指定した側)。権限は /v1/demo/negotiations/{nid}/activity と同じ(403)。"""
-        await read_demo_events(nid, side, MAX_SEQ)  # 始めに 1 回、確認だけ行う(拒否は HTTP の状態で返す)
+        """デモ・攻撃の活動ログの SSE(指定した側)。権限は /v1/demo/negotiations/{nid}/activity と同じ(403)。
 
-        async def read(position: int) -> ActivityLog:
-            return to_activity_log(side, await read_demo_events(nid, side, position), position)
+        同時本数の上限(全体・クライアント IP ごと)を超えていれば、確認の前に 429(台帳 C-65)。
+        """
+        slot = services.stream_limiter.acquire_for_request(request)
+        try:
+            await read_demo_events(nid, side, MAX_SEQ)  # 始めに 1 回、確認だけ行う(拒否は HTTP の状態で返す)
 
-        return EventSourceResponse(activity_event_stream(read, resume_position(request, after_seq), config=stream))
+            async def read(position: int) -> ActivityLog:
+                return to_activity_log(side, await read_demo_events(nid, side, position), position)
+
+            return _SlotEventSourceResponse(
+                activity_event_stream(read, resume_position(request, after_seq), config=stream), slot=slot
+            )
+        except BaseException:
+            slot.release()  # 確認の失敗(403 など)でも、席を残さない
+            raise
 
     return router

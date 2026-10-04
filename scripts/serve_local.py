@@ -167,6 +167,7 @@ async def serve(*, live: bool, port: int, vault_db: firestore.Client, default_db
                 send_turn=send_turn,
                 send_raw=bind_raw_sender(AGENTS_BASE_URL),
                 fixtures=FixtureCatalog.load(),  # 架空人物の自動応答(途中確認の回答・段階開示の「会う」「承認」)の元
+                docs=True,  # 開発用なので、/docs・/redoc・/openapi.json を出す(本番の起動口は出さない)
             )
             if not live:
                 _load_test_helpers()

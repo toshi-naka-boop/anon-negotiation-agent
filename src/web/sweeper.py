@@ -11,6 +11,10 @@ GET が段の状態を書かなくなった(状態を変えるのは POST に限
 判定の直後に web が落ちた交渉(終わっているので、金庫の進行中の一覧には現れない)も、ここで決着する。拾う対象は、段の状態の settled_at が null
 (決着の印がない)で、金庫の進行中の一覧にないもの。判定が出ていなければ(一覧を読んだ後に作られた交渉など)、StageSettler が何もしない。
 
+面談の途中の状態(web.interview.state。サーバのメモリ)のうち、最後に使ってから寿命(state_idle_ttl_seconds)を過ぎたものを、メモリから消す(台帳 C-66・L19-6)。
+新しい面談が始まらなければ、放置された面談の生の年収や取り出した発言が、再起動までメモリに残ってしまうため。メモリの中だけの掃除なので、
+金庫の一覧を読む前に行う(金庫が応えなくても消す)。evict_idle を渡していなければ(面談を持たない組み立て)、何もしない。
+
 一覧の 1 件の処理が失敗しても、ほかの交渉の見回りは続ける(次の見回りでやり直す)。1 件の中でも、
 3 つの処理は互いに独立に失敗を扱う(段階開示の状態を作れなくても、期限切れとタスクの作り直しは行う)。決着処理の失敗も、1 件ごとに数えて続ける。
 
@@ -28,6 +32,7 @@ GET が段の状態を書かなくなった(状態を変えるのは POST に限
 """
 
 import asyncio
+import datetime as dt
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -47,6 +52,9 @@ _log = logging.getLogger(__name__)
 # 段の決着処理を行う口(web.stages.StageSettler.settle): 交渉 ID と候補者の依頼者 ID(架空の候補者なら None)を受け取り、行ったら True。
 SettleStage = Callable[[str, str | None], Awaitable[bool]]
 
+# アイドルの面談の状態をメモリから消す口(web.interview.state.InterviewStateStore.evict_idle): いまの時刻を受け取り、消した数を返す。
+EvictIdleInterviews = Callable[[dt.datetime], int]
+
 
 @dataclass
 class SweepReport:
@@ -58,6 +66,7 @@ class SweepReport:
     expired: int = 0
     tasks_started: int = 0
     stages_settled: int = 0  # 判定が済んで、決着処理を行った段(台帳 X-84)
+    interview_states_evicted: int = 0  # メモリから消した、アイドルの面談の状態(台帳 C-66・L19-6)
     errors: int = 0
 
 
@@ -76,6 +85,7 @@ class Sweeper:
         locks: PrincipalLocks | None = None,
         meta: PrincipalsMetaStore | None = None,
         settle: SettleStage | None = None,
+        evict_idle: EvictIdleInterviews | None = None,
     ) -> None:
         if (locks is None) != (meta is None):
             # 片方だけでは、本物の候補者の段の状態を、確かめずに作る(または、ロックなしで確かめる)ことになる。
@@ -89,6 +99,7 @@ class Sweeper:
         self._locks = locks
         self._meta = meta
         self._settle = settle
+        self._evict_idle = evict_idle
         self._first_sweep_done = False
 
     @property
@@ -107,8 +118,9 @@ class Sweeper:
             await self._sleep(self._config.interval_seconds)
 
     async def sweep_once(self) -> SweepReport:
-        """金庫の一覧を 1 回読み、交渉ごとに stages・expire・タスクを整える。"""
+        """金庫の一覧を 1 回読み、交渉ごとに stages・expire・タスクを整える。先に、アイドルの面談の状態をメモリから消す(金庫が応えなくても行う)。"""
         report = SweepReport()
+        self._evict_idle_interviews(report)
         items = await self._vault.list_open_negotiations()
         report.listed = len(items)
         for item in items:
@@ -116,6 +128,16 @@ class Sweeper:
         self._first_sweep_done = True  # 進行中の交渉の処理(タスクの作り直し)は済んだ。決着処理の数に、新しい交渉の作成を待たせない
         await self._settle_ended(items, report)
         return report
+
+    def _evict_idle_interviews(self, report: SweepReport) -> None:
+        """アイドルの面談の状態を、メモリから消す(台帳 C-66・L19-6)。失敗は数えて記録するだけで、見回りは続ける。"""
+        if self._evict_idle is None:
+            return
+        try:
+            report.interview_states_evicted = self._evict_idle(self._clock.now())
+        except Exception as exc:
+            report.errors += 1
+            _log.error("sweep step failed step=evict_idle_interviews error=%s", type(exc).__name__)
 
     async def _settle_ended(self, open_items: list[OpenNegotiationSummary], report: SweepReport) -> None:
         """判定が済んで、段の決着処理がまだの段を拾う(台帳 X-84)。settle を渡していなければ(段階開示の部品を持たない組み立て)、何もしない。

@@ -43,7 +43,7 @@ from negotiation_core import AttackerTurnInput, TurnInput
 from vault_helpers import sample_package
 from web.attack.router import MAX_INSTRUCTION_CHARS
 from web.config import DEFAULT_WEB_CONFIG
-from web.limits import ENTRANCES
+from web.limits import ENTRANCES, OVERALL_ENTRANCES
 from web_app_helpers import REQUESTED_WITH, documents_mentioning
 from web_helpers import plan_dict
 
@@ -268,8 +268,8 @@ async def test_forging_the_head_of_x_forwarded_for_makes_no_new_allowance(make_e
 async def test_the_301st_request_overall_is_refused(make_env, store):
     # AC-13: 全体で 301 回目は 429(設定ファイルの 300)。IP の取り方が崩れても(クライアントごとの枠に当たらなくても)効く。
     env = make_env(send_raw=RecordingSender())
-    for index in range(299):  # 別々のクライアントが、入口をめぐらせて 299 回(HTTP を通さずに数える)
-        await env.services.limiter.admit(ENTRANCES[index % len(ENTRANCES)], f"client-{index}")
+    for index in range(299):  # 別々のクライアントが、全体に数える入口をめぐらせて 299 回(HTTP を通さずに数える。読み出しだけの入口は、全体に数えない。台帳 L19-7)
+        await env.services.limiter.admit(OVERALL_ENTRANCES[index % len(OVERALL_ENTRANCES)], f"client-{index}")
     entrances = Entrances(env, store)
 
     assert (await entrances.send("raw_message", ip="198.51.100.1")).status_code == 200  # 300 回目

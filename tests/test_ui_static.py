@@ -8,6 +8,9 @@
   JS が参照する要素の id は HTML に実在する。
 - 画面に要る口(web.ui_api): セッション・面談の注記・求人・デモのケース・リプレイ・SSE(活動ログ)。
 - SSE は、ミドルウェアの依頼者ごとのロックを持たない(つながっている間、同じ依頼者の操作が止まらない)。
+- SSE の同時本数の上限(台帳 C-65): 全体とクライアント IP ごと。超えたら 429、接続が終われば(自分で閉じた・クライアントが切った・確認の失敗・例外)、
+  必ず席が戻る。メモリの中だけで数え、rate_limits には触れない。
+- 本番の組み立て(create_app_from_env)は、/docs・/redoc・/openapi.json を出さない(台帳 L19-10)。開発用(create_app(docs=True))は出す。
 - 画面の活動ログの購読(static/ui.js の watchNegotiation)は、node があれば、偽の EventSource で動かして確かめる(なければ、そのテストは飛ばす)。
 - 画面の後半(作業パッケージ L2): 段階開示・開示台帳・FR-39 の 2 パネル・推定区間メーター・シミュレーション・二分探索の実演の区画が埋まっていること(data-status="ready"・
   ナビが本物のリンク)、画面の言葉(設計書が求める文言)、画面にある定数がサーバーの値と一致すること、デモ・攻撃の画面が本物の依頼者の API を呼ばないこと。
@@ -16,6 +19,7 @@
 """
 
 import asyncio
+import contextlib
 import datetime as dt
 import functools
 import json
@@ -26,7 +30,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import get_args
 
+import httpx
 import pytest
+import web.app as web_app_module
 from negotiation_core import AXES, Anchor, Policy, Verdict
 from negotiation_core.estimate_interval import Interval
 from sse_starlette import ServerSentEvent
@@ -37,14 +43,16 @@ from vault.seed import seed_templates
 from vault_helpers import needs_confirmation_policy, sample_package
 from web import activity_api, meter_api, ui_api
 from web.activity_api import ActivityEntry, ActivityLog
+from web.app import create_app, create_app_from_env
 from web.attack.scripted import probe_package
 from web.ledger import LedgerEntry, LedgerOperator, LedgerRecipient
+from web.limits import SseConnectionLimiter, SseLimitConfig
 from web.panels_api import build_panels
 from web.stages import DEFAULT_STAGES_CONFIG, CompanyView, EmployerDisclosure, Item, SideFlagsView, StageView
-from web.session import SESSION_COOKIE_NAME
+from web.session import SESSION_COOKIE_NAME, SESSION_KEY_ENV
 from web.ui_api import StreamConfig, StreamNotAllowed, activity_event_stream, build_ui_router, list_cases, list_jobs
 from web.vault_client import VaultUnavailableError
-from web_app_helpers import submit_interview
+from web_app_helpers import dump_documents, submit_interview
 from web_helpers import create_demo_negotiation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -312,7 +320,30 @@ async def test_the_api_routes_are_still_served_next_to_the_pages(web_app):
 
     assert (await browser.get("/health")).json() == {"status": "ok"}
     assert (await browser.get("/start")).json() == {"status": "ok"}
-    assert (await browser.get("/openapi.json")).status_code == 200  # スキーマの生成が、足した口で壊れていない
+    assert web_app.app.openapi()["paths"]  # スキーマの生成が、足した口で壊れていない(/openapi.json の配信は、本番では止める。次の試験。台帳 L19-10)
+
+
+@pytest.mark.anyio
+async def test_the_production_assembly_does_not_serve_the_api_docs_and_the_development_one_does(default_db, session_key, monkeypatch):
+    # 台帳 L19-10: /docs は CDN の Swagger UI の JS を読み込み、ページに付けている CSP が掛からないので、セッションのクッキーと同じ配信元で第三者の JS が動く。
+    # 本番の起動口(create_app_from_env)は /docs・/redoc・/openapi.json を出さない(404)。create_app の既定も出さない。開発用(docs=True)だけが出す。
+    monkeypatch.setattr(web_app_module, "_create_default_db", lambda: default_db)
+    production = create_app_from_env({SESSION_KEY_ENV: session_key, "VAULT_BASE_URL": "http://vault.test"})
+    by_default = create_app(vault=object(), default_db=default_db, session_key=session_key)
+    development = create_app(vault=object(), default_db=default_db, session_key=session_key, docs=True)
+    paths = ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
+
+    async def statuses(app) -> dict[str, int]:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://web.test") as client:
+            return {path: (await client.get(path)).status_code for path in paths}
+
+    assert await statuses(production) == {path: 404 for path in paths}
+    assert await statuses(by_default) == {path: 404 for path in paths}  # 出すと決めたときだけ出す
+    assert await statuses(development) == {path: 200 for path in paths}
+    # 本番でも、画面と API は動く(スキーマの生成そのものは、app.openapi() で確かめている)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=production), base_url="https://web.test") as client:
+        assert (await client.get("/health")).json() == {"status": "ok"}
+        assert (await client.get("/")).status_code == 200
 
 
 # ----------------------------------------------------------------------
@@ -1176,6 +1207,231 @@ async def test_the_demo_stream_does_not_use_or_extend_the_principal_session(fast
 
     assert "set-cookie" not in sse.headers and meta.get().to_dict() == before
     assert [entry["action"] for entry in json.loads(event["data"])["entries"]] == ["check"]
+
+
+# ----------------------------------------------------------------------
+# SSE の同時本数の上限(台帳 C-65): 全体・クライアント IP ごと。超えたら 429、接続が終われば、どの終わり方でも席が戻る
+# ----------------------------------------------------------------------
+
+
+def refused_body(scope: str, limit: int) -> dict:
+    """SSE の同時本数の上限で断るときの 429 の本文(入口は sse。時間窓がないので window_seconds は null。Retry-After は 2 秒)。"""
+    return {
+        "detail": {
+            "code": "rate_limited",
+            "entrance": "sse",
+            "scope": scope,
+            "limit": limit,
+            "window_seconds": None,
+            "retry_after_seconds": 2,
+        }
+    }
+
+
+def demo_stream_path(nid: str, side: str = "candidate") -> str:
+    return f"/v1/stream/demo/negotiations/{nid}/activity?side={side}"
+
+
+async def demo_negotiation_to_watch(web_app) -> str:
+    """デモの交渉(段の状態まで作ってある。見回りが作る。§6.2)。"""
+    nid = create_demo_negotiation(web_app.store)
+    await web_app.services.sweeper.sweep_once()
+    return nid
+
+
+@pytest.mark.anyio
+async def test_the_own_stream_refuses_a_third_connection_from_one_client_and_a_closed_one_gives_its_place_back(fast_stream, web_app):
+    # 既定(設定ファイル)は、クライアントごと 2 本。上限ちょうどまで通り、3 本目は 429(画面の EventSource はつなぎ直さず、GET の再取得に切り替える)。
+    browser, _, nid = await live_negotiation(web_app)
+    path, limiter = f"/v1/stream/negotiations/{nid}/activity", web_app.services.stream_limiter
+
+    async with Sse(web_app.app, path, cookie=browser.cookie) as first:
+        async with Sse(web_app.app, path, cookie=browser.cookie) as second:
+            assert (first.status, second.status) == (200, 200)
+            assert (len(limiter), limiter.open_for("127.0.0.1")) == (2, 2)
+
+            refused = await browser.get(path)
+
+            assert refused.status_code == 429
+            assert refused.headers["Retry-After"] == "2" and refused.json() == refused_body("client", 2)
+            assert len(limiter) == 2  # 断った分は、数えていない
+            assert "set-cookie" not in refused.headers
+            # SSE をあきらめた画面が使う、通常の GET の再取得は、この上限の影響を受けない
+            assert (await browser.get(f"/v1/negotiations/{nid}/activity")).status_code == 200
+        assert len(limiter) == 1  # 1 本閉じると、1 本ぶん空く
+        async with Sse(web_app.app, path, cookie=browser.cookie) as third:
+            assert third.status == 200
+            assert len(limiter) == 2
+    assert len(limiter) == 0
+
+
+@pytest.mark.anyio
+async def test_the_demo_stream_has_the_same_limits_and_the_two_panels_of_one_negotiation_fit_in_the_default(fast_stream, web_app):
+    # デモ・攻撃の画面は、1 交渉につき側ごとに 2 本つなぐ(static/ui.js の sides)。既定の 2 本で、ちょうど 1 交渉ぶん。
+    nid = await demo_negotiation_to_watch(web_app)
+    visitor, limiter = web_app.browser(), web_app.services.stream_limiter
+
+    async with Sse(web_app.app, demo_stream_path(nid, "candidate")) as candidate:
+        async with Sse(web_app.app, demo_stream_path(nid, "employer")) as employer:
+            assert (candidate.status, employer.status) == (200, 200)
+            refused = await visitor.get(f"/v1/stream/demo/negotiations/{nid}/activity", side="candidate")
+            assert refused.status_code == 429 and refused.json() == refused_body("client", 2)
+            assert refused.headers["Retry-After"] == "2"
+            assert (await visitor.get(f"/v1/demo/negotiations/{nid}/panels")).status_code == 200  # 再取得の口は使える
+    assert len(limiter) == 0
+
+
+@pytest.mark.anyio
+async def test_each_client_is_counted_on_its_own_and_the_overall_limit_comes_after_the_clients_one(fast_stream, web_app):
+    nid = await demo_negotiation_to_watch(web_app)
+    web_app.services.stream_limiter = SseConnectionLimiter(SseLimitConfig(max_connections=3, max_connections_per_client=2))
+    limiter, visitor = web_app.services.stream_limiter, web_app.browser()
+
+    def client(ip: str) -> dict[str, str]:
+        return {"X-Forwarded-For": f"10.0.0.1, {ip}"}  # クライアントは末尾(web.client_ip)。先頭側は、利用者が書ける値
+
+    async with contextlib.AsyncExitStack() as stack:
+        held = [
+            await stack.enter_async_context(Sse(web_app.app, demo_stream_path(nid), headers=client(ip)))
+            for ip in ("198.51.100.1", "198.51.100.1", "198.51.100.2")  # 別のクライアントは、別に数える
+        ]
+        assert [sse.status for sse in held] == [200, 200, 200] and len(limiter) == 3
+
+        over_all = await visitor.client.get(demo_stream_path(nid), headers=client("198.51.100.3"))  # このクライアントの枠は空いている
+        over_client = await visitor.client.get(demo_stream_path(nid), headers=client("198.51.100.1"))  # 全体も埋まっているが、具体的な方を理由にする
+
+        assert (over_all.status_code, over_all.json()) == (429, refused_body("overall", 3))
+        assert (over_client.status_code, over_client.json()) == (429, refused_body("client", 2))
+        assert len(limiter) == 3
+    assert len(limiter) == 0
+
+
+@pytest.mark.anyio
+async def test_the_default_limits_are_twenty_in_all_and_two_per_client(web_app):
+    # 設定ファイルの値(sse_max_connections = 20・sse_max_connections_per_client = 2)が、本番の組み立てのルートに効いている。20 本を同時につなぐ
+    # (周期は既定の 2 秒のまま。fast_stream だと、20 本が金庫と Firestore を 50 回/秒ずつ読んでしまう)。
+    nid = await demo_negotiation_to_watch(web_app)
+    limiter, visitor = web_app.services.stream_limiter, web_app.browser()
+
+    async def refused(ip: str):
+        return await visitor.client.get(demo_stream_path(nid), headers={"X-Forwarded-For": ip})
+
+    async with contextlib.AsyncExitStack() as stack:
+        for index in range(10):  # 10 のクライアントが 2 本ずつ
+            for _ in range(2):
+                headers = {"X-Forwarded-For": f"198.51.100.{index + 1}"}
+                sse = await stack.enter_async_context(Sse(web_app.app, demo_stream_path(nid), headers=headers))
+                assert sse.status == 200
+        assert len(limiter) == 20
+
+        assert (await refused("203.0.113.1")).json() == refused_body("overall", 20)  # 21 本目(11 番目のクライアント)は、全体の上限
+        assert (await refused("198.51.100.1")).json() == refused_body("client", 2)  # 同じクライアントの 3 本目は、クライアントの上限
+    assert len(limiter) == 0
+
+
+@pytest.mark.anyio
+async def test_a_connection_over_the_limit_is_refused_before_anything_is_read(fast_stream, web_app, monkeypatch):
+    # 上限を超えた要求は、権限の確認(Firestore と金庫を読む)の前に断る。上限の外の要求が、バックエンドを読ませないため。
+    nid = await demo_negotiation_to_watch(web_app)
+    visitor, other_nid = web_app.browser(), "0123456789abcdef"
+    checked: list[str] = []
+    original = web_app.services.stages.is_fictional_negotiation
+
+    async def recording(negotiation_id):
+        checked.append(negotiation_id)
+        return await original(negotiation_id)
+
+    monkeypatch.setattr(web_app.services.stages, "is_fictional_negotiation", recording)
+
+    async with Sse(web_app.app, demo_stream_path(nid)) as first:
+        async with Sse(web_app.app, demo_stream_path(nid)):  # クライアントの枠(2 本)を使い切る
+            assert first.status == 200
+            over = await visitor.get(f"/v1/stream/demo/negotiations/{other_nid}/activity", side="candidate")
+            assert over.status_code == 429 and other_nid not in checked  # 確認の読み出しに、届いていない
+        free = await visitor.get(f"/v1/stream/demo/negotiations/{other_nid}/activity", side="candidate")  # 1 本空けば、確認まで進む
+        assert (free.status_code, free.json()) == (403, {"detail": "forbidden"}) and other_nid in checked
+
+
+@pytest.mark.anyio
+async def test_a_stream_that_fails_the_authorization_does_not_keep_its_place(fast_stream, web_app):
+    # 確認の失敗(401・403・409)は、席を取ったまま終わらない: 上限(2 本)より多く繰り返しても、429 にならず、席は 0 に戻る。
+    mine, stranger, deleting = web_app.browser(), web_app.browser(), web_app.browser()
+    pid = await mine.register()
+    my_nid = await mine.create_negotiation(pid, web_app.put_employer_template())
+    deleting_pid = await deleting.register()
+    deleting_nid = await deleting.create_negotiation(deleting_pid, web_app.put_employer_template())
+    web_app.default_db.collection("principals_meta").document(deleting_pid).update({"deletion_state": "deleting"})
+    limiter = web_app.services.stream_limiter
+
+    for _ in range(5):
+        statuses = [
+            (await stranger.get(f"/v1/stream/negotiations/{my_nid}/activity")).status_code,  # クッキーがない
+            (await mine.get("/v1/stream/negotiations/0123456789abcdef/activity")).status_code,  # 存在しない交渉
+            (await mine.get(f"/v1/stream/demo/negotiations/{my_nid}/activity", side="candidate")).status_code,  # 本物の交渉は、デモの口から読めない
+            (await deleting.get(f"/v1/stream/negotiations/{deleting_nid}/activity")).status_code,  # 削除中
+        ]
+        assert statuses == [401, 403, 403, 409]
+        assert len(limiter) == 0
+
+
+@pytest.mark.anyio
+async def test_every_way_a_stream_can_end_gives_its_place_back(fast_stream, web_app, monkeypatch):
+    # 自分で閉じる(最終結果・problem)・クライアントが切る・応答が例外で落ちる、のどれでも、席は戻る(上限を超えて繰り返しても 429 にならない)。
+    browser, _, nid = await live_negotiation(web_app)
+    path, limiter = f"/v1/stream/negotiations/{nid}/activity", web_app.services.stream_limiter
+    _move(web_app.store, nid, "candidate", "check", sample_package())  # 送る記録がある
+
+    # クライアントが切る(async with を抜けるときに、切断を app に知らせる)
+    for _ in range(3):
+        async with Sse(web_app.app, path, cookie=browser.cookie) as sse:
+            await sse.wait_events(1)
+        assert len(limiter) == 0
+
+    # problem で閉じる(利用記録を読めない)。続けて 3 回(上限は 2 本)
+    original_meta_get = web_app.services.meta.get
+
+    async def failing_meta_get(principal_id):
+        raise RuntimeError("principals_meta is down")
+
+    for _ in range(3):
+        async with Sse(web_app.app, path, cookie=browser.cookie) as sse:
+            monkeypatch.setattr(web_app.services.meta, "get", failing_meta_get)  # 最初の確認の後で、読めなくなる
+            events = await sse.finished()
+        monkeypatch.setattr(web_app.services.meta, "get", original_meta_get)
+        assert events[-1]["event"] == "problem" and len(limiter) == 0
+
+    # 応答が例外で落ちる(本物のサーバで、書き込めなくなったとき): 3 回続けても、席は戻る
+    class BrokenSse(Sse):
+        async def _send(self, message) -> None:
+            await super()._send(message)
+            if message["type"] == "http.response.body":
+                raise ConnectionResetError("the client went away")
+
+    for _ in range(3):
+        with pytest.raises(ConnectionResetError):
+            async with BrokenSse(web_app.app, path, cookie=browser.cookie) as sse:
+                await sse.finished()
+        assert len(limiter) == 0
+
+    # 最終結果で閉じる(end)。自分で終わるので、httpx の ASGITransport でも読める
+    assert (await browser.post(f"/v1/negotiations/{nid}/control", {"action": "cancel"})).status_code == 200
+    for _ in range(3):
+        response = await browser.get(path)
+        assert response.status_code == 200 and parse_sse(response.text)[-1]["event"] == "end"
+        assert len(limiter) == 0
+
+
+@pytest.mark.anyio
+async def test_the_stream_limit_is_counted_in_memory_and_leaves_the_rate_limit_counters_alone(fast_stream, web_app):
+    # 同時本数は、時間窓の回数ではない: メモリの中だけで数え、(default) の rate_limits にも、全体の枠(300)にも触れない。
+    nid = await demo_negotiation_to_watch(web_app)
+    visitor = web_app.browser()
+
+    async with Sse(web_app.app, demo_stream_path(nid)), Sse(web_app.app, demo_stream_path(nid)):
+        assert (await visitor.get(f"/v1/stream/demo/negotiations/{nid}/activity", side="candidate")).status_code == 429
+
+    counters = [path for path in dump_documents(web_app.default_db) if path.startswith("rate_limits/")]
+    assert counters == []
 
 
 # ----------------------------------------------------------------------

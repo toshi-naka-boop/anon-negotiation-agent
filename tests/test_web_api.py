@@ -4,22 +4,26 @@
 確かめる。ここでは、API そのものの振る舞い(丸める場所・入力の検証・金庫への橋渡し)を確かめる。
 金庫は本物の vault の app を ASGI のままつなぎ、web の app へは Browser(クッキーを持つ httpx のクライアント)から入る。
 
+開始ページ(GET /start)の入口の枠(web.limits の session_start。台帳 C-66)も、ここで確かめる。
+
 面談の送信のロジック(丸め → 利用記録 → 金庫の PUT policy)は、内部の関数 InterviewService.submit_policy で、公開面(HTTP)には出ていない
 (台帳 X-81。本番の経路は面談の API の /submit で、画面の流れは tests/test_interview_api.py)。ここでは、その関数をテストの補助
 (web_app_helpers.submit_interview)から直接呼んで、丸める場所・入力の検証・書き込みの順を確かめる。
 """
 
+import datetime as dt
 import json
 import logging
 
 import pytest
+from attack_helpers import make_env, small_limits  # noqa: F401  (make_env はフィクスチャ。入口の枠を絞った web を作る)
 from fastapi import HTTPException
 from negotiation_core import AXES, Verdict, evaluate
 from pydantic import ValidationError
 from vault.api_models import MoveRequest
 from vault_helpers import put_candidate_and_employer_templates, sample_package
 from web.vault_client import VaultUnavailableError
-from web_app_helpers import CANARY, interview_body, submit_interview, wait_until
+from web_app_helpers import CANARY, dump_documents, interview_body, submit_interview, wait_until
 
 
 def _numeric_values(policy_dict: dict) -> list[tuple[str, object]]:
@@ -323,3 +327,65 @@ async def test_healthz_answers_without_a_session_and_without_touching_the_usage_
     assert (again.status_code, again.json()) == (200, {"status": "ok"})
     # 対照: セッションを見るほかの経路は、利用記録を確かめられないので通さない(差し替えが効いている)
     assert (await browser.get(f"/v1/principals/{pid}/policy")).status_code == 503
+
+
+# --- 開始ページの入口の枠(web.limits の session_start。クライアント IP ごと。台帳 C-66) ---
+
+
+async def start_from(browser, ip: str):
+    """クライアント IP(X-Forwarded-For の末尾。web.client_ip)を指定した GET /start。"""
+    return await browser.client.get("/start", headers={"X-Forwarded-For": ip})
+
+
+@pytest.mark.anyio
+async def test_the_start_page_is_limited_per_client_and_a_refusal_issues_no_identity(make_env):
+    # クッキーを持たないクライアントが、GET /start で新しい依頼者 ID を作り続けるのを抑える(上限は 3 回に絞って確かめる)。超えたら 429 で、ID を発行しない。
+    env = make_env(rate_limits=small_limits(session_start=3))
+    visitors = [env.browser() for _ in range(5)]
+
+    allowed = [await start_from(visitor, "198.51.100.1") for visitor in visitors[:3]]  # 上限ちょうどまで通る
+    refused = await start_from(visitors[3], "198.51.100.1")
+
+    assert [response.status_code for response in allowed] == [200, 200, 200] and all(visitor.pid for visitor in visitors[:3])
+    assert refused.status_code == 429
+    assert refused.json()["detail"] == {
+        "code": "rate_limited",
+        "entrance": "session_start",
+        "scope": "client",
+        "limit": 3,
+        "window_seconds": 600,
+        "retry_after_seconds": 600,
+    }
+    assert refused.headers["Retry-After"] == "600"
+    assert "set-cookie" not in refused.headers and visitors[3].cookie is None  # 新しい依頼者 ID を発行していない
+    other = await start_from(visitors[4], "198.51.100.2")  # 別のクライアントは、別の枠
+    assert other.status_code == 200 and visitors[4].pid is not None
+    forged = await start_from(visitors[3], "203.0.113.9, 198.51.100.1")  # 利用者が書ける先頭側を変えても、末尾が同じなら同じ枠
+    assert forged.status_code == 429
+
+    env.clock.advance(dt.timedelta(seconds=600))  # 次の窓
+    again = await start_from(visitors[3], "198.51.100.1")
+    assert again.status_code == 200 and visitors[3].pid is not None
+
+
+@pytest.mark.anyio
+async def test_the_start_page_counts_only_its_own_entrance_and_not_the_overall_allowance(web_app):
+    # 台帳 L19-7: LLM を呼ばない入口なので、全体の枠(300)には数えない。数える文書は、入口 session_start のクライアントの文書 1 つだけ。
+    browser = web_app.browser()
+    for _ in range(3):
+        assert (await start_from(browser, "198.51.100.1")).status_code == 200
+
+    documents = dump_documents(web_app.default_db)
+    counters = {path: data["count"] for path, data in documents.items() if path.startswith("rate_limits/")}
+    assert [path.split("/")[1].split(".")[0] for path in counters] == ["session_start"]
+    assert list(counters.values()) == [3]  # 有効なクッキーがあっても、開いたぶんだけ数える(開始ページを開き直すたびに 1 回)
+
+
+@pytest.mark.anyio
+async def test_the_default_limit_of_the_start_page_is_20_per_client_in_10_minutes(web_app):
+    # 設定ファイルの値(session_start = 20)が、本番の組み立ての GET /start に効いている: 20 回目まで通り、21 回目は 429。
+    browser = web_app.browser()
+
+    statuses = [(await start_from(browser, "198.51.100.1")).status_code for _ in range(21)]
+
+    assert statuses == [200] * 20 + [429]

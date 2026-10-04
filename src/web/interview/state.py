@@ -3,7 +3,9 @@
 - 生の値(年収の数字・自由コメントや辞めた理由から取り出した条件など)は、Firestore にも金庫にも書かない。この module は、メモリの上に
   持つだけ(永続化しない。web が落ちれば消えるので、面談はやり直しになる)。
 - 寿命: 送信(web.interview.service.submit)か破棄(discard)で消す。放置された面談は、最後に使ってからの秒数(state_idle_ttl_seconds)で
-  メモリから消す。同時に持てる面談の数にも上限を置く(開始ページを何度も開くだけの訪問者で、メモリを埋められないように)。
+  読めなくなり(get は None)、メモリからは、新しい面談を作るとき(create)と、交渉の見回りが定期に呼ぶ evict_idle で消す(台帳 C-66・L19-6:
+  新しい面談が始まらなければ、放置された面談の生の年収や取り出した発言が、再起動までメモリに残ってしまうため)。
+  同時に持てる面談の数にも上限を置く(開始ページを何度も開くだけの訪問者で、メモリを埋められないように。面談の開始の口には、入口の枠 interview_begin も掛ける)。
 - 持たないもの: 3 問の回答・自由コメント・辞めた理由の原文(LLM に送ったあとは、どこにも持たない。取り出した発言だけを持つ)、
   プロフィールの正確な値(経験年数・都道府県は、帯に変換した時点で捨てる)。
 - revision: 確認の対象(二択の回答・発言・項目の有無・外した軸・年収)を変えるたびに 1 進める。確認と「最悪ここまで」の承認は、
@@ -72,13 +74,16 @@ class InterviewStateStore:
     def _expired(self, state: InterviewState, now: dt.datetime) -> bool:
         return now - state.touched_at >= self._idle_ttl
 
-    def purge_expired(self) -> int:
-        """最後に使ってから寿命を過ぎた面談を、メモリから消す。消した数を返す。"""
-        now = self._clock.now()
+    def evict_idle(self, now: dt.datetime) -> int:
+        """now の時点で、最後に使ってから寿命を過ぎた面談を、メモリから消す(交渉の見回りが、60 秒ごとに呼ぶ。台帳 C-66・L19-6)。消した数を返す。"""
         stale = [pid for pid, state in self._states.items() if self._expired(state, now)]
         for pid in stale:
             del self._states[pid]
         return len(stale)
+
+    def purge_expired(self) -> int:
+        """最後に使ってから寿命を過ぎた面談を、メモリから消す(create が呼ぶ)。消した数を返す。"""
+        return self.evict_idle(self._clock.now())
 
     def get(self, principal_id: str) -> InterviewState | None:
         """面談の状態(なければ None)。寿命を過ぎていれば消して None。使ったので、最後に使った時刻を更新する。"""

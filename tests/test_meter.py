@@ -11,10 +11,12 @@
   - 別々の候補者の交渉を混ぜて、同じ線の上の答えが食い違ったときは、500 にせず 422 で知らせる。
   - 何も覚えず、何も書かず(入口の枠の回数を rate_limits に数える以外は)、セッションを見ない。
   - 入口の枠(web.limits の meter。1 回で最大 20 件を読むため): 超えたら 429 で、金庫にも段の状態にも触れない。クライアント IP ごと。窓が変われば開く。
+    LLM を呼ばず金庫を読むだけなので、全体の枠(rate_overall_limit)には数えない(台帳 L19-7)。
 防御なし(GET /v1/demo/meter/simulation): 300〜1500 万を 10 万刻みで二分探索すると、どの値も 7 手以内で特定される(620 万は 7 手。純粋な計算で、金庫を呼ばない)。
 入口の枠は掛けない(メーターの枠を使い切っていても呼べ、回数も数えない)。
 """
 
+import dataclasses
 import datetime as dt
 from typing import get_args
 
@@ -681,8 +683,8 @@ async def test_the_meter_writes_nothing_and_remembers_nothing(web_app):
     counters = {path: data for path, data in default_after.items() if path.startswith("rate_limits/")}
     assert dump_documents(web_app.store._db) == vault_before
     assert {path: data for path, data in default_after.items() if path not in counters} == default_before  # 回数のほかは、何も書いていない
-    assert sorted(path.split("/")[1].split(".")[0] for path in counters) == ["meter", "overall"]  # 入口 meter と全体の、2 つの文書
-    assert [data["count"] for data in counters.values()] == [2, 2]  # 2 回呼んだ分だけ
+    assert sorted(path.split("/")[1].split(".")[0] for path in counters) == ["meter"]  # 入口 meter のクライアントの文書だけ(全体の枠には数えない。台帳 L19-7)
+    assert [data["count"] for data in counters.values()] == [2]  # 2 回呼んだ分だけ
     assert nid not in str(counters)
     assert web_app.store.get_view(nid, "candidate").version == version_before
 
@@ -824,6 +826,23 @@ async def test_the_meter_answers_429_over_its_limit_without_reading_anything_and
 
     env.clock.advance(dt.timedelta(seconds=detail["retry_after_seconds"]))  # 次の窓
     assert (await browser.post(METER, body)).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_the_meter_does_not_count_in_the_overall_allowance_so_it_cannot_use_up_the_llm_entrances(make_env):
+    # 台帳 L19-7: メーター(LLM を呼ばず、金庫を読むだけ)は、全体の枠に数えない。全体の枠(ここでは 2 回に絞る)より多く呼んでも、断らず、全体の文書も作らない
+    # (v20 までは、メーターも全体を消費し、別々の IP で全体の枠が埋まって、本物の利用者の面談・ライブ交渉が 429 になった)。
+    env = make_env(rate_limits=dataclasses.replace(small_limits(meter=10), overall_limit=2))
+    nid = await _fictional_negotiation(env, [_line(900)])
+    browsers = [env.browser() for _ in range(5)]
+
+    statuses = [
+        (await browser.client.post(METER, json={"negotiation_ids": [nid]}, headers=_as_client(f"198.51.100.{index}"))).status_code
+        for index, browser in enumerate(browsers)  # 別々のクライアントが 1 回ずつ(クライアントごとの枠には当たらない)
+    ]
+
+    assert statuses == [200] * 5
+    assert not any(path.startswith("rate_limits/overall.") for path in _rate_limit_documents(env))
 
 
 @pytest.mark.anyio

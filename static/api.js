@@ -173,6 +173,9 @@ const ENTRANCE_LABELS = {
   attack_instruction: "攻撃の指示",
   raw_message: "壁 1 の生のメッセージの送信",
   meter: "推定区間メーターの計算",
+  session_start: "面談の開始",
+  interview_begin: "面談の開始(途中の状態の作成)",
+  sse: "画面への配信(同時接続)",
 };
 
 // 422 の検証エラーで、場所(項目名)を画面の言葉にする。入力の値は、サーバーが返さない。
@@ -213,6 +216,9 @@ function describeRateLimit(error, overrides) {
   if (detail && typeof detail === "object" && detail.code === "rate_limited") {
     const entrance = ENTRANCE_LABELS[detail.entrance] ?? "この操作";
     const scope = detail.scope === "overall" ? "全体の上限" : "あなたの上限";
+    if (detail.window_seconds == null) {
+      return `${entrance}が、${scope}(同時に ${detail.limit} 本)に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;
+    }
     const minutes = Math.max(1, Math.round(Number(detail.window_seconds) / 60));
     return `${entrance}の回数が、${scope}(${minutes} 分あたり ${detail.limit} 回)に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;
   }

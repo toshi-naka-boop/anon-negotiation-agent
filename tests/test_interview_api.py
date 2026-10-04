@@ -10,6 +10,7 @@
   tests/test_principal_deletion.py)
 - LLM を呼ぶ 3 つの API(年収の 3 問・自由コメント・辞めた理由)の入口の枠(web.limits の interview_llm。§8.2。クライアント IP ごと)。
   超えると 429 で LLM に送らない。LLM を呼ばない手順は、掛からず、数えない
+- 面談を始める口(/begin)の入口の枠(web.limits の interview_begin。台帳 C-66)と、アイドルの面談の状態を見回りがメモリから消すこと(台帳 L19-6)
 - 送信のあと、生の値がどこにも残らない(AC-18: カナリアを Firestore の全文書とログに探す)・辞めた理由の原文を持たない(AC-17)
 """
 
@@ -24,6 +25,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from negotiation_core import AXES, AXIS_KEYS
+from web.interview.state import InterviewStateStore
 from web.llm_budget import LlmBudgetUnavailable, jst_date
 from web.vault_client import VaultUnavailableError
 from web_app_helpers import REQUESTED_WITH, documents_mentioning, dump_documents, interview_body
@@ -689,6 +691,15 @@ def rate_limit_documents(env) -> dict[str, dict]:
     return {path: data for path, data in dump_documents(env.default_db).items() if path.startswith("rate_limits/")}
 
 
+def llm_counters(env) -> dict[str, dict]:
+    """interview_llm のクライアントの文書と、全体の文書(開始ページ・面談の開始の文書は、別の入口。全体には数えない。台帳 L19-7)。"""
+    return {
+        path: data
+        for path, data in rate_limit_documents(env).items()
+        if path.startswith(("rate_limits/interview_llm.", "rate_limits/overall."))
+    }
+
+
 def daily_llm_count(env) -> int:
     snapshot = env.default_db.collection("llm_call_counters").document(jst_date(env.clock.now())).get()
     return snapshot.to_dict()["count"] if snapshot.exists else 0
@@ -752,7 +763,7 @@ async def test_the_steps_that_do_not_call_the_model_are_neither_limited_nor_coun
     for _ in range(3):  # 枠を使い切る
         await flow.ok("POST", "salary/answers", {"answers": SALARY_ANSWERS})
     assert (await flow.post("salary/answers", {"answers": SALARY_ANSWERS})).status_code == 429  # 使い切った(確認の前提)
-    counters = rate_limit_documents(flow.env)
+    counters = llm_counters(flow.env)
     assert sorted(data["count"] for data in counters.values()) == [3, 3]  # interview_llm のクライアントの文書と、全体の文書
 
     # 枠を使い切ったあとも、LLM を呼ばない手順は、最後の送信まで何度でも通る
@@ -770,7 +781,7 @@ async def test_the_steps_that_do_not_call_the_model_are_neither_limited_nor_coun
     await flow.ok("POST", "blocklist", {"company_ids": []})
     assert (await flow.ok("POST", "submit")) == {"status": "submitted"}
 
-    assert rate_limit_documents(flow.env) == counters  # どれも数えていない
+    assert llm_counters(flow.env) == counters  # どれも、interview_llm にも全体にも数えていない
     assert len(llm.stub.requests) == 3
 
 
@@ -779,15 +790,87 @@ async def test_requests_without_the_own_session_are_refused_before_they_are_coun
     flow = limited_flow
     anonymous, other = flow.env.browser(), flow.env.browser()  # クッキーなし・別の依頼者
     await other.open_start_page()
+    counted_so_far = rate_limit_documents(flow.env)  # 開始ページの GET の枠(session_start)は、ここまでに数えた
 
-    for suffix in ("salary/answers", "comment", "reason"):
+    for suffix in ("begin", "salary/answers", "comment", "reason"):
         no_session = await anonymous.post(f"{flow.base}/{suffix}", {})
         foreign = await other.post(f"{flow.base}/{suffix}", {})
         assert (no_session.status_code, no_session.json()["detail"]) == (401, "no_session")
         assert (foreign.status_code, foreign.json()["detail"]) == (403, "forbidden")
 
-    assert rate_limit_documents(flow.env) == {}  # 本人でない要求は、枠を使わない
+    assert rate_limit_documents(flow.env) == counted_so_far  # 本人でない要求は、枠を使わない(面談の開始の枠 interview_begin も)
     assert llm.stub.requests == []
+
+
+# --- 面談を始める口の入口の枠(web.limits の interview_begin。台帳 C-66)。上限は 3 回に絞って確かめる ---
+
+
+@pytest.fixture
+async def begin_limited_flow(make_env, llm):
+    """入口の枠 interview_begin を 3 回に絞った web での、1 人の依頼者の面談(面談の LLM はスタブ)。"""
+    web = make_env(rate_limits=small_limits(interview_begin=3))
+    web.services.interview.agent.use_model(llm.stub)
+    browser = web.browser()
+    return Flow(web, browser, await browser.open_start_page())
+
+
+@pytest.mark.anyio
+async def test_begin_is_limited_per_client_and_a_refusal_neither_creates_nor_changes_the_state(begin_limited_flow):
+    # 面談の状態はサーバのメモリに持ち、同時に持てる数に上限がある。/begin を入口の枠で守る(超えたら 429。LLM は呼ばない)。
+    flow = begin_limited_flow
+    store = flow.env.services.interview.store
+    assert [(await flow.post("begin", {})).status_code for _ in range(3)] == [200, 200, 200]  # 上限ちょうどまで通る(続きの読み込みも数える)
+    await flow.profile()
+    state = await flow.ok("GET", "state")
+
+    refused = await flow.post("begin", {"restart": True})  # 状態を捨てて作り直す口。断られれば、捨てない
+
+    assert refused.status_code == 429
+    detail = refused.json()["detail"]
+    assert detail == {
+        "code": "rate_limited",
+        "entrance": "interview_begin",
+        "scope": "client",
+        "limit": 3,
+        "window_seconds": 600,
+        "retry_after_seconds": detail["retry_after_seconds"],
+    }
+    assert refused.headers["Retry-After"] == str(detail["retry_after_seconds"]) and 1 <= detail["retry_after_seconds"] <= 600
+    assert await flow.ok("GET", "state") == state  # 面談の状態は変わらない(プロフィールの帯が残っている)
+    assert len(store) == 1
+
+
+@pytest.mark.anyio
+async def test_a_different_client_ip_has_its_own_begin_allowance_and_the_window_opens_again(begin_limited_flow):
+    flow = begin_limited_flow
+    for _ in range(3):
+        await flow.begin()
+    over = await flow.post("begin", {})
+    assert over.status_code == 429
+
+    other = await post_from(flow, "begin", {}, "198.51.100.8")  # 別のクライアント IP は、別の枠(同じ依頼者でも)
+    assert other.status_code == 200
+    assert (await post_from(flow, "begin", {}, "203.0.113.9, 127.0.0.1")).status_code == 429  # 末尾が最初の IP なら、同じ枠
+
+    flow.env.clock.advance(dt.timedelta(seconds=over.json()["detail"]["retry_after_seconds"]))  # 次の窓
+    assert (await flow.post("begin", {})).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_one_client_cannot_fill_the_interview_memory_by_collecting_new_identities(env):
+    # 台帳 C-66 の破綻シナリオ: クッキーを持たないクライアントが、GET /start(毎回、新しい依頼者 ID)→ そのクッキーで POST .../begin を繰り返して、
+    # 同時 500 件の上限を埋める。開始ページ(session_start 20 回)と面談の開始(interview_begin 10 回)の枠で、1 つのクライアントが 10 分に作れる
+    # 面談の状態は 10 件まで。
+    store = env.services.interview.store
+    results = []
+    for _ in range(12):
+        browser = env.browser()  # 毎回、クッキーのない新しいブラウザ
+        started = await browser.get("/start")
+        began = await browser.post(f"/v1/principals/{browser.pid}/interview/begin", {})
+        results.append((started.status_code, began.status_code))
+
+    assert results == [(200, 200)] * 10 + [(200, 429)] * 2
+    assert len(store) == 10
 
 
 def _body_of_size(size: int, key: str = "text") -> bytes:
@@ -935,6 +1018,79 @@ async def test_the_interview_state_is_removed_by_discard_restart_idle_expiry_and
     full = await other_flow.post("begin", {})
     assert (full.status_code, full.json()["detail"]) == (503, "too_many_interviews")
     assert (await flow.begin(restart=True))["state"]["stage"] == "profile"  # 自分の面談のやり直しは、上限に関係なくできる
+
+
+# ---------------------------------------------------------------------------
+# 面談の状態の掃除(台帳 C-66・L19-6): 放置された状態は、見回りがメモリから消す
+# ---------------------------------------------------------------------------
+
+
+def test_evict_idle_removes_exactly_the_states_idle_for_the_ttl_at_the_given_time_and_create_still_purges(clock):
+    store = InterviewStateStore(clock, idle_ttl_seconds=3600, max_states=10)
+    store.create("a")
+    clock.advance(dt.timedelta(seconds=1800))
+    store.create("b")
+    now = clock.now()
+
+    assert store.evict_idle(now + dt.timedelta(seconds=1799)) == 0  # a は 3599 秒のアイドル: まだ
+    assert (store.evict_idle(now + dt.timedelta(seconds=1800)), len(store)) == (1, 1)  # a は、ちょうど 3600 秒: 消える(get と同じ境目)
+    assert (store.evict_idle(now + dt.timedelta(seconds=3600)), len(store)) == (1, 0)  # b も
+
+    store.create("c")  # 新しい面談を作るときの掃除(purge_expired)も残っている
+    clock.advance(dt.timedelta(seconds=3600))
+    store.create("d")
+    assert len(store) == 1 and store.get("c") is None
+
+
+@pytest.mark.anyio
+async def test_the_sweeper_removes_idle_interview_states_from_memory_and_keeps_the_active_ones(env, flow):
+    # 台帳 L19-6: アイドルの状態は、読めなくなっても(get は None)、新しい面談が始まらなければ、メモリに残る(生の年収や取り出した発言が、再起動まで)。
+    # 見回り(60 秒ごと)が、メモリから消す。使われている状態は、残す。
+    service, ttl = env.services.interview, dt.timedelta(seconds=env.services.interview.store._idle_ttl.total_seconds())
+    other_browser = env.browser()
+    other_flow = Flow(env, other_browser, await other_browser.open_start_page())
+    await flow.begin()
+    await flow.profile()
+    env.clock.advance(ttl / 2)
+    await other_flow.begin()
+    env.clock.advance(ttl / 2 + dt.timedelta(seconds=1))  # flow は 3601 秒のアイドル、other_flow は 1801 秒
+
+    assert len(service.store) == 2  # 読めなくなった状態も、まだメモリにある(見回りの前)
+    report = await env.services.sweeper.sweep_once()
+
+    assert (len(service.store), report.interview_states_evicted) == (1, 1)
+    gone = await flow.get("state")
+    assert (gone.status_code, gone.json()["detail"]) == (409, "interview_not_started")
+    assert (await other_flow.get("state")).status_code == 200  # 使われている状態は、残る(この読み出しで、また使った)
+    env.clock.advance(ttl)
+    assert (await env.services.sweeper.sweep_once()).interview_states_evicted == 1 and len(service.store) == 0
+    assert (await env.services.sweeper.sweep_once()).interview_states_evicted == 0  # 消すものがなければ、0
+
+
+@pytest.mark.anyio
+async def test_the_memory_sweep_does_not_wait_for_the_vault_and_a_failing_sweep_step_does_not_stop_the_sweeper(env, flow, monkeypatch):
+    # メモリの中だけの掃除は、金庫の一覧を読む前に行う: 金庫が応えなくても消す(見回り自体は、金庫の失敗を例外で返す。run が次の周期でやり直す)。
+    service = env.services.interview
+    await flow.begin()
+    env.clock.advance(dt.timedelta(seconds=service.store._idle_ttl.total_seconds()))
+
+    async def unavailable():
+        raise VaultUnavailableError("503")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(env.vault, "list_open_negotiations", unavailable)
+        with pytest.raises(VaultUnavailableError):
+            await env.services.sweeper.sweep_once()
+    assert len(service.store) == 0
+
+    # 掃除の口が壊れていても、見回りは続ける(失敗は数えて、型名だけを記録する)
+    def broken(now):
+        raise RuntimeError("secret detail")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(env.services.sweeper, "_evict_idle", broken)
+        report = await env.services.sweeper.sweep_once()
+    assert report.errors == 1 and report.interview_states_evicted == 0
 
 
 # ---------------------------------------------------------------------------

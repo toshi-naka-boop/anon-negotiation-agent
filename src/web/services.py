@@ -25,7 +25,7 @@ from web.deletion import PrincipalDeletion
 from web.interview import InterviewService, build_interview_service
 from web.fictional_answerer import CatalogAnswerer, FixtureCatalog
 from web.ledger import DisclosureLedger
-from web.limits import DEFAULT_RATE_LIMIT_CONFIG, RateLimitConfig, RateLimiter
+from web.limits import DEFAULT_RATE_LIMIT_CONFIG, RateLimitConfig, RateLimiter, SseConnectionLimiter, derive_limiter_key
 from web.llm_budget import LlmBudget
 from web.locks import PrincipalLocks
 from web.principal_sweeper import PrincipalSweeper
@@ -59,6 +59,7 @@ class WebServices:
     default_db: firestore.Client
     interview: InterviewService
     limiter: RateLimiter
+    stream_limiter: SseConnectionLimiter
     attack: AttackServices
 
 
@@ -88,7 +89,9 @@ def build_services(
     if answerer is None and fixtures is not None:
         answerer = CatalogAnswerer(stage_flow)  # 架空人物の途中確認は、フィクスチャで自動回答する(§4.4)。渡さなければ、24 時間待つ
     llm_budget = LlmBudget(default_db, clock, config.llm_budget)
-    limiter = RateLimiter(default_db, clock, rate_limits)
+    # rate_limits の文書 ID の HMAC の鍵は、署名の鍵から派生させる(鍵なしのハッシュだと、IPv4 の全数を試して IP を戻せる。台帳 L19-12)
+    limiter = RateLimiter(default_db, clock, rate_limits, key=derive_limiter_key(session_key))
+    stream_limiter = SseConnectionLimiter()  # SSE の同時本数の上限(全体・クライアント IP ごと。メモリの中だけ。台帳 C-65)
     attack = build_attack_services(clock=clock, send_raw=send_raw)
     interview = build_interview_service(
         vault=vault, meta=meta, llm_budget=llm_budget, clock=clock, sleep=sleep, web_config=config
@@ -127,6 +130,7 @@ def build_services(
         locks=locks,
         meta=meta,
         settle=stage_settler.settle,
+        evict_idle=interview.store.evict_idle,  # アイドルの面談の状態を、メモリから定期に消す(台帳 C-66・L19-6)
     )
     principal_sweeper = PrincipalSweeper(
         meta=meta, deletion=deletion, clock=clock, sleep=sleep, config=config.principal_sweeper
@@ -150,5 +154,6 @@ def build_services(
         default_db=default_db,
         interview=interview,
         limiter=limiter,
+        stream_limiter=stream_limiter,
         attack=attack,
     )

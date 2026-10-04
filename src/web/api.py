@@ -11,6 +11,8 @@
 - 状態を変えるリクエストは POST に限り、X-Requested-With を必須にする(ミドルウェア)。
 - 依頼者 ID は、開始ページの GET(/start)でしか発行しない。ほかのルートは、クッキーがなければ 401 で、
   ID を発行しない。有効なクッキーがあれば、開始ページを開き直しても ID は変わらない。
+  /start には、入口の枠 session_start(クライアント IP ごと。web.limits。台帳 C-66)を掛ける。超えたら 429 で、ID を発行しない
+  (クッキーを持たないクライアントが、ID を作り続けて、面談の状態の上限などを埋めないように)。
 - デモ用のエンドポイント(/v1/demo/...)は、セッションを見ない。本物の依頼者には触れない: 交渉は
   架空人物のテンプレートからだけ作り(モードは demo 固定)、読めるのは、候補者が架空人物の交渉(デモ・攻撃)
   だけ。読み出しは、web の段の状態(stages。補助)と、金庫のデモ用の読み出しの口(正本。台帳 X-38)の両方で確かめ、
@@ -322,11 +324,14 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
     # ------------------------------------------------------------------
 
     @router.get("/start")
-    async def start_page(request: Request, response: Response) -> dict[str, str]:
+    async def start_page(
+        request: Request, response: Response, _limit: None = Depends(services.limiter.guard("session_start"))
+    ) -> dict[str, str]:
         """面談の開始ページの GET。有効なクッキーがなければ、新しい依頼者 ID を発行する。
 
         有効なクッキーがあれば、新しい ID を発行しない(同じ ID のまま。期限の延長はミドルウェアが行う)。
         利用記録は、ここでは作らない(開始ページを開いただけの訪問者やクローラーには作らない)。
+        入口の枠 session_start(クライアント IP ごと)を超えたら、ID を発行せずに 429(台帳 C-66)。
         """
         if getattr(request.state, "principal_session", None) is None:
             services.codec.set_cookie(response, services.codec.issue(generate_id(), services.clock.now()))

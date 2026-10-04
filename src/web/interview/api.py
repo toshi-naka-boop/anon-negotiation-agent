@@ -33,6 +33,9 @@ LLM を呼ぶ 3 つ(/salary/answers・/comment・/reason)には、入口の枠 i
 本人のセッションの確認(401・403)のあとに数える(他人の ID への要求は数えない)。LLM を呼ばない手順(プロフィール・二択の回答など)には掛けない。
 1 日の物理の数の上限(web.llm_budget)は別の歯止めで、こちらの 429 は detail が文字列 "daily_limit_reached"。
 
+面談を始める /begin には、入口の枠 interview_begin(web.limits。クライアント IP ごと。台帳 C-66)を掛ける。面談の状態はサーバのメモリに持ち、同時に持てる数に上限があるので、
+匿名のクライアント 1 つが /begin を繰り返して、上限を埋めてしまわないように。LLM は呼ばない。本人のセッションの確認のあとに数える(続きを読み込む /begin も数える)。
+
 エラーの detail は理由の名前(入力の値は含めない)。検証エラー(422)は、場所・理由の種類だけを返す(web.app の既定と同じ)。
 """
 
@@ -113,12 +116,13 @@ def build_interview_router(services: "WebServices") -> APIRouter:
     )
 
     llm_entrance = services.limiter.guard("interview_llm")  # LLM を呼ぶ 3 つの API の入口の枠(web.limits)
+    begin_entrance = services.limiter.guard("interview_begin")  # 面談の状態をメモリに作る /begin の入口の枠(web.limits。台帳 C-66)
 
     def service():
         return services.interview  # テストが差し替えられるよう、リクエストごとに取り出す
 
     @router.post("/begin")
-    async def begin(pid: str, body: BeginBody | None = None) -> dict[str, Any]:
+    async def begin(pid: str, body: BeginBody | None = None, _limit: None = Depends(begin_entrance)) -> dict[str, Any]:
         return service().begin(pid, body.restart if body is not None else False)
 
     @router.get("/state")
