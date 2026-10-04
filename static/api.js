@@ -143,6 +143,15 @@ const MESSAGES = {
   llm_failed: "AI の呼び出しに失敗しました。もう一度試してください。",
   output_truncated: "AI の出力が長すぎて切れました。回答を短くして、もう一度試してください。",
   output_invalid: "AI の出力を読み取れませんでした。もう一度試してください。",
+  not_judged: "この交渉は、まだ終わっていません。終わってから、もう一度試してください。",
+  not_agreed: "合意できなかった交渉では、この操作はできません。",
+  stage_not_open: "「承認」は、双方が「会う」を押して、段 1 が開いてから押せます。",
+  job_summary_invalid: "職務要約は、1 文字以上 400 文字以下で書いてください。",
+  invalid_body: "入力の形が正しくありません。",
+  request_too_large: "送った内容が大きすぎます。",
+  value_not_on_the_grid: "年収は、300〜1500 万円の、10 万円刻みの値で入れてください。",
+  inconsistent_answers: "渡した交渉の答えが食い違っています(別々の候補者の交渉が混ざっています)。",
+  bisection_timeout: "二分探索の実演が、時間内に終わりませんでした。もう一度試してください。",
 };
 
 // 状態の理由が分からないとき(detail がない・知らない)の文。
@@ -163,6 +172,7 @@ const ENTRANCE_LABELS = {
   attack_create: "攻撃の交渉の作成",
   attack_instruction: "攻撃の指示",
   raw_message: "壁 1 の生のメッセージの送信",
+  meter: "推定区間メーターの計算",
 };
 
 // 422 の検証エラーで、場所(項目名)を画面の言葉にする。入力の値は、サーバーが返さない。
@@ -179,6 +189,9 @@ const FIELD_LABELS = {
   bonus_included: "賞与を含むか",
   bonus_months: "賞与の月数",
   fixed_overtime_man_yen_per_month: "固定残業代(月額)",
+  job_summary: "匿名職務要約",
+  negotiation_ids: "交渉の一覧",
+  value: "年収",
 };
 
 function describeValidation(detail) {

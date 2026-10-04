@@ -4,7 +4,9 @@
 - memory: web のメモリにだけ持つ状態。攻撃の指示(AttackContexts。永続化しない)と、壁 2 のための LLM 入力の記録(LlmContextRecorder)。
 - raw_message: 壁 1(生のメッセージを /a2a/candidate へそのまま送る)。
 - walls: 壁 2(LLM の文脈の全文)・壁 3(金庫の答え)の応答。
-- router: API(/v1/demo/attack/...)。web.api.build_router が include する。この __init__ は router を import しない
+- scripted: 台本の攻撃者・候補者(LLM を使わない)。二分探索の実演が使う。
+- bisection: 二分探索の実演(FR-45。§8.3)。台本の攻撃者で、攻撃の交渉を作り、交渉をまたいで年収を二分探索する。
+- router: API(/v1/demo/attack/...)。web.api.build_router が include する。この __init__ は router・bisection を import しない
   (web.services が AttackServices を import するため。循環を避ける)。
 - services: 部品の組み立て(AttackServices)。
 

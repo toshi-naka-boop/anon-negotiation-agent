@@ -9,6 +9,9 @@
 - 画面に要る口(web.ui_api): セッション・面談の注記・求人・デモのケース・リプレイ・SSE(活動ログ)。
 - SSE は、ミドルウェアの依頼者ごとのロックを持たない(つながっている間、同じ依頼者の操作が止まらない)。
 - 画面の活動ログの購読(static/ui.js の watchNegotiation)は、node があれば、偽の EventSource で動かして確かめる(なければ、そのテストは飛ばす)。
+- 画面の後半(作業パッケージ L2): 段階開示・開示台帳・FR-39 の 2 パネル・推定区間メーター・シミュレーション・二分探索の実演の区画が埋まっていること(data-status="ready"・
+  ナビが本物のリンク)、画面の言葉(設計書が求める文言)、画面にある定数がサーバーの値と一致すること、デモ・攻撃の画面が本物の依頼者の API を呼ばないこと。
+  node があれば、区画の描画を偽の DOM で動かして確かめる(サンプルのデータは、実際の API のモデルから作る)。
 金庫は本物の vault の app を ASGI のままつなぎ、web の app へは Browser(クッキーを持つ httpx のクライアント)から入る。
 """
 
@@ -21,17 +24,23 @@ import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import get_args
 
 import pytest
-from negotiation_core import Verdict
+from negotiation_core import AXES, Anchor, Policy, Verdict
+from negotiation_core.estimate_interval import Interval
 from sse_starlette import ServerSentEvent
-from vault.api_models import MoveRequest
+from vault.api_models import EventViewItem, MoveRequest, PolicyView
 from vault.fixtures import FIXTURES_DIRECTORY, load_case_fixture
-from vault.models import EmployerRule
+from vault.models import EmployerRule, NegotiationResult
 from vault.seed import seed_templates
 from vault_helpers import needs_confirmation_policy, sample_package
-from web import activity_api, ui_api
+from web import activity_api, meter_api, ui_api
 from web.activity_api import ActivityEntry, ActivityLog
+from web.attack.scripted import probe_package
+from web.ledger import LedgerEntry, LedgerOperator, LedgerRecipient
+from web.panels_api import build_panels
+from web.stages import DEFAULT_STAGES_CONFIG, CompanyView, EmployerDisclosure, Item, SideFlagsView, StageView
 from web.session import SESSION_COOKIE_NAME
 from web.ui_api import StreamConfig, activity_event_stream, build_ui_router, list_cases, list_jobs
 from web.vault_client import VaultUnavailableError
@@ -313,7 +322,10 @@ async def test_the_api_routes_are_still_served_next_to_the_pages(web_app):
 
 def test_the_expected_files_exist():
     assert {path.name for path in HTML_FILES} == set(PAGES.values())
-    for name in ("app.css", "api.js", "ui.js", "index.js", "interview.js", "me.js", "demo.js", "attack.js"):
+    for name in (
+        "app.css", "api.js", "ui.js", "index.js", "interview.js", "me.js", "demo.js", "attack.js",
+        "stages.js", "ledger.js", "panels.js", "meter.js",
+    ):  # fmt: skip
         assert (STATIC / name).is_file(), name
 
 
@@ -326,7 +338,10 @@ def test_every_file_an_html_page_refers_to_exists(path):
         if target.startswith("/static/"):
             assert (STATIC / target.removeprefix("/static/")).is_file(), f"{path.name}: {tag} {target}"
         elif tag == "a":
-            assert target in PAGES, f"{path.name}: the link {target} is not a page"
+            page_target, _, fragment = target.partition("#")
+            assert page_target in PAGES, f"{path.name}: the link {target} is not a page"
+            if fragment:  # ナビの「段階開示・開示台帳」「推定区間メーター」: 区画の id が、行き先のページにある
+                assert fragment in page_of(STATIC / PAGES[page_target]).ids, f"{path.name}: the link {target} has no such section"
         else:
             assert target.startswith("data:"), f"{path.name}: {tag} {target} is neither a static file nor a data URI"
     scripts = [target for tag, target in page.refs if tag == "script"]
@@ -441,7 +456,7 @@ async def test_every_api_the_javascript_calls_is_a_real_route(web_app):
     paths = web_app.app.openapi()["paths"]
     called = routes_called_by_the_javascript()
 
-    assert len(called) >= 35  # 読み取りが壊れて、何も確かめずに通らない
+    assert len(called) >= 44  # 読み取りが壊れて、何も確かめずに通らない
     missing = [
         f"{method} {route} ({', '.join(files)})"
         for (method, route), files in called.items()
@@ -456,6 +471,16 @@ async def test_every_api_the_javascript_calls_is_a_real_route(web_app):
         ("GET", "/v1/stream/negotiations/{nid}/activity"),
         ("GET", "/v1/stream/demo/negotiations/{nid}/activity"),
         ("GET", "/v1/demo/negotiations/{nid}/panels"),  # 並べて見る画面(2 パネル)の再取得
+        # 画面の後半(L2): 段階開示・開示台帳・FR-39 の 2 パネル・メーター・シミュレーション・二分探索の実演
+        ("GET", "/v1/negotiations/{nid}/stage"),
+        ("POST", "/v1/negotiations/{nid}/stage/meet"),
+        ("POST", "/v1/negotiations/{nid}/stage/approve"),
+        ("GET", "/v1/principals/{pid}/ledger"),
+        ("GET", "/v1/principals/{pid}/panels"),
+        ("GET", "/v1/demo/negotiations/{nid}/stage"),
+        ("POST", "/v1/demo/meter"),
+        ("GET", "/v1/demo/meter/simulation"),
+        ("POST", "/v1/demo/attack/bisection"),
     ):
         assert expected in called, expected
 
@@ -465,6 +490,39 @@ def test_only_the_pages_for_a_real_principal_call_the_routes_that_need_the_sessi
     for (method, route), files in routes_called_by_the_javascript().items():
         if route.startswith(("/v1/principals", "/v1/negotiations", "/v1/stream/negotiations")):
             assert set(files) <= {"interview.js", "me.js"}, (method, route, files)
+
+
+def imported_scripts(path: Path) -> list[Path]:
+    """path が import する、画面の JS(`./x.js` の形のもの)。"""
+    targets = re.findall(r"""from\s+["'](\./[^"']+)["']""", path.read_text(encoding="utf-8"))
+    return [STATIC / target.removeprefix("./") for target in targets]
+
+
+def script_graph(entry: Path) -> list[Path]:
+    """entry と、そこから import をたどって読み込まれる、画面の JS のすべて(共通のモジュールを含む)。"""
+    seen: list[Path] = []
+    queue = [entry]
+    while queue:
+        current = queue.pop()
+        if current not in seen:
+            seen.append(current)
+            queue.extend(imported_scripts(current))
+    return seen
+
+
+def test_the_demo_and_attack_pages_load_no_code_that_calls_a_real_principals_api():
+    # 共通のモジュール(stages.js など)を、デモ・攻撃の画面も読み込む。その全部(読み込みの連なり)に、依頼者のセッションを要る経路の文字列がない
+    # (本物の依頼者の API は、me.js が渡す。モジュールは、経路を知らない。§6.3)。
+    prefixes = ("/v1/principals", "/v1/negotiations", "/v1/stream/negotiations")
+    for page in ("demo", "attack"):
+        graph = script_graph(STATIC / f"{page}.js")
+        assert {script.name for script in graph} >= {f"{page}.js", "api.js", "ui.js"}
+        for script in graph:
+            routes = [route for _method, route in ROUTE_LITERAL.findall(script.read_text(encoding="utf-8"))]
+            assert not [route for route in routes if route.startswith(prefixes)], (page, script.name)
+    assert {script.name for script in script_graph(STATIC / "demo.js")} >= {"stages.js"}
+    assert {script.name for script in script_graph(STATIC / "attack.js")} >= {"meter.js"}
+    assert {script.name for script in script_graph(STATIC / "me.js")} >= {"stages.js", "ledger.js", "panels.js"}
 
 
 def test_the_stream_limit_matches_the_activity_api():
@@ -484,27 +542,85 @@ def test_the_activity_shape_table_of_the_demo_script_matches_the_activity_api():
 @pytest.mark.parametrize("page", HTML_FILES, ids=lambda path: path.name)
 def test_every_element_id_a_page_script_uses_exists_in_the_html(page):
     # el(...)・getElementById(...) で引く id が、そのページの HTML にある(打ち間違いで、画面が動かなくなるのを防ぐ)。
-    script = (STATIC / f"{page.stem}.js").read_text(encoding="utf-8")
-    used = set(re.findall(r"""\bel\("([\w-]+)"\)""", script)) | set(re.findall(r"""getElementById\("([\w-]+)"\)""", script))
+    used: set[str] = set()
+    for script in script_graph(STATIC / f"{page.stem}.js"):  # ページのスクリプトと、そこから読み込まれるモジュール
+        source = script.read_text(encoding="utf-8")
+        used |= set(re.findall(r"""\bel\("([\w-]+)"\)""", source)) | set(re.findall(r"""getElementById\("([\w-]+)"\)""", source))
 
     assert used  # 読み取りが空振りしていない
     assert used <= set(page_of(page).ids), sorted(used - set(page_of(page).ids))
 
 
-def test_the_placeholders_for_the_next_package_are_in_place():
-    # L2(段階開示・開示台帳・FR-39 の 2 パネル・メーター)が差し込む区画の id と、準備中の印。
+def test_the_sections_of_the_second_package_are_filled_in_and_the_navigation_links_to_them():
+    # L2(段階開示・開示台帳・FR-39 の 2 パネル・メーター・シミュレーション)の区画の id と、「ready」の印。準備中の印・文は、もう残っていない。
     expected = {
         "me.html": {"slot-stages", "slot-ledger", "slot-fr39"},
         "demo.html": {"slot-fr39", "slot-stages"},
         "attack.html": {"slot-meter", "slot-simulation"},
     }
     for name, slots in expected.items():
-        text = (STATIC / name).read_text(encoding="utf-8")
+        source = (STATIC / name).read_text(encoding="utf-8")
         for slot in slots:
-            assert f'<section class="slot" id="{slot}" data-status="pending">' in text, (name, slot)
-    for path in HTML_FILES:  # どのページのナビゲーションにも、準備中の置き場がある
-        text = path.read_text(encoding="utf-8")
-        assert 'data-slot="nav-stages"' in text and 'data-slot="nav-meter"' in text, path.name
+            assert re.search(rf'<section[^>]*\bid="{slot}"[^>]*\bdata-status="ready"', source), (name, slot)
+    for path in [*HTML_FILES, *JS_FILES, STATIC / "app.css"]:
+        source = path.read_text(encoding="utf-8")
+        assert 'data-status="pending"' not in source and "準備中" not in source, path.name
+    for path in HTML_FILES:  # どのページのナビゲーションにも、「段階開示・開示台帳」「推定区間メーター」の本物のリンクがある
+        source = path.read_text(encoding="utf-8")
+        assert '<a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>' in source, path.name
+        assert '<a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>' in source, path.name
+
+
+# 設計書が求める、画面の言葉(§6.2・§7・§8.3)。どれかが消えたら、確かめ直す。
+SCREEN_TEXT = [
+    ("attack.html", meter_api.NOTE),  # 「金庫の答えをすべて見られたとしても、ここまで」
+    ("attack.html", "シミュレーション(防御なしの場合の計算。金庫は使っていません)"),
+    ("meter.js", "これ以上は絞れません"),
+    ("stages.js", "架空の求人(自動応答)"),
+    ("stages.js", "ここで連絡先が開示されます"),
+    ("stages.js", "氏名・勤務先・連絡先など、個人が特定できることは書かない"),
+    ("panels.js", "最悪漏れてもここまで"),
+    ("panels.js", "まだ隠しているもの"),
+    ("panels.js", "辞めた理由(面談時に破棄済み)"),
+    ("panels.js", "軸どうしの組み合わせ"),  # 軸ごとに分けて見せるので、組み合わせの情報は落ちている、の 1 文
+]
+
+
+@pytest.mark.parametrize(("name", "phrase"), SCREEN_TEXT)
+def test_the_screens_say_what_the_design_asks_them_to_say(name, phrase):
+    assert phrase in (STATIC / name).read_text(encoding="utf-8")
+
+
+def js_numbers(name: str, constant: str) -> dict[str, int]:
+    """JS の `export const CONSTANT = { low: 300, high: 1500, step: 50 };` の中身を、dict にする。"""
+    source = (STATIC / name).read_text(encoding="utf-8")
+    body = re.search(rf"export const {constant} = \{{([^}}]*)\}}", source)
+    assert body is not None, (name, constant)
+    return {key: int(value) for key, value in re.findall(r"(\w+):\s*(\d+)", body.group(1))}
+
+
+def js_keys(name: str, constant: str) -> set[str]:
+    """JS の `const CONSTANT = { key: "...", ... };` の、キーの集合。"""
+    source = (STATIC / name).read_text(encoding="utf-8")
+    body = re.search(rf"const {constant} = \{{(.*?)\n?\}};", source, flags=re.DOTALL)
+    assert body is not None, (name, constant)
+    return set(re.findall(r"""(?:^|[\s,{])(\w+):\s*["']""", body.group(1)))
+
+
+def test_the_constants_the_screens_copy_are_the_servers_values():
+    grid = AXES["salary"].grid
+    assert js_numbers("meter.js", "SALARY_GRID") == {"low": grid[0], "high": grid[-1], "step": grid[1] - grid[0]}
+    assert len({b - a for a, b in zip(grid, grid[1:])}) == 1  # グリッドは等間隔(画面は、位置を値から計算する)
+    assert js_numbers("meter.js", "SIMULATION_RANGE") == {
+        "low": meter_api.SIMULATION_LOW,
+        "high": meter_api.SIMULATION_HIGH,
+        "step": meter_api.SIMULATION_STEP,
+    }
+    assert f"export const MAX_NEGOTIATION_IDS = {meter_api.MAX_NEGOTIATION_IDS};" in (STATIC / "meter.js").read_text(encoding="utf-8")
+    assert f"export const JOB_SUMMARY_MAX_CHARS = {DEFAULT_STAGES_CONFIG.job_summary_max_chars};" in (STATIC / "stages.js").read_text(encoding="utf-8")
+    assert js_keys("stages.js", "ITEM_LABELS") == set(get_args(Item))  # 段階開示で見せるものの種類
+    assert js_keys("ledger.js", "OPERATOR_LABELS") == set(get_args(LedgerOperator))  # 台帳の、操作した主体
+    assert js_keys("ledger.js", "RECIPIENT_LABELS") == set(get_args(LedgerRecipient))  # 台帳の、見せた相手
 
 
 @pytest.mark.parametrize(("route", "filename"), list(PAGES.items()))
@@ -993,22 +1109,29 @@ async def test_the_demo_stream_does_not_use_or_extend_the_principal_session(fast
 CHECKLIST = ROOT / "tests" / "manual" / "ui_checklist.md"
 
 
-def test_the_manual_checklist_covers_every_page_and_says_what_the_next_package_adds():
-    text = CHECKLIST.read_text(encoding="utf-8")
-    sections = re.findall(r"^## (.+)$", text, flags=re.MULTILINE)
+def test_the_manual_checklist_covers_every_page_and_every_part_of_the_second_package():
+    source = CHECKLIST.read_text(encoding="utf-8")
+    sections = re.findall(r"^## (.+)$", source, flags=re.MULTILINE)
 
-    for heading in ("共通の確認", "入口 `/`", "面談 `/interview`", "自分の交渉 `/me`", "デモ `/demo`", "攻撃の実演 `/attack`", "L2 で足す確認"):
+    for heading in (
+        "準備", "共通の確認", "入口 `/`", "面談 `/interview`", "自分の交渉 `/me`", "デモ `/demo`", "攻撃の実演 `/attack`",
+        "既知の限界", "自動で確かめていること",
+    ):  # fmt: skip
         assert any(section.startswith(heading) for section in sections), heading
-    # 段階開示・開示台帳・FR-39 の 2 パネル・メーター・シミュレーションは、L2 で足す(いまは「準備中」の区画があることだけを確かめる)
-    assert text.count("L2 で足す") >= 5
+    # 確認の行に、「あとで足す」の印を残さない。段階開示・開示台帳・FR-39 の 2 パネル・メーター・シミュレーションの区画が、どれも書いてある
+    assert "L2 で足す" not in source and "準備中" not in source
     for slot in ("#slot-stages", "#slot-ledger", "#slot-fr39", "#slot-meter", "#slot-simulation"):
-        assert slot in text, slot
+        assert slot in source, slot
     # 確認の表は、すべて「操作」と「合格」の 2 列
-    headers = [line for line in text.splitlines() if line.startswith("| 操作")]
+    headers = [line for line in source.splitlines() if line.startswith("| 操作")]
     assert len(headers) == 6 and set(headers) == {"| 操作 | 合格 |"}
-    # 活動ログ・2 つのパネルの並列表示・一時停止・取消(AC-19)を、画面で確かめる行がある
-    for required in ("活動ログ", "並んで", "一時停止", "取消"):
-        assert required in text, required
+    # AC-19(活動ログ・開示台帳の閲覧、2 つのパネルの並列表示、一時停止・取消)と、後半の要点を、画面で確かめる行がある
+    for required in (
+        "活動ログ", "並んで", "一時停止", "取消", "開示台帳", "段階開示", "ここで連絡先が開示されます", "架空の求人(自動応答)",
+        "金庫の答えをすべて見られたとしても、ここまで", "シミュレーション(防御なしの場合の計算。金庫は使っていません)", "台本の攻撃者で実演",
+        "最悪漏れてもここまで", "まだ隠しているもの", "scripts/serve_local.py",
+    ):  # fmt: skip
+        assert required in source, required
 
 
 # ----------------------------------------------------------------------
@@ -1104,3 +1227,462 @@ def test_the_activity_watcher_of_the_screens_streams_falls_back_to_polling_and_s
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert result.stdout.split() == ["ok", "sse", "ok", "problem", "ok", "polling"]
+
+
+# ----------------------------------------------------------------------
+# 区画の描画と振る舞い(L2): node があれば、偽の DOM で動かして確かめる。サンプルのデータは、実際の API のモデルから作る
+# ----------------------------------------------------------------------
+
+
+def screen_fixtures() -> dict:
+    """描画のテストに渡す、サンプルのデータ(StageView・LedgerEntry・build_panels・build_meter・simulate_bisection が返す形)。"""
+    package = sample_package(salary=700, remote_days=2, night_duty=2, review_months=6)
+    result = NegotiationResult(likelihood="high", package=package)
+    summary = "業務システムの開発と運用に約 7 年従事。顧客との調整を担当した(確認用)。"
+    both, only_employer, neither = (
+        SideFlagsView(candidate=True, employer=True),
+        SideFlagsView(candidate=False, employer=True),
+        SideFlagsView(candidate=False, employer=False),
+    )
+
+    def stage_view(visible=("likelihood", "package"), **changes) -> dict:
+        values = dict(
+            nid="0123456789abcdef",
+            judged=True,
+            agreed=True,
+            stage=0,
+            result=result,
+            meet=only_employer,
+            approve=neither,
+            employer_fictional=True,
+            employer_auto_response=True,
+            company=CompanyView(confidential=False, name="株式会社サンプルシステムズ(架空)"),
+        )
+        disclosure = dict(visible=list(visible), likelihood="high", package=package)
+        disclosure.update(changes.pop("disclosure", {}))
+        values.update(changes)
+        return StageView(**values, disclosed_to_employer=EmployerDisclosure(**disclosure)).model_dump(mode="json")
+
+    with_summary = ("likelihood", "package", "job_summary")
+    with_contact = (*with_summary, "name", "email")
+    views = {
+        "running": stage_view(visible=(), judged=False, agreed=False, result=None, meet=neither, disclosure=dict(likelihood=None, package=None)),
+        "none": stage_view(
+            visible=("likelihood",),
+            agreed=False,
+            result=NegotiationResult(likelihood="none", package=None),
+            meet=neither,
+            disclosure=dict(likelihood="none", package=None),
+        ),
+        "open": stage_view(),
+        "confidential": stage_view(company=CompanyView(confidential=True, name=None)),
+        "no_auto_response": stage_view(employer_auto_response=False, meet=neither),
+        "stage1": stage_view(
+            visible=with_summary, stage=1, meet=both, approve=only_employer, disclosure=dict(job_summary=summary)
+        ),
+        "stage2_simulated": stage_view(
+            visible=with_contact, stage=2, meet=both, approve=both, disclosure=dict(job_summary=summary, simulated=True)
+        ),
+        "stage2_demo": stage_view(
+            visible=with_contact,
+            stage=2,
+            meet=both,
+            approve=both,
+            disclosure=dict(job_summary=summary, name="架空 花子", email="hanako.kako@example.com"),
+        ),
+    }
+
+    def at(minute: int) -> dt.datetime:
+        return dt.datetime(2026, 10, 4, 3, minute, tzinfo=dt.timezone.utc)
+
+    def row(action, stage, operator, minute, **fields) -> dict:
+        return LedgerEntry(nid="n1", action=action, stage=stage, operator=operator, at=at(minute), **fields).model_dump(mode="json")
+
+    ledger = [
+        row("disclose", 0, "system", 1, items=["likelihood", "package"], to="both"),
+        row("meet", 0, "fictional_employer", 1),
+        row("meet", 0, "principal", 2),
+        row("disclose", 1, "principal", 2, items=["job_summary"], to="employer"),
+        row("approve", 1, "fictional_employer", 2),
+        row("approve", 1, "principal", 3),
+        row("disclose", 2, "principal", 3, items=["name", "email"], to="employer", simulated=True),
+    ]
+    answers = [
+        ActivityEntry(seq=3, actor="self", action="principal_answer", package=package, own_evaluation="acceptable", answer="accept").model_dump(mode="json")
+    ]
+
+    def anchor(**values) -> Anchor:
+        base = dict(salary=650, remote_days=2, night_duty=8, review_months=12, training="*", side_job="*", start="*")
+        return Anchor(**{**base, **values})
+
+    policy = Policy(
+        side="candidate",
+        accept_anchors=[anchor()],
+        reject_anchors=[anchor(salary=400, remote_days=0, night_duty=0)],
+    )  # 当直の軸を外した本人(受ける・受けないの当直の値は、軸について中立)
+    panels = build_panels(PolicyView(policy=policy, removed_axes=["night_duty"])).model_dump(mode="json")
+
+    def offer(seq: int, salary: int, verdict: str) -> EventViewItem:
+        return EventViewItem(seq=seq, kind="offer_received", package=probe_package(salary), own_evaluation=verdict)
+
+    probes = [offer(1, 900, "acceptable"), offer(2, 550, "not_acceptable"), offer(3, 700, "acceptable"), offer(4, 600, "not_acceptable"), offer(5, 650, "acceptable")]
+    steps = meter_api.simulate_bisection(620)
+    grid = AXES["salary"].grid
+    return {
+        "views": views,
+        "summary": summary,
+        "ledger": ledger,
+        "answers": answers,
+        "panels": panels,
+        "meter_one": meter_api.build_meter([probes]).model_dump(mode="json"),
+        "meter_wide": meter_api.build_meter([probes[:1]]).model_dump(mode="json"),
+        "meter_empty": meter_api.build_meter([]).model_dump(mode="json"),
+        "simulation": meter_api.SimulationResponse(
+            simulation=True,
+            value=620,
+            candidates={"low": meter_api.SIMULATION_LOW, "high": meter_api.SIMULATION_HIGH, "step": meter_api.SIMULATION_STEP},
+            steps=steps,
+            count=len(steps),
+            found=steps[-1].low,
+            note=meter_api.SIMULATION_NOTE,
+        ).model_dump(mode="json"),
+        # 区間 (lower, upper] と、そのマスの数(Interval.cells)のすべての組(画面の帯の描き方が、API の数え方と合うこと)
+        "intervals": [
+            [lower, upper, Interval(lower, upper).cells]
+            for lower in (None, *grid)
+            for upper in (None, *grid)
+            if lower is None or upper is None or lower < upper
+        ],
+    }
+
+
+SCREENS_SCRIPT = r"""
+import assert from "node:assert/strict";
+import { ApiError } from "__API__";
+import { mountStages } from "__STAGES__";
+import { groupRecords, mountLedger } from "__LEDGER__";
+import { cellText, mountPanels } from "__PANELS__";
+import { cellRange, describeInterval, mountMeter, mountSimulation } from "__METER__";
+
+const DATA = __DATA__;
+const NID = DATA.views.open.nid; // 段階開示のサンプルの交渉 ID(サーバーが返す StageView の nid)
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ---- 偽の DOM(画面の部品 h() が使う分だけ) ----
+class FakeNode {}
+class FakeText extends FakeNode {
+  constructor(text) { super(); this.data = String(text); }
+  get textContent() { return this.data; }
+}
+class FakeElement extends FakeNode {
+  constructor(tag) {
+    super();
+    Object.assign(this, { tag, children: [], attributes: {}, className: "", listeners: {}, dataset: {}, value: "", disabled: false, hidden: false });
+  }
+  appendChild(child) { this.children.push(child); return child; }
+  replaceChildren() { this.children = []; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
+  removeAttribute(name) { delete this.attributes[name]; }
+  addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); }
+  after() {}
+  emit(type) { for (const listener of this.listeners[type] ?? []) listener({ currentTarget: this }); }
+  click() { this.emit("click"); }
+  get textContent() { return this.children.map((child) => child.textContent).join(""); }
+  set textContent(value) { this.children = [new FakeText(value)]; }
+}
+const documentListeners = {};
+globalThis.Node = FakeNode;
+globalThis.CustomEvent = class { constructor(type, init = {}) { this.type = type; this.detail = init.detail; } };
+globalThis.document = {
+  createElement: (tag) => new FakeElement(tag),
+  createTextNode: (value) => new FakeText(value),
+  addEventListener: (type, listener) => (documentListeners[type] ??= []).push(listener),
+  dispatchEvent: (event) => (documentListeners[event.type] ?? []).forEach((listener) => listener(event)),
+};
+const confirms = [];
+let confirmAnswer = true;
+globalThis.window = { confirm: (message) => { confirms.push(message); return confirmAnswer; } };
+
+const fire = (type, detail) => document.dispatchEvent(new CustomEvent(type, { detail }));
+const resetListeners = () => Object.keys(documentListeners).forEach((type) => delete documentListeners[type]);
+const walk = (node, visit) => { visit(node); (node.children ?? []).forEach((child) => walk(child, visit)); };
+const find = (root, predicate) => { const found = []; walk(root, (node) => { if (predicate(node)) found.push(node); }); return found; };
+const byTag = (root, tag) => find(root, (node) => node.tag === tag);
+const byClass = (root, name) => find(root, (node) => (node.className || "").split(/\s+/).includes(name));
+const buttonOf = (root, label) => find(root, (node) => node.tag === "button" && node.textContent === label)[0];
+const text = (root) => root.textContent;
+const mounted = () => ({ body: new FakeElement("div"), error: new FakeElement("div") });
+const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(shown.includes(phrase), `missing: ${phrase}`));
+
+{ // 段階開示(本人): 段 0 → 「会う」(職務要約。送ったらフォームが消える)→ 「承認」(確認のダイアログ。段 2 は模擬表示)
+  resetListeners();
+  const { body, error } = mounted();
+  const calls = [];
+  let view = DATA.views.open;
+  mountStages({ body, error }, {
+    mode: "own",
+    emptyText: "左の一覧から、交渉を選んでください。",
+    loadStage: async (nid) => { calls.push(["load", nid]); return view; },
+    meet: async (nid, summary) => { calls.push(["meet", nid, summary]); view = DATA.views.stage1; return view; },
+    approve: async (nid) => { calls.push(["approve", nid]); view = DATA.views.stage2_simulated; return view; },
+    onChange: () => calls.push(["changed"]),
+  });
+  assert.ok(text(body).includes("左の一覧から、交渉を選んでください。"));
+  fire("negotiation:selected", { nid: NID });
+  await wait(30);
+  includesAll(text(body), ["株式会社サンプルシステムズ(架空)", "架空の求人(自動応答)", "段 0: 見込みと組み合わせ", "段 1: 匿名職務要約(会う)",
+    "段 2: 氏名と連絡先(承認)", "氏名・勤務先・連絡先など、個人が特定できることは書かない", "段 1 が開いてから、承認できます。"]);
+  const [summaryField] = byTag(body, "textarea");
+  assert.equal(summaryField.getAttribute("maxlength"), "400");
+  const meet = buttonOf(body, "会う");
+  assert.equal(meet.disabled, true); // 空のままでは押せない
+  summaryField.value = "  業務システムの開発(確認用)  ";
+  summaryField.emit("input");
+  assert.equal(meet.disabled, false);
+  meet.click();
+  await wait(30);
+  assert.deepEqual(calls.filter((call) => call[0] === "meet"), [["meet", NID, "業務システムの開発(確認用)"]]); // 前後の空白を除いて送る
+  assert.equal(byTag(body, "textarea").length, 0); // 送ったら、フォームは消える
+  includesAll(text(body), ["求人側に見えている職務要約", DATA.summary]);
+  confirmAnswer = false;
+  buttonOf(body, "承認する").click();
+  await wait(30);
+  assert.equal(calls.filter((call) => call[0] === "approve").length, 0); // 確認で断れば、押さない
+  assert.ok(confirms.length === 1 && confirms[0].includes("模擬表示"));
+  confirmAnswer = true;
+  buttonOf(body, "承認する").click();
+  await wait(30);
+  assert.deepEqual(calls.filter((call) => call[0] === "approve"), [["approve", NID]]);
+  includesAll(text(body), ["ここで連絡先が開示されます", "模擬表示です"]);
+  assert.ok(!text(body).includes("hanako"));
+  assert.ok(calls.filter((call) => call[0] === "changed").length >= 3); // 読み込む・会う・承認するたびに、台帳へ知らせる
+  console.log("ok stages-own");
+}
+
+{ // 段階開示(デモ): 架空の候補者・求人は自動。押す口はなく、フィクスチャの架空の連絡先が出る
+  resetListeners();
+  const { body, error } = mounted();
+  mountStages({ body, error }, { mode: "demo", emptyText: "ライブで実行してください", loadStage: async () => DATA.views.stage2_demo });
+  fire("negotiation:selected", { nid: "n1" });
+  await wait(30);
+  includesAll(text(body), ["架空の候補者", "氏名: 架空 花子", "hanako.kako@example.com", "フィクスチャの架空のもの"]);
+  assert.equal(byTag(body, "button").length + byTag(body, "textarea").length, 0);
+  // 段 0 の状態で、「会う」を誰が押すか: 求人側にも自動応答がある(ケース 1・2)・求人側に自動応答がない(ケース 3。求人側は押されない)
+  for (const [view, phrase, other] of [
+    [DATA.views.open, "架空の候補者・架空の求人が、フィクスチャの設定で、自動で押します", "求人側には自動応答がないので、押されません"],
+    [DATA.views.no_auto_response, "求人側には自動応答がないので、押されません", "架空の候補者・架空の求人が、フィクスチャの設定で、自動で押します"],
+  ]) {
+    resetListeners();
+    const demo = mounted();
+    mountStages(demo, { mode: "demo", emptyText: "-", loadStage: async () => view });
+    fire("negotiation:selected", { nid: "n1" });
+    await wait(30);
+    assert.ok(text(demo.body).includes(phrase) && !text(demo.body).includes(other), phrase);
+    assert.equal(byTag(demo.body, "button").length + byTag(demo.body, "textarea").length, 0);
+  }
+  console.log("ok stages-demo");
+}
+
+{ // 段階開示の状態ごとの表示・失敗・古い読み込みの捨て方・交渉が終わったときの読み直し
+  const cases = [
+    ["running", ["まだ終わっていません"], 0],
+    ["none", ["合意できる組み合わせがなかったので", "段 1 以降には進めません"], 0],
+    ["confidential", ["非公開求人(会うと決めた後に企業名を開示)"], 1],
+    ["no_auto_response", ["自動応答がなく"], 1],
+  ];
+  for (const [name, phrases, lists] of cases) {
+    resetListeners();
+    const { body, error } = mounted();
+    mountStages({ body, error }, { mode: "own", emptyText: "-", loadStage: async () => DATA.views[name] });
+    fire("negotiation:selected", { nid: "n1" });
+    await wait(30);
+    includesAll(text(body), phrases);
+    assert.equal(byClass(body, "stage-list").length, lists, name);
+  }
+  resetListeners();
+  let { body, error } = mounted();
+  mountStages({ body, error }, { mode: "own", emptyText: "-", loadStage: async () => { throw new ApiError(403, "forbidden", null); } });
+  fire("negotiation:selected", { nid: "n1" });
+  await wait(30);
+  assert.ok(text(error).includes("許可されていません") && text(body) === "");
+
+  resetListeners();
+  ({ body, error } = mounted());
+  let release;
+  const slow = new Promise((resolve) => { release = resolve; });
+  const loads = [];
+  mountStages({ body, error }, { mode: "own", emptyText: "空です", loadStage: async (nid) => { loads.push(nid); await slow; return DATA.views.open; } });
+  fire("negotiation:selected", { nid: "n1" });
+  fire("negotiation:cleared");
+  release();
+  await wait(30);
+  assert.equal(text(body), "空です"); // 消した後に届いた古い結果は、表示しない
+  fire("negotiation:selected", { nid: "n2" });
+  await wait(30);
+  fire("negotiation:ended", { nid: "other" });
+  fire("negotiation:ended", { nid: "n2" });
+  await wait(30);
+  assert.deepEqual(loads, ["n1", "n2", "n2"]); // 選んでいる交渉が終わったときだけ、読み直す
+  console.log("ok stages-states");
+}
+
+{ // 開示台帳: 交渉ごと(始めた順)に、途中確認の回答(時刻なし)を台帳の行より先に。終わった交渉の回答は、読み直さない
+  resetListeners();
+  const { body, error } = mounted();
+  const known = [
+    { nid: "n2", title: "進行中の交渉", createdAt: "2026-10-04T04:00:00Z", ended: false },
+    { nid: "n1", title: "インフラエンジニア", createdAt: "2026-10-04T03:00:00Z", ended: true },
+    { nid: "n0", title: "記録のない交渉", createdAt: "2026-10-03T03:00:00Z", ended: true },
+  ];
+  const loaded = [];
+  const ledger = mountLedger({ body, error }, {
+    loadLedger: async () => DATA.ledger,
+    loadAnswers: async (nid) => { loaded.push(nid); return nid === "n1" ? DATA.answers : []; },
+    negotiations: () => known,
+  });
+  await wait(30);
+  const shown = text(body);
+  includesAll(shown, ["インフラエンジニア", "段 0 が開きました: 見込み・組み合わせを、双方に表示", "段 1 が開きました: 匿名職務要約を、求人側に表示",
+    "段 2 が開きました: 氏名・連絡先(メール)を、求人側に表示(模擬表示。連絡先は集めていないので、実際には渡っていません)",
+    "「会う」が押されました", "「承認」が押されました", "架空の求人の自動応答", "あなたの操作", "システム(自動)", "途中確認に答えました", "→ 受ける"]);
+  assert.ok(shown.indexOf("途中確認に答えました") < shown.indexOf("段 0 が開きました")); // 回答は、その交渉の台帳の行より先
+  assert.ok(!shown.includes("記録のない交渉") && !shown.includes("進行中の交渉")); // 記録のない交渉は出さない
+  assert.ok(!shown.includes(DATA.summary)); // 職務要約の本文は、台帳に出ない
+  await ledger.refresh();
+  assert.equal(loaded.filter((nid) => nid === "n1").length, 1); // 終わった交渉の回答は、覚えている
+  assert.equal(loaded.filter((nid) => nid === "n2").length, 2); // 終わっていない交渉は、読み直す
+  assert.equal(groupRecords([], [{ ...DATA.ledger[0], nid: "zz" }], new Map())[0].title, "(一覧にない交渉)");
+  fire("negotiation:cleared");
+  assert.ok(text(body).includes("まだ記録がありません"));
+  console.log("ok ledger");
+}
+
+{ // 並べて見る画面(FR-39): cells が 0 の軸は出さない。外した軸は右のパネルに。生の値はどこにもない
+  resetListeners();
+  let { body, error } = mounted();
+  mountPanels({ body, error }, { load: async () => DATA.panels });
+  await wait(30);
+  includesAll(text(body), ["最悪漏れてもここまで", "まだ隠しているもの", "400〜450 万円", "600〜650 万円", "週 2 日", "当直の条件(外しています)",
+    "正確な最低年収(400〜450 万円・600〜650 万円のマスの中のどこか)", "辞めた理由(面談時に破棄済み)", "軸どうしの組み合わせ"]);
+  assert.deepEqual(byClass(body, "axis-name").map(text), ["年収", "リモート", "昇給見直し"]);
+  assert.ok(!text(body).includes("620") && !text(body).includes("410"));
+  assert.equal(cellText("salary", { low: 600, high: 650 }), "600〜650 万円");
+  assert.equal(cellText("remote_days", { low: 2, high: 2 }), "週 2 日");
+  assert.equal(cellText("training", { value: "available" }), "あり");
+  resetListeners();
+  ({ body, error } = mounted());
+  mountPanels({ body, error }, { load: async () => { throw new ApiError(404, "not_found", null); } });
+  await wait(30);
+  assert.ok(text(error).includes("まだ、条件が保存されていません"));
+  console.log("ok panels");
+}
+
+{ // メーターの帯: 区間 (lower, upper] の描き方が、API のマスの数(Interval.cells)と合う
+  for (const [lower, upper, cells] of DATA.intervals) {
+    const [first, last] = cellRange({ lower, upper });
+    assert.equal(last - first + 1, cells, `${lower} ${upper}`);
+    assert.ok(first >= 0 && last <= 25);
+  }
+  assert.equal(describeInterval({ lower: 600, upper: 650 }), "600 万円より上、650 万円以下");
+  assert.equal(describeInterval({ lower: null, upper: 900 }), "900 万円以下");
+  assert.equal(describeInterval({ lower: 1450, upper: null }), "1450 万円より上");
+  console.log("ok meter-cells");
+}
+
+{ // 推定区間メーター: 計算を頼むのは、新しい提案が届いたとき(続けて届いたら 1 回)と、実演が終わったときだけ。失敗したら、押したときだけやり直す
+  resetListeners();
+  const { body, error } = mounted();
+  const requests = [];
+  let answer = { status: 200, data: DATA.meter_one };
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, method: init.method, body: init.body ?? null });
+    return { ok: answer.status < 400, status: answer.status, headers: { get: () => "application/json" }, json: async () => answer.data };
+  };
+  mountMeter({ body, error });
+  assert.ok(text(body).includes("まだ、金庫の答えがありません"));
+  fire("attack:negotiations", { nids: ["a", "b"], refresh: false });
+  await wait(450);
+  assert.equal(requests.length, 0); // 交渉の一覧が変わっただけでは、頼まない
+  for (let index = 0; index < 3; index += 1) fire("attack:offer");
+  await wait(450);
+  assert.equal(requests.length, 1); // 続けて届いた提案は、まとめて 1 回
+  assert.deepEqual([requests[0].method, requests[0].url, JSON.parse(requests[0].body)], ["POST", "/v1/demo/meter", { negotiation_ids: ["a", "b"] }]);
+  includesAll(text(body), ["金庫の答えをすべて見られたとしても、ここまで", "600 万円より上、650 万円以下", "これ以上は絞れません", "固定した条件"]);
+  const cells = byClass(body, "meter-cell");
+  const inRange = cells.filter((cell) => cell.className.split(/\s+/).includes("in-range"));
+  assert.equal(cells.length, 26);
+  assert.deepEqual([inRange.length, cells.indexOf(inRange[0])], [1, 7]); // 600 万円より上、650 万円以下の 1 マス
+  assert.deepEqual(byClass(body, "meter-tick").map(text), ["300", "600", "900", "1200", "1500"]);
+  fire("attack:negotiations", { nids: ["a", "b", "c"], refresh: true });
+  await wait(450);
+  assert.equal(requests.length, 2); // 二分探索の実演が終わったとき
+  const many = Array.from({ length: 25 }, (_, index) => `n${index}`);
+  fire("attack:negotiations", { nids: many, refresh: true });
+  await wait(450);
+  assert.deepEqual(JSON.parse(requests[2].body).negotiation_ids, many.slice(5)); // 21 件以上は、新しい方の 20 件
+  answer = { status: 200, data: DATA.meter_wide };
+  fire("attack:offer");
+  await wait(450);
+  assert.ok(text(body).includes("900 万円以下") && !text(body).includes("これ以上は絞れません")); // 1 つの提案だけなら、広い帯
+  assert.equal(byClass(body, "meter-cell").filter((cell) => cell.className.includes("in-range")).length, 13);
+  answer = { status: 429, data: { detail: { code: "rate_limited", entrance: "meter", scope: "client", limit: 60, window_seconds: 600, retry_after_seconds: 30 } } };
+  fire("attack:offer");
+  await wait(450);
+  assert.ok(text(error).includes("推定区間メーターの計算の回数が"));
+  const retry = buttonOf(error, "もう一度計算する");
+  assert.ok(retry);
+  const before = requests.length;
+  await wait(450);
+  assert.equal(requests.length, before); // 勝手には読み直さない
+  answer = { status: 200, data: DATA.meter_empty };
+  retry.click();
+  await wait(60);
+  assert.equal(requests.length, before + 1);
+  assert.ok(text(error) === "" && text(body).includes("まだ、金庫の答えがありません"));
+  console.log("ok meter");
+}
+
+{ // 防御なしのシミュレーション: 範囲外・10 万円刻みでない値は、通信せずに断る。表には 7 手
+  const value = new FakeElement("input");
+  const button = new FakeElement("button");
+  const error = new FakeElement("div");
+  const result = new FakeElement("div");
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push([url, init.method]);
+    return { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => DATA.simulation };
+  };
+  mountSimulation({ value, button, error, result });
+  value.value = "620";
+  button.click();
+  await wait(40);
+  assert.deepEqual(requests, [["/v1/demo/meter/simulation?value=620", "GET"]]);
+  includesAll(text(result), ["シミュレーション(防御なしの場合の計算。金庫は使っていません)", "7 手で、620 万円と特定されます", "900 万円以上ですか?", "620(特定)"]);
+  assert.equal(byTag(result, "tr").length, 1 + 7); // 見出しと 7 手
+  for (const bad of ["625", "1600", "290", "", "abc"]) { value.value = bad; button.click(); await wait(10); }
+  assert.equal(requests.length, 1);
+  assert.ok(text(error).includes("10 万円刻み"));
+  console.log("ok simulation");
+}
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_sections_render_the_apis_data_and_behave_as_designed():
+    # stages.js・ledger.js・panels.js・meter.js を、そのまま node で読み込み、偽の DOM に、実際の API のモデルから作ったデータを描く。
+    script = (
+        SCREENS_SCRIPT.replace("__API__", (STATIC / "api.js").as_uri())
+        .replace("__STAGES__", (STATIC / "stages.js").as_uri())
+        .replace("__LEDGER__", (STATIC / "ledger.js").as_uri())
+        .replace("__PANELS__", (STATIC / "panels.js").as_uri())
+        .replace("__METER__", (STATIC / "meter.js").as_uri())
+        .replace("__DATA__", json.dumps(screen_fixtures(), ensure_ascii=False))
+    )
+
+    result = subprocess.run([NODE, "--input-type=module", "-e", script], capture_output=True, text=True, timeout=120, check=False)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.stdout.split() == [
+        "ok", "stages-own", "ok", "stages-demo", "ok", "stages-states", "ok", "ledger", "ok", "panels", "ok", "meter-cells", "ok", "meter", "ok", "simulation",
+    ]  # fmt: skip

@@ -17,8 +17,8 @@
         <a href="/me">自分の交渉</a>
         <a href="/demo" aria-current="page">デモ</a>
         <a href="/attack">攻撃の実演</a>
-        <span class="soon" data-slot="nav-stages">段階開示・開示台帳(準備中)</span>
-        <span class="soon" data-slot="nav-meter">推定区間メーター(準備中)</span>
+        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
       </nav>
     </div>
   </header>
@@ -69,13 +69,28 @@
       </div>
     </section>
 
-    <section class="slot" id="slot-fr39" data-status="pending">
-      <h2>最悪漏れてもここまで / まだ隠しているもの</h2>
-      <p class="slot-note">架空人物の条件(フィクスチャの生の値)と、丸めた後のマスを並べる 2 つのパネルは、ここに入ります。</p>
+    <section class="card" id="slot-stages" data-status="ready" aria-labelledby="stages-title">
+      <h2 id="stages-title">段階開示</h2>
+      <p class="small muted">
+        ライブで実行した交渉が合意で終わると、架空の候補者と架空の求人(自動応答)が、「会う」「承認」を自動で押して、段 0 → 段 1 → 段 2 と進みます。
+        段が進むほど、求人側に見える情報が増えます。リプレイには、段階開示の状態はありません。
+      </p>
+      <div id="stages-error" aria-live="polite"></div>
+      <div id="stages-body"></div>
     </section>
-    <section class="slot" id="slot-stages" data-status="pending">
-      <h2>段階開示</h2>
-      <p class="slot-note">架空の求人(自動応答)との「会う」「承認」の様子は、ここに入ります。</p>
+
+    <section class="card" id="slot-fr39" data-status="ready" aria-labelledby="fr39-title">
+      <h2 id="fr39-title">最悪漏れてもここまで / まだ隠しているもの</h2>
+      <p>
+        本物の面談を受けると、あなた自身の条件について、この 2 つのパネルを並べて見られます(<a href="/me">自分の交渉</a>)。
+        金庫は、丸めた値でしか答えないので、「最悪漏れてもここまで」は、軸ごとの、丸めた後のマスです。「まだ隠しているもの」は、値そのものでなく、
+        種類と、どのマスの中かだけを示します。
+      </p>
+      <p class="small muted">
+        デモの架空人物は、生の条件をフィクスチャに持っています(デモ用に公開しているもの)が、その値を並べて見せる口は、まだありません。
+        代わりに、上の候補者側のパネルで、金庫が返した答え(自分側の評価)を見られます。攻撃者が、その答えをすべて見られたときに年収の境目がどこまで分かるかは、
+        <a href="/attack#slot-meter">推定区間メーター</a>で確かめられます。
+      </p>
     </section>
   </main>
 

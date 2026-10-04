@@ -4,11 +4,16 @@
  * - 一覧は金庫が返す項目だけ(交渉 ID・求人 ID・作成時刻・状態・最終結果)。求人の名前は GET /v1/jobs の公開情報から引く。
  * - 活動ログは SSE で追記し(つなげないときは 2 秒ごとの再取得)、途中確認の質問が出ていれば、答えるカードを出す(§4.4)。
  * - 管理(一時停止・再開・取消)は金庫の control に送る。取消の結果は「なし」になる。
- * - 段階開示・開示台帳・並べて見る画面は、次のパッケージ(L2)の区画(#slot-stages・#slot-ledger・#slot-fr39)。L2 は、交渉を選んだときに
- *   document に飛ぶ negotiation:selected({nid, jobId})と、データを消したときの negotiation:cleared を聞いて、その区画に描く。
+ * - 段階開示(stages.js)・開示台帳(ledger.js)・並べて見る画面(panels.js)の区画(#slot-stages・#slot-ledger・#slot-fr39)は、ここで動かす。
+ *   交渉を選んだとき(negotiation:selected {nid, jobId})・最終結果が届いたとき(negotiation:ended {nid})・データを消したとき
+ *   (negotiation:cleared)に、document へイベントを飛ばして、区画に知らせる。本人の API の経路は、ここに書いて、各モジュールへ渡す
+ *   (モジュールは、経路を知らない。デモの画面が、本物の依頼者の API を呼ばないため)。
  */
 
 import { call, newRequestId } from "./api.js";
+import { mountLedger } from "./ledger.js";
+import { mountPanels } from "./panels.js";
+import { mountStages } from "./stages.js";
 import {
   ActivityView,
   LIKELIHOOD_LABELS,
@@ -208,6 +213,9 @@ function onEntries(entries) {
   }
   renderQuestion();
   if (entries.some((entry) => ["pause", "resume", "final_result"].includes(entry.action))) loadList();
+  if (entries.some((entry) => entry.action === "final_result")) {
+    document.dispatchEvent(new CustomEvent("negotiation:ended", { detail: { nid: app.selected } }));
+  }
 }
 
 function select(nid) {
@@ -272,6 +280,39 @@ async function deleteData(button) {
   );
 }
 
+// ---- 段階開示・開示台帳・並べて見る画面(区画は、それぞれのモジュール) ----
+
+function mountSections() {
+  const ledger = mountLedger(
+    { body: el("ledger-body"), error: el("ledger-error") },
+    {
+      loadLedger: () => pv("GET /v1/principals/{pid}/ledger"),
+      // 途中確認の回答は、活動ログ(金庫のイベント列の自分の側の見え方)にある
+      loadAnswers: async (nid) =>
+        (await call("GET /v1/negotiations/{nid}/activity", { path: { nid } })).entries.filter((entry) => entry.action === "principal_answer"),
+      negotiations: () =>
+        app.negotiations.map((item) => ({
+          nid: item.nid,
+          title: app.jobsById.get(item.job_id)?.title ?? item.job_id,
+          createdAt: item.created_at,
+          ended: item.state === "ended",
+        })),
+    },
+  );
+  mountStages(
+    { body: el("stages-body"), error: el("stages-error") },
+    {
+      mode: "own",
+      loadStage: (nid) => call("GET /v1/negotiations/{nid}/stage", { path: { nid } }),
+      meet: (nid, jobSummary) => call("POST /v1/negotiations/{nid}/stage/meet", { path: { nid }, body: { job_summary: jobSummary } }),
+      approve: (nid) => call("POST /v1/negotiations/{nid}/stage/approve", { path: { nid } }),
+      onChange: ledger.refresh, // 段の状態を読む・変えるたびに、台帳が変わり得る
+      emptyText: "左の一覧から、交渉を選んでください。",
+    },
+  );
+  mountPanels({ body: el("fr39-body"), error: el("fr39-error") }, { load: () => pv("GET /v1/principals/{pid}/panels", { path: { pid: "me" } }) });
+}
+
 // ---- 起動と配線 ----
 
 async function init() {
@@ -307,6 +348,7 @@ async function init() {
   el("content").classList.remove("hidden");
   renderJobs();
   await loadList();
+  mountSections();
 }
 
 el("start-button").addEventListener("click", startNegotiation);

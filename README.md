@@ -91,6 +91,7 @@ uv run python scripts/run_demo.py --case 1 --replay   # 記録(fixtures/replays/
 uv run python scripts/run_demo.py --case 1 --live --runs 2 --judge   # 本物の Gemini(費用がかかる。GOOGLE_GENAI_USE_VERTEXAI・GOOGLE_CLOUD_PROJECT・GOOGLE_CLOUD_LOCATION が要る)
 uv run python scripts/replay_check.py                 # リプレイを 3 回再生して、イベント列のハッシュが一致することを確かめる
 uv run python scripts/canary_scan.py                  # 生の値のカナリアが、保存・ログ・メモリ・スパンのどこにも残らないことを確かめる
+uv run python scripts/serve_local.py                  # 画面(static/)を、手元のブラウザで確かめる開発用サーバ(http://127.0.0.1:8080。台本のエージェント・面談はスタブ。--live で本物の Gemini)
 - `bash scripts/check_no_web_storage.sh`: 画面（`static/`）がブラウザの保存領域に書かないことの静的な検査（AC-02）
 ```
 

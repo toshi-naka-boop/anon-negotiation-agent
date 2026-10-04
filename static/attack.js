@@ -2,26 +2,32 @@
  *
  * - 攻撃の指示(400 文字まで)を入れて、攻撃の交渉を作る。相手は架空の候補者のコピーに決まっている(選べない)。
  * - 自分が作った交渉の ID は、このページのメモリ(変数 attack)だけに持つ。訪問者を見分ける ID は作らず、ブラウザの保存領域にも書かない。
- *   メーター(次のパッケージ L2)には、一覧が変わるたびに document へ飛ぶ attack:negotiations({nids})で渡す。
+ *   メーター(meter.js)には、一覧が変わるたびに document へ飛ぶ attack:negotiations({nids, refresh})で渡す。新しい提案が候補者側に届いたとき
+ *   (SSE の「相手の提案」)は attack:offer を飛ばす。メーターが計算を頼むのは、この 2 つ(refresh が真のときと、attack:offer)だけ(ポーリングしない)。
  * - 壁 1: 生の A2A メッセージ(JSON)を、そのまま候補者側の受信口へ送り、止まった場所と理由を見る。
  * - 壁 2: 候補者側のエージェントの直近の手番で、LLM に渡った入力の全文と、その機械的な検査の結果。
  * - 壁 3: 攻撃者の提案ごとの、金庫の答え(丸め済みの 3 値だけ)。
  * - 攻撃側・候補者側のパネルは、デモと同じ(候補者側の見え方が金庫の答え。相手は架空人物なので見せてよい。§3.2)。
+ * - 二分探索の実演(FR-45。§8.3): ボタン 1 つで、台本の攻撃者(AI を呼ばない)をサーバー側で動かす(POST /v1/demo/attack/bisection)。作った交渉の ID は、
+ *   上の交渉の一覧に足して、メーターに渡す。推定区間メーター・防御なしのシミュレーションは meter.js。
  */
 
 import { ApiError, call, newRequestId } from "./api.js";
+import { describeInterval, mountMeter, mountSimulation } from "./meter.js";
 import {
   ActivityView,
   VERDICT_LABELS,
   clear,
   counterFor,
   h,
+  message,
   packageChips,
   replace,
   resultView,
   showError,
   showMessage,
   verdictBadge,
+  waiting,
   watchNegotiation,
   withBusy,
 } from "./ui.js";
@@ -40,13 +46,27 @@ const views = {
   }),
 };
 
-// この画面で作った攻撃の交渉の ID(メモリだけ)。wall3Timer は、壁 3 の更新を間引く札。
-const attack = { nids: [], selected: null, watchers: [], wall3Timer: null };
+// この画面で作った攻撃の交渉の ID(メモリだけ)。wall3Timer は、壁 3 の更新を間引く札。offerSeq は、交渉ごとに、候補者側に届いた
+// 提案のうち、メーターに知らせた最後の番号(選び直して、記録を読み直しても、新しい提案としては数えない)。scripted は、二分探索の実演で作った交渉
+// (台本は LLM を呼ばないので、壁 2 の記録がない)。bisectionRequestId は、枠が尽きて途中で止まった実演の request_id(次に押したときに、同じ
+// request_id で、できた交渉は作り直さずに、続きから進める)。
+const attack = { nids: [], selected: null, watchers: [], wall3Timer: null, offerSeq: new Map(), scripted: new Set(), bisectionRequestId: null };
 
 const DAILY_LIMIT_TEXT = "本日の上限に達しました。明日以降にもう一度お試しください。";
 
-function announce() {
-  document.dispatchEvent(new CustomEvent("attack:negotiations", { detail: { nids: [...attack.nids] } }));
+/** メーターに、交渉の ID の一覧を渡す。refresh が真なら、いまの一覧で区間を計算してもらう(二分探索の実演が終わったとき)。 */
+function announce(refresh = false) {
+  document.dispatchEvent(new CustomEvent("attack:negotiations", { detail: { nids: [...attack.nids], refresh } }));
+}
+
+/** 候補者側に、新しい提案(相手の提案)が届いたら、メーターに知らせる。 */
+function announceNewOffers(entries) {
+  const offers = entries.filter((entry) => entry.actor === "counterparty" && entry.action === "propose");
+  const last = Math.max(0, ...offers.map((entry) => entry.seq));
+  if (last > (attack.offerSeq.get(attack.selected) ?? 0)) {
+    attack.offerSeq.set(attack.selected, last);
+    document.dispatchEvent(new CustomEvent("attack:offer"));
+  }
 }
 
 function stopWatching() {
@@ -59,7 +79,10 @@ function stopWatching() {
 
 function onEntries(side, entries) {
   views[side].add(entries);
-  if (side === "candidate") scheduleWall3();
+  if (side === "candidate") {
+    scheduleWall3();
+    announceNewOffers(entries);
+  }
   const final = entries.find((entry) => entry.action === "final_result");
   if (final) {
     replace(el("attack-result"), resultView(final.result));
@@ -141,6 +164,46 @@ async function replaceInstruction() {
       showMessage(el("replace-message"), "ok", "指示を置き換えました。次の手番から効きます。");
     },
     (error) => showError(el("replace-message"), error),
+  );
+}
+
+// ---- 二分探索の実演(FR-45。台本の攻撃者。AI は呼ばない) ----
+
+/** 二分探索の実演の結果を、1 つの文にする。stopped_reason が rate_limited なら、回数の上限に達して、途中で止めたこと。 */
+function describeBisection(result) {
+  const count = result.negotiation_ids.length;
+  const interval = result.interval;
+  const reached = interval === null ? "" : `候補者の年収の境目を「${describeInterval(interval)}」(${interval.cells} マス)まで絞りました。`;
+  if (result.stopped_reason === "rate_limited") {
+    return `交渉 ${count} 件を作ったところで、回数の上限に達したので、止めました。${reached}しばらくしてから、もう一度押すと、この続きから進みます(できた交渉は、作り直しません)。`;
+  }
+  if (interval === null) return `交渉 ${count} 件で終わりましたが、攻撃者の提案が届きませんでした。`;
+  return `交渉 ${count} 件で、${reached}${interval.cells === 1 ? "これ以上は絞れません。" : "交渉 3 件で止めました(区間は、まだ広いままです)。"}`;
+}
+
+async function runBisection() {
+  await withBusy(
+    el("bisection-button"),
+    async () => {
+      showMessage(el("bisection-message"), null);
+      replace(el("bisection-status"), waiting("台本の攻撃者が、交渉を作って、年収を二分探索しています(交渉 3 件まで。数秒〜数十秒かかります)…"));
+      const requestId = attack.bisectionRequestId ?? newRequestId();
+      const result = await call("POST /v1/demo/attack/bisection", { body: { request_id: requestId } });
+      attack.bisectionRequestId = result.stopped_reason ? requestId : null;
+      clear(el("bisection-status"));
+      for (const nid of result.negotiation_ids) {
+        attack.scripted.add(nid);
+        if (!attack.nids.includes(nid)) attack.nids.push(nid);
+      }
+      renderSelect();
+      announce(true); // 提案はすべて届いている: メーターに、いまの一覧で区間を計算してもらう
+      select(result.negotiation_ids[result.negotiation_ids.length - 1]);
+      showMessage(el("bisection-message"), result.stopped_reason ? "warn" : "ok", describeBisection(result));
+    },
+    (error) => {
+      clear(el("bisection-status"));
+      showError(el("bisection-message"), error, { daily_limit_reached: DAILY_LIMIT_TEXT });
+    },
   );
 }
 
@@ -280,6 +343,11 @@ function renderWall2(report) {
 async function refreshWall2({ quiet = false } = {}) {
   const nid = attack.selected;
   if (!nid) return;
+  if (attack.scripted.has(nid)) {
+    showMessage(el("wall2-error"), null);
+    replace(el("wall2-result"), message("info", "この交渉は、二分探索の実演(台本の攻撃者・候補者)で作りました。台本は LLM を呼ばないので、LLM に渡った入力はありません。"));
+    return;
+  }
   try {
     const report = await call("GET /v1/demo/attack/walls/2/{nid}", { path: { nid } });
     if (nid !== attack.selected) return;
@@ -339,6 +407,7 @@ function scheduleWall3() {
 // ---- 配線 ----
 
 el("create-button").addEventListener("click", createAttack);
+el("bisection-button").addEventListener("click", runBisection);
 el("replace-button").addEventListener("click", replaceInstruction);
 el("attack-select").addEventListener("change", (event) => select(event.currentTarget.value));
 el("wall1-send").addEventListener("click", sendWall1);
@@ -348,5 +417,7 @@ el("wall2-button").addEventListener("click", () => refreshWall2());
 el("wall3-button").addEventListener("click", () => refreshWall3());
 el("instruction").after(counterFor(el("instruction")));
 el("new-instruction").after(counterFor(el("new-instruction")));
+mountMeter({ body: el("meter-body"), error: el("meter-error") });
+mountSimulation({ value: el("simulation-value"), button: el("simulation-button"), error: el("simulation-error"), result: el("simulation-result") });
 
 loadExample();

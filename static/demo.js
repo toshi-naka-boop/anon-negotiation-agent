@@ -4,10 +4,13 @@
  * - リプレイ: fixtures/replays/case{N}.jsonl を取り、記録した時刻の間隔のとおり(倍率で縮める)に流す。画面の上に「リプレイ」と明示する。
  *   記録は、金庫のイベント(その側の見え方)なので、活動ログの形(web.activity_api の _SHAPE)に直して出す(SHAPE は、その写し)。
  * - 架空人物の途中確認は、フィクスチャの条件で自動で答える。画面に「架空人物の自動回答」と示す(§4.4)。
- * - 「最悪漏れてもここまで」「まだ隠しているもの」(FR-39)・段階開示は、次のパッケージ(L2)の区画(#slot-fr39・#slot-stages)。
+ * - 段階開示(stages.js)の区画(#slot-stages)は、ここで動かす。ライブの交渉を作ったとき(negotiation:selected)・両側の最終結果が届いたとき
+ *   (negotiation:ended)・実行を切り替えたとき(negotiation:cleared)に、document へイベントを飛ばして、区画に知らせる。デモの経路(架空人物。
+ *   求人側も候補者側も自動応答)だけを呼ぶ。FR-39 の 2 パネル(#slot-fr39)は、デモの架空人物の生の値を見せる口がまだないので、説明だけ(HTML)。
  */
 
 import { call, newRequestId } from "./api.js";
+import { mountStages } from "./stages.js";
 import { ActivityView, clear, formatDateTime, h, replace, resultView, showError, showMessage, watchNegotiation, withBusy } from "./ui.js";
 
 const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4, 10];
@@ -70,6 +73,7 @@ function toEntry(event) {
 /** 1 つの実行(ライブまたはリプレイ)を始める前に、画面を空にして、見出しと帯を出す。 */
 function beginRun({ kind, title, bannerText }) {
   stopRunning();
+  document.dispatchEvent(new CustomEvent("negotiation:cleared")); // 表示していた交渉の段階開示の状態を、消す
   Object.values(views).forEach((view) => view.reset());
   clear(el("run-result"));
   showMessage(el("run-error"), null);
@@ -112,6 +116,7 @@ async function runLive(info) {
     });
     el("run-status").textContent = "交渉は進んでいます。記録が届くたびに追記します。";
     const path = { nid: created.nid };
+    document.dispatchEvent(new CustomEvent("negotiation:selected", { detail: { nid: created.nid, jobId: null } }));
     running.watchers.push(
       watchNegotiation({
         sides: ["candidate", "employer"],
@@ -121,6 +126,7 @@ async function runLive(info) {
         poll: ({ candidate, employer }) =>
           call("GET /v1/demo/negotiations/{nid}/panels", { path, query: { candidate_after_seq: candidate, employer_after_seq: employer } }),
         onEntries: addEntries,
+        onEnd: () => document.dispatchEvent(new CustomEvent("negotiation:ended", { detail: { nid: created.nid } })),
         onError: (error) => showError(el("run-error"), error),
       }),
     );
@@ -204,6 +210,14 @@ async function init() {
   replace(
     el("speed"),
     SPEEDS.map((value) => h("option", { value: String(value), selected: value === 1 }, `×${value}${value === 1 ? "(記録どおり)" : ""}`)),
+  );
+  mountStages(
+    { body: el("stages-body"), error: el("stages-error") },
+    {
+      mode: "demo",
+      loadStage: (nid) => call("GET /v1/demo/negotiations/{nid}/stage", { path: { nid } }),
+      emptyText: "ケースを「ライブで実行」すると、その交渉の段階開示の状態が、ここに出ます。リプレイには、段階開示の状態はありません。",
+    },
   );
   el("stop-button").addEventListener("click", () => {
     stopRunning();

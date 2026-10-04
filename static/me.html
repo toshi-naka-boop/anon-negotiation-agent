@@ -17,8 +17,8 @@
         <a href="/me" aria-current="page">自分の交渉</a>
         <a href="/demo">デモ</a>
         <a href="/attack">攻撃の実演</a>
-        <span class="soon" data-slot="nav-stages">段階開示・開示台帳(準備中)</span>
-        <span class="soon" data-slot="nav-meter">推定区間メーター(準備中)</span>
+        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
       </nav>
     </div>
   </header>
@@ -78,20 +78,36 @@
             </div>
           </section>
 
-          <section class="slot" id="slot-stages" data-status="pending">
-            <h2>段階開示</h2>
-            <p class="slot-note">匿名の職務要約・氏名と連絡先の開示(「会う」「承認」)の操作は、ここに入ります。</p>
+          <section class="card" id="slot-stages" data-status="ready" aria-labelledby="stages-title">
+            <h2 id="stages-title">段階開示</h2>
+            <p class="small muted">
+              交渉が合意で終わったときだけ、段 1(匿名職務要約)・段 2(氏名と連絡先)に進めます。段が進むほど、求人側に見える情報が増えます。
+              左の一覧で選んだ交渉の状態です。
+            </p>
+            <div id="stages-error" aria-live="polite"></div>
+            <div id="stages-body"></div>
           </section>
-          <section class="slot" id="slot-ledger" data-status="pending">
-            <h2>開示台帳</h2>
-            <p class="slot-note">段の遷移と、途中確認の回答の記録は、ここに並びます。</p>
-          </section>
-          <section class="slot" id="slot-fr39" data-status="pending">
-            <h2>並べて見る画面</h2>
-            <p class="slot-note">「最悪漏れてもここまで」と「まだ隠しているもの」の 2 つのパネルは、ここに入ります。</p>
+          <section class="card" id="slot-ledger" data-status="ready" aria-labelledby="ledger-title">
+            <h2 id="ledger-title">開示台帳</h2>
+            <p class="small muted">
+              段が開いた・「会う」「承認」が押された記録を、交渉ごとに、時系列で並べます。いつ・何を・誰に見せたかと、誰が操作したかの記録で、
+              職務要約の本文や連絡先の値は載せません。途中確認への回答は、活動ログの記録を、同じところに並べています。
+            </p>
+            <div id="ledger-error" aria-live="polite"></div>
+            <div id="ledger-body"></div>
           </section>
         </div>
       </div>
+
+      <section id="slot-fr39" data-status="ready" aria-labelledby="fr39-title">
+        <h2 id="fr39-title">並べて見る画面</h2>
+        <p class="small muted">
+          あなたが預けた条件について、「最悪漏れてもここまで」と「まだ隠しているもの」を、並べて見られます。開くたびに、金庫に預けた丸め済みの条件から作り直しています
+          (この画面にも、サーバーにも、生の値は残っていません)。
+        </p>
+        <div id="fr39-error" aria-live="polite"></div>
+        <div id="fr39-body" class="panels"></div>
+      </section>
 
       <section class="card" id="delete-card" aria-labelledby="delete-title">
         <h2 id="delete-title">データを消す</h2>

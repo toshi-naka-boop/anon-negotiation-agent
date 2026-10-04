@@ -8,6 +8,7 @@
 |---|---|---|
 | POST /v1/demo/attack/negotiations | 攻撃モードの交渉を作る。相手は架空人物(設定 [web.attack] のテンプレート)に決め打ち。本文は {request_id, instruction}。指示は 400 文字まで。web のメモリにだけ持つ | attack_create |
 | POST /v1/demo/attack/negotiations/{nid}/instruction | 動いている攻撃の交渉の指示を置き換える(攻撃の手。次の手番から効く)。本文は {instruction} | attack_instruction |
+| POST /v1/demo/attack/bisection | 二分探索の実演(FR-45。§8.3): 台本の攻撃者(LLM を呼ばない)が、攻撃の交渉を作って年収を二分探索する。交渉が終わったら次の交渉で続け、区間が 1 マスになるか交渉 3 件で止める。本文は {request_id}、応答は {negotiation_ids, interval, stopped_reason}(区間はメーター API と同じ計算)。web.attack.bisection | attack_create(交渉 1 件ごとに 1 回。1 件目は入口の依存が、2 件目以降は作る前に数える。入場の制限も、交渉 1 件ごと) |
 | GET /v1/demo/attack/negotiations/{nid}/events?side=&after_seq= | 攻撃の交渉のイベント。side は既定で employer(攻撃側の見え方)。candidate は架空の候補者側(金庫の答え。メーターの元) | なし |
 | GET /v1/demo/attack/walls/1/example | 壁 1 の初期値(生のメッセージの JSON) | なし |
 | POST /v1/demo/attack/walls/1 | 壁 1: 本文の JSON を、そのまま /a2a/candidate へ送る(32 KB まで)。金庫には登録しない | raw_message |
@@ -24,13 +25,14 @@
   (extra=forbid)。金庫も、攻撃モードの交渉は架空人物の候補者でしか作らない(作成の検証)。
 """
 
+import functools
 import json
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Annotated, Any, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from agents.instructions import load_instruction
 from negotiation_core import Side
@@ -44,9 +46,11 @@ from vault.api_models import (
 )
 from vault.models import NegotiationMode
 
+from web.attack.bisection import BisectionRefused, BisectionRunner, BisectionTimeout
 from web.attack.raw_message import describe_failure, describe_reply, describe_web_refusal, example_raw_message
 from web.attack.walls import llm_context_report, vault_answers_report
 from web.llm_budget import LlmBudgetUnavailable
+from web.meter_api import MeterInterval
 from web.vault_client import VaultNotFoundError
 
 if TYPE_CHECKING:  # web.services が web.attack を import するので、型のためだけに読む(循環を避ける)
@@ -75,6 +79,24 @@ class InstructionBody(StrictModel):
     """動いている攻撃の交渉の指示を置き換える。"""
 
     instruction: _INSTRUCTION
+
+
+class BisectionBody(StrictModel):
+    """二分探索の実演。request_id は画面が作る乱数(§3.5。再送で同じ結果を返す)。相手・台本・回数は、リクエストでは決められない(extra=forbid)。"""
+
+    request_id: _REQUEST_ID
+
+
+class BisectionResponse(BaseModel):
+    """二分探索の実演の結果: 作った攻撃の交渉の ID(作った順)と、候補者側の金庫の答えから作った年収の境目の区間(メーター API と同じ計算)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    negotiation_ids: list[str]
+    interval: MeterInterval | None  # 提案が 1 つも届かなかったときは null。cells が 1 なら、これ以上は絞れない
+    # 2 件目以降を作る前に、入口の枠(attack_create)か入場の制限が 429 になって、続きを作らずに止めたときだけ rate_limited(台帳 L19-8)。
+    # 区間が 1 マスになった・交渉が 3 件になったときは null。同じ request_id で呼び直すと、できた交渉は作り直さずに、続きから進む。
+    stopped_reason: Literal["rate_limited"] | None = None
 
 
 class _BodyTooLarge(Exception):
@@ -193,6 +215,29 @@ def build_attack_router(
             raise HTTPException(status_code=409, detail="negotiation_ended")
         attack.contexts.set_instruction(nid, body.instruction)
         return {"status": "ok"}
+
+    count_attack_create = limit("attack_create")
+    runner = BisectionRunner(services, admit_new_negotiation)
+
+    @router.post("/v1/demo/attack/bisection", response_model=BisectionResponse)
+    async def run_bisection(request: Request, _limit: None = Depends(count_attack_create)) -> BisectionResponse:
+        """二分探索の実演(FR-45。§8.3): 台本の攻撃者が、攻撃の交渉を作り、年収を二分探索して、交渉が終わったら次の交渉で続ける。
+
+        区間が 1 マスになるか、交渉が 3 件になったら止める。LLM は呼ばない(台本)ので、1 日の LLM の枠は減らさない。
+        1 回の呼び出しで交渉を最大 3 件作るので、入口の枠 attack_create と入場の制限は、**交渉 1 件ごと**に通す(台帳 L19-8): 1 件目の枠は、この入口の依存
+        (本文を読む前)が数え、2 件目以降は、作る前に数える。1 件目で断られたら 429(何も作っていない)。2 件目以降で 429 になったら、そこまでの交渉の ID と
+        区間に stopped_reason=rate_limited を付けて返す。交渉の作成は、ふつうの攻撃モードと同じく、設定の架空人物のテンプレートだけ。
+        """
+        body = await _read_model(request, BisectionBody, config.max_body_bytes)
+        try:
+            result = await runner.run(body.request_id, functools.partial(count_attack_create, request))
+        except BisectionRefused as refused:
+            raise HTTPException(status_code=409, detail=refused.reason) from None
+        except BisectionTimeout:
+            raise HTTPException(status_code=504, detail="bisection_timeout") from None
+        return BisectionResponse(
+            negotiation_ids=result.negotiation_ids, interval=result.interval, stopped_reason=result.stopped_reason
+        )
 
     @router.get("/v1/demo/attack/negotiations/{nid}/events", response_model=list[EventViewItem])
     async def attack_events(

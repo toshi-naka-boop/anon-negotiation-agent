@@ -17,8 +17,8 @@
         <a href="/me">自分の交渉</a>
         <a href="/demo">デモ</a>
         <a href="/attack" aria-current="page">攻撃の実演</a>
-        <span class="soon" data-slot="nav-stages">段階開示・開示台帳(準備中)</span>
-        <span class="soon" data-slot="nav-meter">推定区間メーター(準備中)</span>
+        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
       </nav>
     </div>
   </header>
@@ -127,13 +127,53 @@
       <div id="wall3-result"></div>
     </section>
 
-    <section class="slot" id="slot-meter" data-status="pending">
-      <h2>推定区間メーター(防御あり)</h2>
-      <p class="slot-note">金庫の答えから計算した、候補者の条件の推定区間は、ここに入ります。</p>
+    <section class="card" id="bisection" aria-labelledby="bisection-title">
+      <h2 id="bisection-title">二分探索の実演(台本の攻撃者)</h2>
+      <p>
+        台本の攻撃者が、金庫の答えをすべて見られる最悪の場合の攻撃者として、年収だけを変えた提案を、区間の真ん中の値で出して、候補者の年収の境目を二分探索します。
+        候補者が提案を受けると交渉が終わるので、次の交渉を作って続けます。区間が 1 マスになるか、交渉が 3 件になったら止まります。ボタン 1 つで動きます。
+      </p>
+      <p class="small muted">
+        台本は AI を呼びません(壁 2 の「LLM に渡った入力」の記録は残りません)。交渉を 1 件作るごとに、攻撃の交渉の作成と同じ入口の枠を 1 つ使うので、
+        回数に上限があります。途中で枠が尽きたときは、そこまでの結果を出して止まり、しばらくしてからもう一度押すと、続きから進みます。
+        終わると、作った交渉が上の「この画面で作った交渉」に並び、下のメーターに区間が出ます。
+      </p>
+      <div id="bisection-message" aria-live="polite"></div>
+      <div class="row">
+        <button id="bisection-button" class="btn btn-primary" type="button">台本の攻撃者で実演</button>
+        <span id="bisection-status" aria-live="polite"></span>
+      </div>
     </section>
-    <section class="slot" id="slot-simulation" data-status="pending">
-      <h2>防御なしのシミュレーション</h2>
-      <p class="slot-note">防御のない場合に、二分探索で条件が特定される様子(「シミュレーション」と明示します)は、ここに入ります。</p>
+
+    <section class="card" id="slot-meter" data-status="ready" aria-labelledby="meter-title">
+      <h2 id="meter-title">推定区間メーター(防御あり)</h2>
+      <p>
+        <strong>金庫の答えをすべて見られたとしても、ここまで</strong>。
+        攻撃者の提案に対する、候補者側の金庫の答え(受けられる／受けられない／本人確認が必要)から、候補者の年収の境目が入る区間を計算して、
+        年収のグリッドの上に、帯として描きます。金庫の答えをすべて見られる、最悪の場合の攻撃者を想定した表示です。
+      </p>
+      <p class="small muted">
+        新しい提案が届いたときと、二分探索の実演が終わったときだけ、計算し直します(定期的には読みません)。
+        この画面で作った交渉の ID は、このページのメモリにだけあり、再読み込みで消えます。
+      </p>
+      <div id="meter-error" aria-live="polite"></div>
+      <div id="meter-body"></div>
+    </section>
+
+    <section class="card" id="slot-simulation" data-status="ready" aria-labelledby="simulation-title">
+      <h2 id="simulation-title">防御なしのシミュレーション</h2>
+      <div class="banner banner-simulation" role="note">シミュレーション(防御なしの場合の計算。金庫は使っていません)</div>
+      <p>
+        もし金庫に防御がなく、「x 万円以上ですか?」と尋ねるたびに、正確に答えたとしたら、どうなるか。架空人物の生の値に対して、300〜1500 万円を 10 万円刻みで
+        二分探索します。どの値も、7 手以内で特定されます。「防御なしの金庫」は、このシステムのコードには存在しません。ここは、計算だけです。
+      </p>
+      <label class="field">
+        <span class="label">架空人物の生の値(万円。300〜1500 の、10 万円刻み)</span>
+        <input id="simulation-value" type="number" min="300" max="1500" step="10" value="620" inputmode="numeric">
+      </label>
+      <div class="row"><button id="simulation-button" class="btn" type="button">二分探索で特定する</button></div>
+      <div id="simulation-error" aria-live="polite"></div>
+      <div id="simulation-result" aria-live="polite"></div>
     </section>
   </main>
 

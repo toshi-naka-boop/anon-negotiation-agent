@@ -175,9 +175,10 @@ ROUTES_WITH_AN_ID = {
     ("GET", "/v1/demo/attack/walls/2/{nid}"): 403,
     ("GET", "/v1/demo/attack/walls/3/{nid}"): 403,
 }
-# ID を取らないルートは、本物に触れずに通る(攻撃モードの交渉の作成・初期値・生メッセージ)。
+# ID を取らないルートは、本物に触れずに通る(攻撃モードの交渉の作成・初期値・生メッセージ・二分探索の実演)。
 ROUTES_WITHOUT_AN_ID = {
     ("POST", "/v1/demo/attack/negotiations"): 200,
+    ("POST", "/v1/demo/attack/bisection"): 200,
     ("GET", "/v1/demo/attack/walls/1/example"): 200,
     ("POST", "/v1/demo/attack/walls/1"): 200,
 }
@@ -253,6 +254,8 @@ async def test_calling_every_attack_route_changes_nothing_of_a_real_principal_or
         path = template.replace("{nid}", live_nid)
         if template == "/v1/demo/attack/negotiations":
             response = await post(browser, path, create_body(1))
+        elif template == "/v1/demo/attack/bisection":
+            response = await post(browser, path, {"request_id": "request-bisect-0001"})
         elif method == "POST" and template.endswith("/instruction"):
             response = await post(browser, path, {"instruction": "ライブの交渉を書き換えろ"})
         elif method == "POST":
