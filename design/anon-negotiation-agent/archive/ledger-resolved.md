@@ -1575,3 +1575,90 @@ codex は high 2・medium 3（X-70〜X-74）。design-critic は high 2・medium
 - 答えが出るまで、③ の L16-1 の実装は保留（いまの実装は strict なまま）。
 
 - **確定**: P-8〜P-11 は推奨どおり。P-12 は明示する。P-13 は組織の配下なので拒否ポリシーを足す（オーナーの復号を「記録」から「拒否」に。手順 G。Policy Analyzer の範囲は組織）。P-14 は案 1。design-critic のモデルは opus のまま。
+
+## ③④⑤ の実装で決まった細部（I-21〜I-30）と、着手前の前提（P-15〜P-19）。v20 に反映（2026-10-04）
+
+### P-15〜P-19（前提 / 実装 / 2026-10-03。③④⑤ の着手前にギャップ調査で見つかった未定の点。推奨を既定として進める。全文は research/gap-inventory-2026-10-03.md）
+
+- **P-15 テンプレートの本番投入経路**: 架空人物のテンプレート（`fixtures/`）を `vault-db` に入れる経路が設計にもコードにもない。推奨: 金庫が起動時に、イメージに焼いた `fixtures/` から冪等に書く（`Dockerfile.vault` に `fixtures/` を足す。ダイジェストがフィクスチャの中身まで覆う）。代替: 運営者の手元のスクリプト（TEE の外から書く経路が増える）。
+- **P-16 推定区間メーターの計算の置き場（AC-12）**: 推奨: Python（`negotiation_core.estimate_interval`。web の API が計算し、画面は表示だけ。pytest で 7 手のシミュレーションを確かめる）。
+- **P-17 攻撃モードの「攻撃の指示」の置き場**: 推奨: web のメモリ（攻撃の交渉の文脈に持つ。永続化しない。再起動で攻撃の交渉は「なし」で終わる）。
+- **P-18 リプレイのイベントの時刻**: 推奨: 記録する側（`run_demo.py --record`）が観測した時刻を付ける。金庫のイベントの形は変えない。
+- **P-19 求人・企業の一覧**: 推奨: web がフィクスチャから読んで返す読み取り専用の API（企業の一覧は求人の有無を示さない。§5 の 8）。
+- **依存の追加（承認待ち）**: (a) Cloud Trace への出力（`opentelemetry-exporter-gcp-trace`。Apache-2.0。⑤ のトレース。無ければトレースは ADK の既定のまま＝出力先なし）。(b) `sse-starlette`・`uvicorn` を直接の依存として明示（どちらも使用中。新しいライブラリではない）。
+
+### I-21（実装時の気づき / 文面 / low。次の改訂（v20）で設計書に反映する。承認済みの v19 は触らない）実装済みになった「③ で」の印と、細部の決め
+
+- D の実装（2026-10-03）で実装済みになったもの: §2.7・§4.1 の L15-2・L16-1・X-74・X-79（`PlanEnvelope`・`parse_plan`）、§10 の `MAX_PROMPT_TOKENS`（→ `config/params.toml [agents] max_prompt_tokens`、`AgentsConfig`、`send_turn(config=)`）、AC-04 の行の「③ の後は…」、DV-17 の「後者は ③ で実装」、§13 の P-14（案 1 で実装済み）。§2.7 の「出力の形の制約」と `Move` の説明に `off_grid` が 2 か所残る（L18-1 の取りこぼし）。
+- 細部の決め（§8.2・契約 §19 に写す材料）: `client_ip` は `X-Forwarded-For` の最後の要素（空なら接続元。複数行はつなげた全体の最後。分からなければ `unknown` の共有キー）。nonce の転送の 429 の `Retry-After` は、送信元ごとが 10、全体が 2。拒否した要求は枠に数えない。`own_move_number` は無効になった確かめも数えない。
+- 残る仮定（R-7）: 「`X-Forwarded-For` の末尾 = クライアント IP」は Cloud Run の直接公開を前提にしている。外部ロードバランサの背後では末尾が LB の IP になるので、デプロイの確認項目に「末尾がクライアント IP であること」を足す。
+- 攻撃用の指示文 `attacker.md` は仮の 3 行のまま。F（攻撃モード）で書くときに、履歴の `check` の 1 文を入れ、`off_grid` を書かない。
+
+### I-22（実装時の気づき / 文面 / low。次の改訂（v20）で設計書に反映する）封印の組み込み（E）で分かった、§9 の 2・§3.2・DV-19 の文面の不足
+
+- §9 の 2「平文のまま」の列挙に足すもの（実際に平文で残る）: `nid`・`created_at`、`participants.*.company_id`・`participants.*.job_category_info`（公開フィクスチャの情報）、`participants.employer.attribute_bands`（常に null）、`principals` の `deleting`、冪等キーの文書の `nid`・`created_at`・`ttl_at`。これらも封印するかの判断は不要（索引・制御・公開情報）と見て、列挙に足す。
+- §9 の 2 に書き足すこと: AAD の項目名はドット区切りのパス（例 `participants.candidate.attribute_bands`・`views.candidate.payload`）。値が None の項目も封印する（「ない」ことを平文に残さない）。`status`・`end_reason` が平文なので、合意に至ったか否かは Firestore を読める者に見える（説明文にも）。
+- §3.2: `views.<side>` が `{seq, payload}` の形になるのは封印するとき（live）だけ。デモ・攻撃・Cloud Run 版（NoopSealer）はフラットなまま。
+- DV-19: 「live の依頼者 2 人（候補者・求人）」のうち、本物の求人の依頼者を相手にする交渉は現状の API では作れない（求人側は常にテンプレート）。テストでは文書を封印レイヤ経由で直接置いて確かめる、と書き添える（本物の求人を入れるときの設計メモ §14 に紐づける）。
+- 実装の決め: `NoopSealer` は封印レイヤごと素通し。本物の `Sealer` では、封印する項目が bytes でなければ `SealError`（封印なしの版が書いた live のデータは読めない。移行は想定しない）。`SealError` は HTTP では 500。一覧（`list_open_negotiations`・`list_principal_negotiations`）は文書全体を復号する（規模が増えたら平文の項目だけの読み出しに分ける）。
+
+### I-23（実装時の気づき / 設計 / low〜medium。次の改訂（v20）で設計書に反映し、不足の API は別パッケージで作る）活動ログの API（H）で分かったこと
+
+- **FR-39 の「並べて見る画面」（最悪漏れてもここまで／まだ隠しているもの）の API は未実装**。H が作ったのはデモ・攻撃の候補者側・求人側の 2 パネル（§3.2・DV-10）。設計書 §7 と AC-19 の「2 つのパネル」は、この 2 つを書き分ける。FR-39 の API は画面のパッケージ（L）の前に作る（本人の丸め済みポリシー `GET policy` と、「まだ隠しているもの」= 値を持たず種類とマスだけ（X-6））。
+- 本人の確認は既存の流儀どおり **403**（存在しない交渉も他人の交渉も同じ）。§6.3・DV-01 は 403 のままで合う。
+- 金庫のイベントに時刻の項目はない。活動ログの時刻は出さない（出すなら `store.py` の `_record_event` に `at` を足す。P-18 でリプレイは記録側の時刻にしたので、いまは不要）。
+- 旧い `GET /v1/negotiations/{nid}/events`・デモの `events` は残してある（`run_demo.py` が使う）。画面は `/activity`・`/panels` を使う。
+- `/healthz` は web・agents・vault とも認証の外（金庫の TEE 版でも `caller_verifier` の外。素の経路は `/v1/attestation` と `/healthz` だけ）。IAM で守られる agents・vault の `/healthz` は、`deploy_check.sh` が ID トークンを付けて呼ぶ（AC-22 に書く）。
+- 段の参照は `stages/{nid}` の `stage` の番号だけ（G が `StageStore` に読み出しを足したら `activity_api.read_stage` を差し替える）。
+
+### I-24（実装時の気づき / 設計 / low。次の改訂（v20）で設計書に反映）ケース 2・3 とリプレイ（J）で分かったこと
+
+- §8.4 に足す: リプレイの JSONL の形（ヘッダ `{"header": true, "case", "source": "live"|"scripted", "recorded_at", "schema": "replay/v1"}` ＋ 1 行 1 イベント `{"side", "seq", "observed_at", "event"}`。時刻は記録する側が付ける。P-18）、`run_demo.py --record`・`--replay [PATH]`・`--speed`、`replay_check.py`（3 回再生してハッシュ一致。AC-21）、`fixtures/replays/case{1,2,3}.jsonl` は台本の記録（`source: scripted`）で、本物の Gemini の記録はユーザーが `--live --record` で取り直す（同じパスは上書きされる）。AC-09〜11 の書き方を `--case N --replay` にそろえる。
+- §8.4 のケース 3 の「同程度の広さ」を数で書く: 候補者が受けられる組み合わせはケース 1 の候補者と同じ 5,328 通り（求人は全部受ける）。ケース 2 は 18,000 通りの総当たりで交わりが 0（候補者の最低 750 万、求人の最高 700 万。1 マス差）。
+- §8.3 に足す: 最悪の攻撃者（金庫の答えを全部見られる、年収だけの二分探索）は 5 手で 1 マス（600 万超〜650 万以下）に達し、評価上限 17 より手数上限 6 が先に効く。候補者が受けて終わる台本なら、交渉をまたいで 3 交渉で同じ区間。生の境目が 601〜650 万のどこでも答えは同じ。
+- 探索線の持ち方: 台本の定数（`tests/scripted_negotiators.SEARCH_LINE`）と `case3.toml` のコメント。web のメーターは線を知らなくてよい: 攻撃者の提案を「年収以外の軸の組」でまとめ、組ごとに区間を計算する（§8.3 の「他の軸は固定し、年収だけを変えた提案を使う」の実装の形。H2 で作る）。
+- `run_demo.py` の既定は台本（`--live` で本物の Gemini）。ケース 3 の `auto_response` は false/false（審査員が操作する求人）。`--live --case 3` の攻撃の指示文は暫定（`ATTACKER_INSTRUCTION`。F の `attacker.md` と合わせる）。
+
+### I-25（実装時の気づき / 文面 / low。次の改訂（v20）で設計書に反映）テンプレートの起動時の投入（I。P-15 を実装）
+
+- 金庫は起動のたびに、イメージ内の `fixtures/case*.toml` を全部読んで検証し、`templates/{template_id}` に冪等に書く（同じ内容なら書かない、違えば上書き、削除はしない。1 つでも壊れていれば 1 件も書かずに起動失敗）。TEE 版は鍵の解放と `VaultStore` の後・自己試験の前（検証済みのワークロードだけが書く）。Cloud Run 版は `VAULT_SEED_TEMPLATES`（既定 true）。封印しない（公開フィクスチャ）。
+- §3.7・§3.8・§8.4（`case<N>.toml` の命名と `template_id` のファイル間の一意性）・§9 の 1（`Dockerfile.vault` に `fixtures/` が入り、フィクスチャの中身がダイジェストを動かす）・§10・契約 §4・DV の追加（初回に全件・再起動で 0 回・変更で上書き・壊れで例外）を書く。
+- 運用の注意: `COPY fixtures ./fixtures` は `fixtures/replays/*.jsonl` と `interview_templates.toml` も入れるので、リプレイの録り直しでも金庫のダイジェストが動く（対応表への追記と principalSet の付け直しが要る）。狭めるなら `COPY fixtures/case*.toml ./fixtures/`（テストの COPY 元の検査を glob 対応に）。ローリング更新で古いイメージが再起動すると古いテンプレートで上書きする（§3.7 の前提の範囲）。Cloud Run 版の金庫は root logger が WARNING のままなので INFO（投入の件数）は出ない。
+
+### I-26（実装時の気づき / 文面・小さな積み残し / low。次の改訂（v20）で設計書に反映）攻撃モード・レート制限・3 枚の壁（F）と面談（K）で分かったこと
+
+- §8.2 の表に「攻撃モードの交渉の作成」（10 回／10 分。1 件で LLM を約 28 回呼ぶ）を足し、「攻撃モードの指示 30」は指示の置き換えの枠と明記。入口名（`interview_llm`・`demo_run`・`live_negotiation_create`・`attack_create`・`attack_instruction`・`raw_message`）と設定の場所（`[web.limits]` の `rate_*`・`per_client`）、固定窓（境目で最大 2 倍通る）、拒否は枠に数えない、429 の本文 `{"detail": {"code": "rate_limited", ...}}`（既存の `daily_limit_reached` は文字列。画面は両方を扱う）。攻撃の API の本文は 32 KB（413）、指示は 400 文字（422）。
+- §8.1: 壁 1 の止める順（回数 → 32 KB → JSON の形 → 当日の物理の数 → 送信）と応答の形。壁 2 の `inspection` と記録が web のメモリ（再起動で 404）。壁 3 は金庫の答えの列まで（区間は §8.3 のメーター API）。
+- §4.1・P-17: 再起動で消えた攻撃の指示は、攻撃者の手番で `control(cancel)` して「なし」。
+- §10: Firestore の TTL ポリシーに `rate_limits.ttl_at` を足す。R-7 の確認項目（`X-Forwarded-For` の末尾がクライアント IP）。`config/params.toml` は金庫のイメージに入るので、web の設定を変えても金庫のダイジェストが動く（設定ファイルを分けるかは後で判断）。
+- 面談（K）: §5 の 2・4・5 は JSON モード＋pydantic（応答スキーマは使わない。実機の計測は未）。軸は複数外せる（§2.4 の規則は複数版を `web/interview/statements.py` に置いた）。二択は雛形＋年収の土台で 6 組、確認に進むには 5 組（A・B 両方）。受けるアンカー 0 件の警告は外した軸が原因でないときも出る。地域は都道府県名、職種は大分類。途中の状態は普通の dict（ADK のセッションは呼び出しごと）。依頼者のロックは面談の LLM 呼び出し中も持つ（交渉はまだ無いので実害なし）。面談の枠は暫定で依頼者 ID ごと（メモリ）→ F の `limiter.guard("interview_llm")` に差し替える（小さな積み残し）。本人の削除で面談の途中状態も即時に消す（`web/deletion.py` に 1 行。小さな積み残し）。`ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS` は面談のモジュールが未設定なら false にする。
+- 古いコメントの直し（小さな積み残し）: `src/agents/instructions/__init__.py`（attacker は ③ で書く）、`src/web/__init__.py`（攻撃モード・レート制限は後の段）、`tests/test_llm_budget.py`（生メッセージの経路が無い）。
+- 本物の Gemini で未確認: `attacker.md`、面談の指示文 2 本（`salary.md`・`constraints.md`）。ユーザーの環境で 1 回ずつ流す（DV-15 と同じ位置付け）。
+
+### I-27（実装時の気づき / 文面と小さな判断 / low。次の改訂（v20）で設計書に反映）段階開示（G）とメーター・2 パネル（H2）で分かったこと
+
+- **判断（呼び出し側、2026-10-04）**: デモ・攻撃の架空の候補者も、フィクスチャの職務要約と連絡先でサーバが「会う」「承認」を自動で押す（デモで段 2 まで見せる。P-2 の趣旨に沿う）。見込み「なし」は段 0 の表示で終わり、台帳には書かない。自動応答は判定の瞬間ではなく、候補者が段の状態を読んだ・操作したときに冪等に行う（GET が書く。サーバが決める値だけ）。
+- §6.2 に足す: 段ごとに見えるものの表（`web.stages.EMPLOYER_SEES` を正）、`stages/{nid}` の項目（`agreed_at`・`meet`・`approve` の側ごとのフラグ・`job_summary`・デモだけ `candidate_template_id`・`employer_template_id`）、求人の企業名は本物の候補者の交渉では `job_id` から、デモ・攻撃ではテンプレート ID から引く、段 2 の「氏名と連絡先」は候補者の分を求人側へ（求人側の連絡先はフィクスチャにない）、本文 32 KB・要約 400 文字。
+- §6.3・§7 に足す: 台帳の行は `nid`・`action`（disclose/meet/approve）・`stage`・`operator`（principal/fictional_employer/fictional_candidate/system）・`items`・`to`・`simulated`・`at`（生の値なし。文書 ID は交渉 ID と出来事で決まる固定の文字列）。段の状態・台帳・活動ログ・パネル・メーターの web の API の一覧を §3.3 の後に 1 節起こす。
+- §8.3 に足す: `POST /v1/demo/meter` の本文と応答（組ごとの区間 `(lower, upper]` と `cells`、`observations` は「本人確認が必要」を含む、観測の多い順、`narrowest`、1 件でも本物なら 403、別の候補者の答えが食い違えば 422）、シミュレーションは「どの値も 7 手以内」（121 通り中 114 通りが 7 手）。§8.2 の表にメーターの入口（`meter`。60 回／10 分。K2 で実装）。
+- §7 FR-39 に足す: `GET /v1/principals/{pid|me}/panels` の `worst_case`（アンカーが条件を付けている値だけを丸めたマスで。多次元のポリシーを軸ごとに射影するので、組の情報は落ちる＝画面の文言で誤読させない）と `still_hidden`（7 軸。年収は隠れているマスの種類数、外した軸は値の数、ほかの離散軸は 0。値は持たない）。画面が自分の依頼者 ID を知る方法は `me` の別名。デモの架空人物の生の値を見せる版は未作成（画面 L2 で要るなら足す）。
+- DV-02 の「10 本」は段階開示では 2〜4 本（エミュレータの競合待ち）。AC-14・AC-15 は `tests/test_stages.py`・`tests/test_stages_llm_inputs.py`。DV-01 のメーターの行は `tests/test_meter.py`。
+
+### I-28（実装時の気づき / 文面と小さな積み残し / low。次の改訂（v20）で設計書に反映）小さな積み残し（K2）の結果
+
+- 済んだこと: 面談の LLM の 3 入口は `limiter.guard("interview_llm")`（IP ごと 30 回／10 分。依頼者ごとのメモリの窓と `[web.interview]` の 2 項目は削除）。メーターの入口 `meter`（60 回／10 分。シミュレーションは数えない）。本人の削除・30 日の自動削除で面談の途中状態（メモリ）も消す（利用記録がなくても）。古いコメント 3 か所。
+- §8.2 に足す: 表に「推定区間メーター 60」「攻撃モードの交渉の作成 10」、入口名に `meter`、「1 回で金庫を何件も読む入口」も対象、面談の枠は IP ごと（会場の同じ Wi-Fi では 10 分に面談 10 人ほど。発表の日は `interview_llm`・`meter` も上げる）。§8.3: web は `rate_limits` のカウンタ以外は書かない。文書 ID は IP の SHA-256 の先頭 32 桁（画面が持つ ID ではない。L7-3 と書き分ける）。§6.3 の削除の流れに「面談の途中状態（メモリ）を消す段」を足し、「利用記録がなければサーバにデータはない」を直す。DV-06・DV-16 に「面談を途中まで進めて削除すると `interview_not_started`」。§5 の 9・§1.2: 状態が消える契機（送信・破棄・本人の削除・自動削除・1 時間のアイドル＝読めなくなる）。
+- 残る小さな掃除（画面 L の後にまとめて）: `src/web/interview/service.py` の未使用（`RATE_LIMITED` の対応表、`owner` 引数）、古いコメント（`src/web/api.py` の `delete_data` の docstring、`src/web/interview/state.py`、`src/web/llm_budget.py:12`、`tests/test_attack_mode.py:164`、`tests/test_deletion.py:1`）、アイドルの面談の状態の能動的な掃除。
+- 画面（L・L2）への申し送り: 429 の `detail` は辞書（入口の枠）と文字列（1 日の上限）の 2 形。メーターは新しい提案が届いたときだけ呼ぶ（ポーリングしない）。
+
+### I-29（実装時の気づき / 設定 / low。次の改訂（v20）で §8.2 の最悪額を直す）DV-15 の再実行（2026-10-04。計画の 2 段の読みと指示文の変更の後）
+
+- ケース 1 ×2（本物の Gemini、`--judge`）: 2 回とも合意（高。16〜17 回、$0.17〜0.18、思考の平均 513〜568、schema_invalid 0）。1 回目だけ、計画の 1 呼び出しが `max_output_tokens`=2,048 で切れた（思考 1,934 ＋ 出力 98。無効手 `output_truncated` 1 件。次の呼び出しで回復して合意）→ DV-15 の `no_truncation` で不合格。2 回目は切れなし。ケース 3 ×1（攻撃。`attacker.md` の本番の指示文）: 判定まで届き、schema_invalid 0。
+- 判断: `[agents] max_output_tokens` を 2,048 → 3,072 にした（X-63 の範囲 256〜4,096 の中。計画が MEDIUM で思考が 1,100〜1,900 に伸びる手番がある）。§8.2 の「1 日の最悪の金額」（2,048 で見積もり）は 1.5 倍になる（v20 で数字を直す）。再実行して 2 回連続合格を確かめる。→ **確認済み（2026-10-04）**: 3,072 で 2 回とも合格（17 回・$0.18・思考の平均 534・切れ 0）。
+- 計画の 2 段の読み（`PlanEnvelope`）と指示文の 1 文は、本物のモデルで退行なし（schema_invalid 0。合意の組み合わせはこれまでと同じ 650〜700 万帯）。
+
+### I-30（実装時の気づき / 指示文 / low。次の改訂（v20）の §5 に 1 行）面談の指示文 2 本を本物の Gemini で確認（2026-10-04）
+
+- 年収の 3 問（額面 620・固定残業代 月 4・賞与 3 か月込み）→ `SalaryBasis` が意図どおり。自由コメント（650 以上かつリモート 2 日以上なら行く／当直 4 回以上は無理／副業は認めてほしい）→ 発言 3 件が意図どおり。JSON モードの出力は pydantic の検証を通った（捨てた発言 0）。
+- 辞めた理由の「フルリモートが禁止になった」を、最初は `reject remote_days=5`（望む側の値）と逆向きに読んだ。指示文に「reason_for_leaving の reject の値は避けたい状態そのものの値（望む側ではない）」の規則と例（→ `remote_days=0`）を足し、再実行で `reject remote_days=0` になった（`night_duty=8` はそのまま）。
+- 検証は使い捨てのスクリプト（scratchpad。1 日の枠の計上は Firestore に書かずに常に許可）で行い、リポジトリには入れていない。設計書 §5 に「実機で 1 回確かめた（JSON モード。応答スキーマは使わない）」と書く。
