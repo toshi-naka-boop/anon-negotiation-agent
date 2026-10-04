@@ -18,6 +18,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import pathlib
 import time
 
 import httpx
@@ -850,10 +851,22 @@ def test_tee_mode_refuses_to_start_when_the_vault_url_is_not_https(entry, url):
         entry(VAULT_BASE_URL=url)
 
 
-def test_the_default_releases_file_is_the_one_in_the_repository_and_an_empty_table_warns(entry, caplog):
-    caplog.set_level(logging.WARNING, logger=web_app_module.__name__)
+def test_the_default_releases_file_is_the_one_in_the_repository(entry):
+    # 既定: deploy/vault-releases.json(スパイク以降、active なダイジェストが入っている。空の表の警告は次の試験で確かめる)
+    repository_table = json.loads((pathlib.Path(__file__).resolve().parents[1] / "deploy" / "vault-releases.json").read_text(encoding="utf-8"))
+    active = frozenset(release["digest"] for release in repository_table["releases"] if release.get("status") == "active")
 
-    app = entry(VAULT_RELEASES_FILE=None)  # 既定: deploy/vault-releases.json(いまは空の表)
+    app = entry(VAULT_RELEASES_FILE=None)
+
+    assert has_tee_route(app) and entry.captured.transport._policy.allowed_digests == active
+
+
+def test_an_empty_releases_table_warns_that_no_vault_image_is_accepted(entry, caplog, tmp_path):
+    caplog.set_level(logging.WARNING, logger=web_app_module.__name__)
+    empty = tmp_path / "empty-releases.json"
+    empty.write_text('{"releases": []}', encoding="utf-8")
+
+    app = entry(VAULT_RELEASES_FILE=str(empty))
 
     assert has_tee_route(app) and entry.captured.transport._policy.allowed_digests == frozenset()
     assert "no vault image is accepted" in caplog.text
