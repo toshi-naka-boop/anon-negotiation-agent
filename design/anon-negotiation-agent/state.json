@@ -9,13 +9,15 @@
   "requiredApprovalFingerprint": "v22:e5e58b48264f",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 18,
-  "openIssueIds": [],
+  "openIssueIds": [
+    "I-37"
+  ],
   "requiredReads": [
     "design.md",
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "承認 CP: v22 の指紋 v22:e5e58b48264f を提示（v21 承認済み＋TEE スパイクの実測 I-35・I-36。設計の意図は変えない）。TEE スパイク: 点 1〜5 合格、負の試験 1〜3・C-56 合格、片付け済み、VM は停止中。残り: 手順 G（ユーザー。拒否ポリシー）、デプロイ（research/deploy-runbook.md。権限付与のブロックはユーザー）、点 6（画面）、deploy_check 全項目、次のイメージでラベル。再起動は stop→start だけ（vTPM DA カウンタ 9/32）。",
+  "nextAction": "v22 承認済み（2026-10-05）。手順 G は実行不能（組織なし。I-37。既定の記録による抑止のまま）。デプロイ中（research/deploy-runbook.md）: 準備（agents の URL を params に、secretmanager/aiplatform API、agents-run SA、session-signing-key、app イメージ 44af9f6）。ユーザー待ち: 権限付与 5 件（aiplatform×2、datastore 条件つき、secret accessor、agents の run.invoker）と本番デプロイの了承、web の公開の了承。その後: deploy_check 全項目、点 6（画面）、Zenn・動画。VM は停止中（起動は 1 回にとどめる。DA カウンタ 9/32）。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",

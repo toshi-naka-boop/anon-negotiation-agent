@@ -147,6 +147,8 @@ gcloud kms keys get-iam-policy vault-kek --location="$REGION" --keyring=vault-te
 
 ## 5. 拒否ポリシー（手順 G。組織の権限が要る。約 10 分＋反映待ち）
 
+**結論（2026-10-05）: このプロジェクトでは実行できない。** `roles/iam.denyAdmin` は組織にしか付与できず、プロジェクトは組織の配下でない。以下は組織の配下のプロジェクトでだけ使う手順として残す（台帳 I-37）。
+
 目的: オーナーを含むすべての主体から KEK の暗号化・復号の権限を拒否し、例外を金庫のプールのワークロードだけにする（P-13 の答え「組織の配下」なので使える。これが入ると、前日の「オーナーは `INVALID_ARGUMENT`」が `PERMISSION_DENIED` に変わる）。
 
 組織 ID を調べる（`TYPE` が `organization` の行の `ID`）。
