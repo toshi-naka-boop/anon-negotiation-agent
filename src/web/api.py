@@ -444,11 +444,11 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
     async def delete_data(
         pid: str, response: Response, session: PrincipalSession = Depends(require_own_principal)
     ) -> dict[str, str]:
-        """本人の「データを消す」。30 日の自動削除と同じ流れを使う。
+        """本人の「データを消す」。30 日の自動削除と同じ流れを使う(web.deletion)。
 
-        最後の段(利用記録の削除)まで終われば、クッキーも消す。利用記録がなければ(面談を送っていなければ)、
-        サーバにデータはないので、クッキーを消すだけ。途中で失敗したときは 202: 削除中の印が残るので、
-        依頼者の見回りが最後までやり直す(本人が押し直す必要はない)。
+        最後の段(利用記録の削除)まで終われば、クッキーも消す。利用記録がなければ(面談を送っていなければ)、金庫にも (default) にも
+        永続のデータはないので、面談の途中の状態(サーバのメモリ)を消して、クッキーを消すだけ。途中で失敗したときは 202: 削除中の印が
+        残るので、依頼者の見回りが最後までやり直す(本人が押し直す必要はない)。
         """
         outcome = await services.deletion.delete_by_user(pid)
         if outcome is DeletionOutcome.INCOMPLETE:

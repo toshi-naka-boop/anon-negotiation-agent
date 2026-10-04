@@ -618,3 +618,34 @@ async def test_a_manager_starts_one_task_per_negotiation(store, web_env):
     assert manager.is_running(nid) is False
     assert manager.start(context) is True  # 終わったタスクは数えない(見回りが作り直せる)
     await manager.stop_all()
+
+
+@pytest.mark.anyio
+async def test_a_reserved_task_keeps_the_manager_from_starting_a_referee_until_it_ends(store, web_env):
+    # 外のタスク(二分探索の実演の、LLM を呼ばない専用のレフェリーなど)を reserve すると、それが動いている間、見回りが呼ぶ start は本物のレフェリー
+    # (LLM を呼ぶ)を起こさない。すでに本物のレフェリーが起きていれば、LLM を呼ぶ前に止めて、外のタスクに替える。外のタスクが終われば、また start できる。
+    env = web_env
+    nid = create_demo_negotiation(store)
+    env.agents.script("candidate", move_dict("end"))
+    manager = RefereeManager(env.deps)
+    context = NegotiationContext(nid=nid, mode="demo", candidate_principal_id=None)
+    assert manager.start(context) is True
+    real = manager.task(nid)
+    finish = asyncio.Event()
+    external = asyncio.create_task(finish.wait())
+
+    manager.reserve(nid, external)
+
+    assert manager.task(nid) is external and manager.is_running(nid) and manager.running_nids() == [nid]
+    await asyncio.gather(real, return_exceptions=True)
+    assert real.cancelled() and env.agents.calls == []  # 本物のレフェリーは、エージェント(LLM)を 1 度も呼ばずに止まった
+    manager.reserve(nid, external)  # 同じタスクを重ねて登録しても、そのタスクは止めない
+    assert external.cancelling() == 0
+    assert manager.start(context) is False  # 動いている外のタスクがあるので、本物のレフェリーは起きない
+    assert manager.task(nid) is external and env.agents.calls == []
+
+    finish.set()
+    await external
+    assert manager.is_running(nid) is False and manager.running_nids() == []  # 外のタスクが終われば、動いているものに数えない
+    assert manager.start(context) is True  # 見回りが、本物のレフェリーを作り直せる
+    await manager.stop_all()

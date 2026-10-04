@@ -113,9 +113,12 @@ async def test_no_raw_value_is_written_to_the_ledger(stage_env):
 
     assert stage_doc(env, nid)["job_summary"] == CANARY
     ledger_text = json.dumps(ledger_docs(env, pid), default=str, ensure_ascii=False)
+    # 台帳に入る乱数は、依頼者 ID と交渉 ID(16 桁の 16 進数)だけ。年収の数字("650"・"700")をたまたま含むことがある(台帳 I-34 のフレーク)ので、
+    # ID の値を除いた文字列で、生の値を探す(残るのは、固定の時計の時刻・列挙の値・固定の文字列だけで、乱数に依存しない)。
+    ledger_text_without_ids = ledger_text.replace(pid, "<pid>").replace(nid, "<nid>")
     contact = load_case_fixture(1).candidate.contact
     for raw in (CANARY, JOB_SUMMARY, COMPANY_NAME, contact.name, contact.email, "650", "700"):
-        assert raw not in ledger_text, raw
+        assert raw not in ledger_text_without_ids, raw
     api_text = (await browser.get(f"/v1/principals/{pid}/ledger")).text
     assert CANARY not in api_text and contact.email not in api_text and pid not in api_text
     found = documents_mentioning(env.default_db, CANARY)

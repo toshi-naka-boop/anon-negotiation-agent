@@ -51,7 +51,6 @@ from web.vault_client import VaultClient
 
 _LLM_STATUS = {
     agent_module.DAILY_LIMIT_REACHED: 429,
-    agent_module.RATE_LIMITED: 429,
     agent_module.LLM_UNAVAILABLE: 503,
     agent_module.LLM_FAILED: 502,
     agent_module.OUTPUT_TRUNCATED: 502,
@@ -290,7 +289,7 @@ class InterviewService:
             raise InterviewError(409, "profile_missing")
         questions = self._templates.salary_questions
         try:
-            basis = await self.agent.extract_salary_basis(principal_id, list(zip(questions, answers, strict=True)))
+            basis = await self.agent.extract_salary_basis(list(zip(questions, answers, strict=True)))
         except InterviewLlmFailure as failure:
             raise _llm_error(failure) from None
         except LlmBudgetUnavailable:
@@ -405,7 +404,7 @@ class InterviewService:
         if self._state(principal_id).removed_axes is None:
             raise InterviewError(409, "axes_not_chosen")
         try:
-            constraints, dropped = await self.agent.extract_constraints(principal_id, kind, text)
+            constraints, dropped = await self.agent.extract_constraints(kind, text)
         except InterviewLlmFailure as failure:
             raise _llm_error(failure) from None
         except LlmBudgetUnavailable:

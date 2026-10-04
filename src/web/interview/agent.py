@@ -72,7 +72,6 @@ Sleep = Callable[[float], Awaitable[None]]
 
 # 失敗の理由(InterviewLlmFailure.code。API の detail に使う)
 DAILY_LIMIT_REACHED = "daily_limit_reached"  # 1 日の物理の呼び出し数の上限に達している(送っていない)
-RATE_LIMITED = "rate_limited"  # 以前の、依頼者ごとの窓の上限(いまは出さない。面談の枠は web.limits の入口 interview_llm)。service.py の対応表が参照する
 LLM_UNAVAILABLE = "llm_unavailable"  # 一時的なエラーが続いた・時間切れ(再試行を使い切った)
 LLM_FAILED = "llm_failed"  # 一時的でない失敗(権限・要求の誤り・ADK の失敗など)
 OUTPUT_TRUNCATED = "output_truncated"  # 出力が max_output_tokens で切れた
@@ -185,11 +184,8 @@ class InterviewAgent:
     # 公開: 取り出し
     # ------------------------------------------------------------------
 
-    async def extract_salary_basis(self, owner: str, answers: Sequence[tuple[str, str]]) -> SalaryBasis:
-        """年収の正規化の 3 問の (質問, 回答) から、SalaryBasis を取り出す。
-
-        owner は呼んだ依頼者の ID(LLM には渡さない)。いまは使わない: 以前の依頼者ごとの窓の鍵で、呼び出し側(service.py)の形を変えないために残した。
-        """
+    async def extract_salary_basis(self, answers: Sequence[tuple[str, str]]) -> SalaryBasis:
+        """年収の正規化の 3 問の (質問, 回答) から、SalaryBasis を取り出す。"""
         llm_input = json.dumps(
             {"task": "salary_basis", "qa": [{"question": q, "answer": a} for q, a in answers]}, ensure_ascii=False
         )
@@ -201,8 +197,8 @@ class InterviewAgent:
         except ValidationError:
             raise InterviewLlmFailure(OUTPUT_INVALID) from None
 
-    async def extract_constraints(self, owner: str, kind: ExtractionKind, text: str) -> tuple[ConstraintList, int]:
-        """自由コメント・辞めた理由の文章から、発言を取り出す。返り値は (発言の並び, 検証に通らず捨てた発言の数)。owner は extract_salary_basis と同じ(使わない)。"""
+    async def extract_constraints(self, kind: ExtractionKind, text: str) -> tuple[ConstraintList, int]:
+        """自由コメント・辞めた理由の文章から、発言を取り出す。返り値は (発言の並び, 検証に通らず捨てた発言の数)。"""
         llm_input = json.dumps({"task": kind, "text": text}, ensure_ascii=False)
         payload = _load_json_object(await self._call("constraints", llm_input))
         try:

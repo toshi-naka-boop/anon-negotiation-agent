@@ -640,6 +640,18 @@ class RefereeManager:
         self._tasks[context.nid] = task
         return True
 
+    def reserve(self, nid: str, task: asyncio.Task) -> None:
+        """外のタスクを、nid の動いているタスクとして登録する(見回りの start が、この交渉に本物のレフェリーを起こさないように)。
+
+        この管理が作ったレフェリーが、すでに動いていたら止めて(LLM を呼ぶ前に)、外のタスクに替える。登録したタスクが終われば、ほかの
+        タスクと同じく、動いているものには数えず(is_running・running_nids)、表からは次の start で外れる。例: 二分探索の実演
+        (web.attack.bisection)は、LLM を呼ばない専用のレフェリーで交渉を動かすので、見回りに本物のレフェリー(LLM を呼ぶ)を起こさせない。
+        """
+        running = self._tasks.get(nid)
+        if running is not None and running is not task and not running.done():
+            running.cancel()
+        self._tasks[nid] = task
+
     async def stop_all(self) -> None:
         """動いているタスクをすべて止める(停止の後始末。テストでは web が落ちた状態の再現にも使う)。"""
         running = [task for task in self._tasks.values() if not task.done()]

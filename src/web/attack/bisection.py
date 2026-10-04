@@ -18,7 +18,7 @@
 - レフェリー: この実行の専用のもの(web.referee.Referee)を動かす。LLM を呼ばないので、物理の呼び出し数は数えない(count_llm_calls=False。
   web.llm_budget の 1 日の枠も、交渉ごとの枠も減らさない。入場の制限は、LLM の枠に余裕があるかを見るだけで、何も書かない)。
 - 見回りとの競合: 見回り(web.sweeper)は、動いているタスクのない進行中の交渉に、本物のレフェリー(LLM を呼ぶ)を起こす。この実行の交渉に起こさせない
-  ために、動かしている間は、レフェリーの管理(services.referees)に、動いているタスクとして登録する(_claim)。
+  ために、動かしている間は、レフェリーの管理(services.referees)に、動いているタスクとして登録する(RefereeManager.reserve)。
 - 失敗・時間切れ・中断のときは、金庫の control{cancel} で交渉を取り消す(終わっていない交渉を残すと、見回りが拾って、本物のレフェリーが LLM を呼ぶため)。
 
 ログには、例外の型名だけを書く(交渉 ID・組み合わせの値は書かない)。
@@ -43,7 +43,7 @@ from vault.api_models import (
 
 from web.attack.scripted import ScriptedAttacker, ScriptedBisectionAgents
 from web.meter_api import MeterInterval, build_meter
-from web.referee import NegotiationContext, Referee, RefereeDeps, RefereeManager
+from web.referee import NegotiationContext, Referee, RefereeDeps
 
 if TYPE_CHECKING:  # web.services が web.attack を import するので、型のためだけに読む(循環を避ける)
     from web.services import WebServices
@@ -89,18 +89,6 @@ class BisectionResult:
     negotiation_ids: list[str]
     interval: MeterInterval | None
     stopped_reason: StoppedReason | None = None
-
-
-def _claim(manager: RefereeManager, nid: str, task: asyncio.Task) -> None:
-    """task を、nid の動いているレフェリーのタスクとして、レフェリーの管理に登録する(見回りが、本物のレフェリーを起こさないように)。
-
-    すでに本物のレフェリーが起きていたら、止める(LLM を呼ぶ前に)。外のタスクを登録する公開の口が RefereeManager にないので、
-    内部の表(_tasks)に直接入れる。
-    """
-    running = manager.task(nid)
-    if running is not None and not running.done():
-        running.cancel()
-    manager._tasks[nid] = task
 
 
 class BisectionRunner:
@@ -197,7 +185,7 @@ class BisectionRunner:
         task = asyncio.create_task(
             Referee(NegotiationContext(nid=nid, mode="attack", candidate_principal_id=None), deps).run(), name="referee"
         )
-        _claim(services.referees, nid, task)
+        services.referees.reserve(nid, task)
         try:
             await services.stages.ensure(nid, None)  # 画面の読み出し口(活動ログ・メーター)が確かめる、web の段の状態
             await asyncio.wait_for(task, NEGOTIATION_TIMEOUT_SECONDS)

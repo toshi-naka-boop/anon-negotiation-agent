@@ -58,7 +58,11 @@ class RawAnchor(StrictModel):
 
 
 class InterviewSubmitRequest(StrictModel):
-    """面談の送信(§5 の手順 9)。面談の本体(面談エージェント・画面)は、ここには含まれない。"""
+    """面談の送信の入力(§5 の手順 9)。丸める前のアンカーと属性帯を持つ。
+
+    HTTP の本文としては受けない(旧 POST /v1/principals/{pid}/interview は、3 問・二択・確認・承認を経ずに金庫へ書けるので、公開面から外した。
+    台帳 X-81)。面談の進行(web.interview.service)が、確認と「最悪ここまで」の承認のあとに作り、内部の submit_policy が受ける。
+    """
 
     accept_anchors: list[RawAnchor] = Field(default_factory=list, max_length=_LIMITS.max_anchors_per_kind)
     reject_anchors: list[RawAnchor] = Field(default_factory=list, max_length=_LIMITS.max_anchors_per_kind)

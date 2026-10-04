@@ -64,7 +64,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # ----------------------------------------------------------------------
 ITEMS='adk-capture|all|§10 ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false(web・agents の両方)
 log-level|all|§10 ログは INFO 以上(web・agents に DEBUG の設定がない)
-web-workers|all|§10 web は uvicorn workers=1・インスタンスは min・max とも 1・CPU 常時割り当て
+web-workers|all|§10 web は uvicorn workers=1・インスタンスは min・max とも 1・CPU 常時割り当て・Cloud Run の同時リクエスト数(containerConcurrency)200
 session-key|all|§10 SESSION_SIGNING_KEY は Secret Manager の参照
 service-auth|all|§10 SERVICE_AUTH_ENABLED が false でない(web)
 vertex-env|all|§10 GOOGLE_GENAI_USE_VERTEXAI=TRUE・GOOGLE_CLOUD_PROJECT・GOOGLE_CLOUD_LOCATION=global(web・agents)
@@ -382,6 +382,10 @@ def dockerfile_workers():
     return found.group(1) if found else None
 
 
+# §10: web の Cloud Run の同時リクエスト数(containerConcurrency)。SSE の同時本数の上限(20)に通常の要求の分を足した値(台帳 C-65)。
+WEB_CONTAINER_CONCURRENCY = 200
+
+
 def check_web_workers():
     service = data("svc-web")
     tokens = command_tokens(containers(service)[0])
@@ -407,9 +411,16 @@ def check_web_workers():
         got = annotations.get(key)
         if got is None or str(got).strip().lower() != want:
             problems.append("%s が %s(期待: %s)" % (key, shown(got), want))
+    template_spec = ((service.get("spec") or {}).get("template") or {}).get("spec") or {}
+    limit = template_spec.get("containerConcurrency")
+    if limit is None or str(limit).strip() != str(WEB_CONTAINER_CONCURRENCY):
+        problems.append(
+            "spec.template.spec.containerConcurrency が %s(期待: %d。SSE の同時本数の上限〔20〕に通常の要求の分を足した値。既定の 80 のままだと SSE だけで埋まる)"
+            % (shown(limit), WEB_CONTAINER_CONCURRENCY)
+        )
     if problems:
-        ng("web の起動・スケールの設定が、プロセスの中の状態(依頼者ごとのロック・面談の状態)の前提と合わない", *problems)
-    ok("workers=1(%s)・min・max とも 1・CPU 常時割り当て" % source)
+        ng("web の起動・スケール・同時リクエスト数の設定が、前提(プロセスの中の状態〔依頼者ごとのロック・面談の状態〕、SSE の同時本数の枠)と合わない", *problems)
+    ok("workers=1(%s)・min・max とも 1・CPU 常時割り当て・同時リクエスト数 %d" % (source, WEB_CONTAINER_CONCURRENCY))
 
 
 def check_session_key():

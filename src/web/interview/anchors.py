@@ -142,7 +142,10 @@ def find_conflicts(entries: Sequence[AnchorEntry]) -> list[tuple[str, str]]:
 def to_submit_request(
     entries: Sequence[AnchorEntry], removed_axes: Collection[str], bands: CandidateAttributeBands
 ) -> InterviewSubmitRequest:
-    """有効な項目から、既存の送信 API(web.api_models.InterviewSubmitRequest)の入力を作る。丸めは、その to_put_policy_request が行う。"""
+    """有効な項目から、送信のロジック(InterviewService.submit_policy)の入力 web.api_models.InterviewSubmitRequest を作る。
+
+    HTTP の本文としては受けない(旧い送信の口は公開面から外した。台帳 X-81)。丸めは、その to_put_policy_request が行う。
+    """
     active = active_entries(entries)
     return InterviewSubmitRequest(
         accept_anchors=[RawAnchor(**entry.raw) for entry in active if entry.polarity == "accept"],

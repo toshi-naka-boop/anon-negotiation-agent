@@ -161,7 +161,11 @@ async def test_a_raw_message_over_32_kb_is_refused_by_web_and_exactly_32_kb_is_f
 
 
 class Entrances:
-    """HTTP の 5 つの入口(面談は別の作業)に 1 回ずつ要求を送る。入口ごとに、その要求を成り立たせる準備を持つ。"""
+    """HTTP の 5 つの入口に 1 回ずつ要求を送る。入口ごとに、その要求を成り立たせる準備を持つ。
+
+    ほかの入口の枠は、別の試験で確かめる: 面談の interview_llm・interview_begin は tests/test_interview_api.py、開始ページの session_start は
+    tests/test_web_api.py、メーターの meter は tests/test_meter.py。入口の一覧と全体の枠の扱いは tests/test_limits.py。
+    """
 
     def __init__(self, env, store, *, start: int = 0) -> None:
         self.env = env

@@ -48,6 +48,7 @@ PRIMARY = f"{KEY_NAME}/cryptoKeyVersions/2"
 POOL_PATTERN = f"principalSet://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/vault-tee-pool/attribute.image_digest/{{digest}}"
 SUBJECT = f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/vault-tee-pool/subject/gcpcs::{DIGEST}::{PROJECT_NUMBER}::{INSTANCE_ID}"
 SECRETS = ("SECRET-ACCESS-TOKEN", "SECRET-ID-TOKEN", "SECRET-WRAPPED-DEK", "SECRET-ATTESTATION-JWT")
+WEB_CONTAINER_CONCURRENCY = 200  # §10: web の Cloud Run の同時リクエスト数(SSE の同時本数の上限 20 に、通常の要求の分を足した値。台帳 C-65)
 
 # 確かめられない・人が確認する項目(どの世界でも [SKIP])
 ALWAYS_SKIP = {"vertex-quota", "thinking-usage", "r7-client-ip", "submission-checklist"}
@@ -128,17 +129,20 @@ def env_list(values: dict, secrets=()) -> list:
     return items
 
 
-def service_json(name, url, env, *, command=None, args=None, annotations=None, service_annotations=None) -> dict:
+def service_json(name, url, env, *, command=None, args=None, annotations=None, service_annotations=None, concurrency=None) -> dict:
     container = {"image": f"{REGION}-docker.pkg.dev/{PROJECT_ID}/vault/app@sha256:{'0' * 64}", "env": env}
     if command:
         container["command"] = command
     if args:
         container["args"] = args
+    template_spec = {"containers": [container]}
+    if concurrency is not None:
+        template_spec["containerConcurrency"] = concurrency
     return {
         "apiVersion": "serving.knative.dev/v1",
         "kind": "Service",
         "metadata": {"name": name, "annotations": dict(service_annotations or {})},
-        "spec": {"template": {"metadata": {"annotations": dict(annotations or {})}, "spec": {"containers": [container]}}},
+        "spec": {"template": {"metadata": {"annotations": dict(annotations or {})}, "spec": template_spec}},
         "status": {"url": url},
     }
 
@@ -216,7 +220,7 @@ def make_world(mode: str = "tee") -> dict:
     world = {
         "mode": mode,
         "svc": {
-            "web": service_json("web", WEB_URL, env_list(web_env, ["SESSION_SIGNING_KEY"]), annotations=scale),
+            "web": service_json("web", WEB_URL, env_list(web_env, ["SESSION_SIGNING_KEY"]), annotations=scale, concurrency=WEB_CONTAINER_CONCURRENCY),
             "agents": service_json("agents", AGENTS_URL, env_list({**adk, **vertex})),
             "vault": service_json(
                 "vault",
@@ -514,7 +518,7 @@ def test_list_prints_every_item_without_any_environment_variable():
         assert f"({letter})" in result.stdout, letter
     # §10 の項目名(題に、設計書の言葉が入っている)
     for phrase in (
-        "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", "INFO", "workers=1", "SESSION_SIGNING_KEY", "SERVICE_AUTH_ENABLED",
+        "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", "INFO", "workers=1", "containerConcurrency", "SESSION_SIGNING_KEY", "SERVICE_AUTH_ENABLED",
         "GOOGLE_GENAI_USE_VERTEXAI", "VAULT_BASE_URL", "public_base_url", "起動元", "TTL", "cacheConfig.disableCache",
         "aiohttp", "run.googleapis.com/requests", "R-7", "/health", "/api/tee/attestation", "vault.app:create_app_from_env",
         "デモ URL", "提出物 6 点", "vault-kek-deny", "allow-iap-to-vault", "Policy Analyzer", "exemptedMembers",
@@ -687,6 +691,15 @@ def remove_command(world, service):
     world["svc"][service]["spec"]["template"]["spec"]["containers"][0].pop("command", None)
 
 
+def edit_concurrency(world, service, value):
+    """service の containerConcurrency(同時リクエスト数)を value にする(None なら項目を消す)。"""
+    template_spec = world["svc"][service]["spec"]["template"]["spec"]
+    if value is None:
+        template_spec.pop("containerConcurrency", None)
+    else:
+        template_spec["containerConcurrency"] = value
+
+
 NG_CASES = [
     # (項目, 世界を壊す関数, NG の行に入る語, 世界の VAULT_MODE)
     ("adk-capture", lambda w: edit_env(w, "web", "ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", "true"), "web: false でない", "tee"),
@@ -697,6 +710,8 @@ NG_CASES = [
     ("web-workers", lambda w: edit_env(w, "web", "WEB_CONCURRENCY", "4"), "WEB_CONCURRENCY=4", "tee"),
     ("web-workers", lambda w: edit_annotations(w, "web", "autoscaling.knative.dev/maxScale", "3"), "maxScale", "tee"),
     ("web-workers", lambda w: edit_annotations(w, "web", "run.googleapis.com/cpu-throttling", "true"), "cpu-throttling", "tee"),
+    ("web-workers", lambda w: edit_concurrency(w, "web", 80), "containerConcurrency が 80(期待: 200", "tee"),  # Cloud Run の既定。SSE だけで埋まる(C-65)
+    ("web-workers", lambda w: edit_concurrency(w, "web", None), "containerConcurrency が 未設定(期待: 200", "tee"),
     ("web-workers", lambda w: w["files"].update(dockerfile='FROM python:3.12-slim\nCMD ["uvicorn", "web.app:create_app_from_env"]\n'), "Dockerfile", "tee"),
     ("session-key", lambda w: edit_env(w, "web", "SESSION_SIGNING_KEY", "plain-text-value"), "平文の値", "tee"),
     ("session-key", lambda w: edit_container(w, "web", env=[]), "SESSION_SIGNING_KEY がない", "tee"),

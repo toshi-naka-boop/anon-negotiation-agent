@@ -23,8 +23,8 @@
 ### I-34（実装時の気づき / 小さな積み残し / low）可用性の修正（K4）の結果と、残したもの
 
 - 済んだこと: SSE の同時本数の上限（全体 20・送信元ごと 2。メモリ。席は権限の確認の前に取り、閉じたら必ず戻す）、入口 `session_start`（20 回）・`interview_begin`（10 回）、アイドルの面談の状態を 60 秒の見回りで掃除、`meter`・`session_start`・`interview_begin` は全体の枠 300 に数えない、本番の `web` は `/docs`・`/redoc`・`/openapi.json` を出さない（開発用の組み立てだけ）、`rate_limits` の文書 ID を HMAC に。開発用サーバで本物の HTTP で確認（C-65 の 80 本は 2 本だけつながり、ほかの経路は 4 ms で応答）。
-- 残したもの（小さな積み残し。デプロイの前に判断）: `deploy_check.sh` に Cloud Run の `containerConcurrency=200` の照合を足す（§10）。IP ごとの同時に持てる面談の数の上限。デモの 2 パネルを 1 本の SSE で送る。GET の再取得への IP ごとの枠。`/start`・`begin` を「新しく作るとき」だけ数えるか（いまは呼ぶたび）。
-- 既知のフレーク: `tests/test_stages_ledger.py::test_no_raw_value_is_written_to_the_ledger` は、乱数の依頼者 ID に "700" が含まれると落ちる（カナリアを数字でなく語にするか、ID を除いて検査する。次の掃除で直す）。
+- 済んだ（K5、2026-10-04）: `deploy_check.sh` の `web-workers` に `containerConcurrency=200` の照合。フレーク（`test_no_raw_value_is_written_to_the_ledger`）は ID を除いて検査する形に直し、600 回で 0 回。I-28 の未使用の残りと古いコメント、I-32 の `RefereeManager.reserve`（`_tasks` に触らない）、README の整形。
+- 残したもの（判断待ち。デプロイの前に）: IP ごとの同時に持てる面談の数の上限。デモの 2 パネルを 1 本の SSE で送る。GET の再取得への IP ごとの枠。`/start`・`begin` を「新しく作るとき」だけ数えるか（いまは呼ぶたび）。二分探索の実演が失敗・時間切れで取消を待つ短い間に見回りが本物のレフェリーを起こし得る（確率は極小。直すなら `release` を足して取消まで予約を保つ）。
 - 会場の運用: 同じ Wi-Fi は同じ IP。聴衆が同時に見る日は `sse_max_connections_per_client`・`interview_begin`・`interview_llm`・`meter` を上げる（`params.toml` の運用メモ）。
 
 ## 解決済み（一行索引）
