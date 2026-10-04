@@ -664,7 +664,7 @@ gcloud config set project "$PROJECT_ID"
 必要な API をまとめて有効にする。
 
 ```
-gcloud services enable compute.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com confidentialcomputing.googleapis.com logging.googleapis.com firestore.googleapis.com iap.googleapis.com run.googleapis.com
+gcloud services enable compute.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com confidentialcomputing.googleapis.com logging.googleapis.com firestore.googleapis.com iap.googleapis.com run.googleapis.com cloudasset.googleapis.com
 ```
 
 CPU のクォータを確認する（`N2D_CPUS` が 2 以上、TDX にするなら `C3_CPUS` が 4 以上あること。結果を貼る）。
@@ -1124,10 +1124,10 @@ EOF
 gcloud iam policies create vault-kek-deny --attachment-point="cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" --kind=denypolicies --policy-file=tmp/tee_spike/deny-kms.json
 ```
 
-付いたことを確かめる（結果を貼る）。
+付いたことと本文を確かめる（`list` は rules を返さないので `get`。結果を貼る）。
 
 ```
-gcloud iam policies list --attachment-point="cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" --kind=denypolicies --format=json
+gcloud iam policies get vault-kek-deny --attachment-point="cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" --kind=denypolicies --format=json
 ```
 
 負の試験（C-58 の拒否版）: 自分（オーナー）でダミーの暗号文を復号すると、今度は `PERMISSION_DENIED` になる（拒否ポリシーの反映に数分かかることがある）。
