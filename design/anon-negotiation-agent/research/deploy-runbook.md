@@ -183,3 +183,8 @@ uv run python scripts/verify_attestation.py --web "$WEB_URL"
 - TTL 6 本（作成中）、`_Default` シンクに除外 `run-requests`、`cacheConfig.disableCache=true`（GET で確認）。
 - deploy_check 全項目（1 回目）: OK 20・NG 8・SKIP 7。NG: iam-agents（権限 5 待ち）、ttl-default・ttl-vault（CREATING）、healthz-web・healthz-vault・demo-url（非公開で 403。公開待ち）、healthz-agents（web の SA の ID トークンを作る権限を昨夜の片付けで外したため。付けるならユーザー）、tee-i（I-37。組織が無いので作れない）。
 - リポジトリにリモートが無い（GitHub に未 push）。公開前の履歴の検査: 秘密らしいファイル名なし、秘密の形（秘密鍵・Google の API キー・GitHub/Slack のトークン・個人のメール）なし。`ya29.` の 1 件は試験の偽の値（`tests/test_tee_key_release.py` の `ACCESS_TOKEN`）。
+- ユーザー: 権限 5（agents の起動元を web の SA に）と公開（web に allUsers）。任意の 2 本（なりすましの権限の付与と取り消し）も実行した。
+- deploy_check 全項目（2 回目）: OK 26・NG 2・SKIP 7。NG は healthz-agents（なりすましの権限を外した後に流したため。agents への到達は下の通しで確認）と tee-i（I-37）だけ。TTL 6 本は ACTIVE。
+- 本番での通し（Claude の内蔵ブラウザ、公開 URL）: デモのケース 1 をライブ実行（本物の Gemini）→ 合意「見込み 高」（年収 650 万・リモート週 3・当直月 2・昇給見直し 12 か月・研修あり・副業可・入職 3 か月以内）。両パネルは自分側の評価だけ。段階開示が段 0→1→2 まで自動で進み、求人側に架空の職務要約・氏名・連絡先が開いた。web → agents（Gemini）→ 金庫（TEE）の経路が本番で通った。
+- 第三者の確認（AC-23）: `verify_attestation.py --web <公開 URL> --project … --service-account …` が OK・終了コード 0（本番条件の claims、リリースの記録 ca5791a）。
+- 残り: 点 6 の画面（設計 §9 の 6「スパイクでは JSON まで、画面は後」。未実装）、`GITHUB_REPO_URL`（GitHub のリポジトリが未作成）。

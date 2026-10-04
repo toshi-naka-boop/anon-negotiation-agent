@@ -17,7 +17,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v22 承認済み。デプロイ済み（非公開）: agents-00001-zlw、web-00001-62r（attestation verified）。TTL 作成中、ログ除外・cacheConfig 済み。ユーザー待ち: 権限 5（agents の run.invoker を web の SA に）、web の公開（allUsers）、GitHub のリポジトリ（名前・公開・push の了承。履歴の検査は済み）→ GITHUB_REPO_URL を web に設定。任意: healthz-agents のための一時的な OpenIdTokenCreator。その後: deploy_check 再実行、画面の確認（ui_checklist）、本物の Gemini での通し、Zenn・動画。VM は稼働中（DA 10/32 の見込み）。",
+  "nextAction": "v22 承認済み。本番デプロイ済み・公開: web-00001-62r（https://web-341888860511.asia-northeast1.run.app）、agents-00001-zlw。deploy_check OK 26・NG 2（healthz-agents は権限を外したため、tee-i は I-37）。ケース 1 のライブ実行と段階開示 0→2、verify_attestation --web が本番で合格。残り: 点 6 の画面表示（未実装）、GitHub のリポジトリ作成（ユーザー）→ push → GITHUB_REPO_URL を web に、I-34 の小さな積み残し、反証、デモ動画、信頼境界図・説明文・Zenn。VM は稼働中（審査期間は連続稼働。DA カウンタ 10/32 の見込み）。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
