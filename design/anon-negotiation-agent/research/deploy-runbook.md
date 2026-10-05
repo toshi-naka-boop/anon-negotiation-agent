@@ -190,3 +190,5 @@ uv run python scripts/verify_attestation.py --web "$WEB_URL"
 - 残り: 点 6 の画面（設計 §9 の 6「スパイクでは JSON まで、画面は後」。未実装）、`GITHUB_REPO_URL`（GitHub のリポジトリが未作成）。
 - 点 6 の画面の反映（2026-10-05、ユーザーの了承「今だすで進めて」）: イメージ `app:cc3818f` をビルドし、`gcloud run services update web --image=…` で `web-00002-fqc` に入れ替え（ほかの設定は保持）。公開 URL の入口に「金庫の確認(TEE)」が出て、検証済み・本番条件の claims・コミット（リンクなし＝`GITHUB_REPO_URL` 未設定）・本番の URL 入りの検証コマンドを表示。JWT は出ない。deploy_check の web 関係 11 項目は OK 11・NG 0。
 - 次の反映: GitHub のリポジトリができたら `gcloud run services update web --region=asia-northeast1 --update-env-vars=GITHUB_REPO_URL=https://github.com/<owner>/<repo>`（イメージの作り直しは不要）。
+- GitHub: `toshi-naka-boop/anon-negotiation-agent`。PR #1 をユーザーがマージコミットでマージ（abada3c。ca5791a は main から辿れる）。
+- `GITHUB_REPO_URL` を反映（ユーザーの指示「反映して」。`web-00003-j6l`）。`/api/tee/attestation` の `release.url` が `…/commit/ca5791a…` になった。反映の時点でリポジトリはまだ非公開（ログインなしで 404）。公開に切り替わればリンクがそのまま使える。
