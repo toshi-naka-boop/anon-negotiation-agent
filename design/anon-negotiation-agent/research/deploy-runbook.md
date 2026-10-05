@@ -188,3 +188,5 @@ uv run python scripts/verify_attestation.py --web "$WEB_URL"
 - 本番での通し（Claude の内蔵ブラウザ、公開 URL）: デモのケース 1 をライブ実行（本物の Gemini）→ 合意「見込み 高」（年収 650 万・リモート週 3・当直月 2・昇給見直し 12 か月・研修あり・副業可・入職 3 か月以内）。両パネルは自分側の評価だけ。段階開示が段 0→1→2 まで自動で進み、求人側に架空の職務要約・氏名・連絡先が開いた。web → agents（Gemini）→ 金庫（TEE）の経路が本番で通った。
 - 第三者の確認（AC-23）: `verify_attestation.py --web <公開 URL> --project … --service-account …` が OK・終了コード 0（本番条件の claims、リリースの記録 ca5791a）。
 - 残り: 点 6 の画面（設計 §9 の 6「スパイクでは JSON まで、画面は後」。未実装）、`GITHUB_REPO_URL`（GitHub のリポジトリが未作成）。
+- 点 6 の画面の反映（2026-10-05、ユーザーの了承「今だすで進めて」）: イメージ `app:cc3818f` をビルドし、`gcloud run services update web --image=…` で `web-00002-fqc` に入れ替え（ほかの設定は保持）。公開 URL の入口に「金庫の確認(TEE)」が出て、検証済み・本番条件の claims・コミット（リンクなし＝`GITHUB_REPO_URL` 未設定）・本番の URL 入りの検証コマンドを表示。JWT は出ない。deploy_check の web 関係 11 項目は OK 11・NG 0。
+- 次の反映: GitHub のリポジトリができたら `gcloud run services update web --region=asia-northeast1 --update-env-vars=GITHUB_REPO_URL=https://github.com/<owner>/<repo>`（イメージの作り直しは不要）。

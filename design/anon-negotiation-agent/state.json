@@ -18,7 +18,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v22 承認済み。本番デプロイ済み・公開（web-00001-62r、agents-00001-zlw）。点 6 の画面を実装（fbdb7b8。全体 3,596 件通過）。ユーザー待ち: web の再デプロイの了承（点 6 の画面を出す）、GitHub のリポジトリ作成と remote 登録・main の push（ユーザー）→ 作業ブランチの push と PR → GITHUB_REPO_URL、公開前に design の検討記録 3 ファイルの扱い。その後: I-34 の小さな積み残し、反証、デモ動画、信頼境界図・説明文・Zenn。次の設計書の改訂で I-37・I-38 を写す。VM は稼働中（DA カウンタ 10/32 の見込み）。",
+  "nextAction": "v22 承認済み。本番デプロイ済み・公開（web-00002-fqc〔点 6 の画面つき〕、agents-00001-zlw）。全体 3,596 件通過。ユーザー待ち: GitHub のリポジトリ作成と remote 登録・main の push（ユーザー）→ 作業ブランチの push と PR → GITHUB_REPO_URL を web に（イメージ不要）、公開前に design の検討記録 3 ファイルの扱い。その後: I-34 の小さな積み残し、反証、デモ動画、信頼境界図・説明文・Zenn。次の設計書の改訂で I-37・I-38 を写す。VM は稼働中（DA カウンタ 10/32 の見込み）。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
