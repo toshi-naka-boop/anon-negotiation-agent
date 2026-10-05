@@ -15,6 +15,8 @@
 - 画面の後半(作業パッケージ L2): 段階開示・開示台帳・FR-39 の 2 パネル・推定区間メーター・シミュレーション・二分探索の実演の区画が埋まっていること(data-status="ready"・
   ナビが本物のリンク)、画面の言葉(設計書が求める文言)、画面にある定数がサーバーの値と一致すること、デモ・攻撃の画面が本物の依頼者の API を呼ばないこと。
   node があれば、区画の描画を偽の DOM で動かして確かめる(サンプルのデータは、実際の API のモデルから作る)。
+- 入口の「金庫の確認(TEE)」(static/tee.js。設計書 §9 の表の 6 行目): 区画の id・nonce なしの呼び出し・応答のトークン(JWT)を画面のコードが参照しないこと・
+  説明文の言葉。node があれば、応答(検証済みでリンクなし・あり、検証できていない、TEE でない環境の 404)の描画を偽の DOM で確かめる。
 金庫は本物の vault の app を ASGI のままつなぎ、web の app へは Browser(クッキーを持つ httpx のクライアント)から入る。
 """
 
@@ -33,9 +35,12 @@ from typing import get_args
 import httpx
 import pytest
 import web.app as web_app_module
+from attestation_helpers import BUILT_AT, COMMIT, attestation_payload
 from negotiation_core import AXES, Anchor, Policy, Verdict
+from negotiation_core.attestation import summarize_claims
 from negotiation_core.estimate_interval import Interval
 from sse_starlette import ServerSentEvent
+from test_web_tee_api import CERT_HASH, CLAIM_KEYS, CONTRACT_KEYS, REPO as TEE_REPO
 from vault.api_models import EventViewItem, MoveRequest, PolicyView
 from vault.fixtures import FIXTURES_DIRECTORY, load_case_fixture
 from vault.models import EmployerRule, NegotiationResult
@@ -43,6 +48,7 @@ from vault.seed import seed_templates
 from vault_helpers import needs_confirmation_policy, sample_package
 from web import activity_api, meter_api, ui_api
 from web.activity_api import ActivityEntry, ActivityLog
+from web.api import TeeAttestationConfig
 from web.app import create_app, create_app_from_env
 from web.attack.scripted import probe_package
 from web.ledger import LedgerEntry, LedgerOperator, LedgerRecipient
@@ -355,7 +361,7 @@ def test_the_expected_files_exist():
     assert {path.name for path in HTML_FILES} == set(PAGES.values())
     for name in (
         "app.css", "api.js", "ui.js", "index.js", "interview.js", "me.js", "demo.js", "attack.js",
-        "stages.js", "ledger.js", "panels.js", "meter.js",
+        "stages.js", "ledger.js", "panels.js", "meter.js", "tee.js",
     ):  # fmt: skip
         assert (STATIC / name).is_file(), name
 
@@ -482,9 +488,12 @@ def routes_called_by_the_javascript() -> dict[tuple[str, str], list[str]]:
 
 
 @pytest.mark.anyio
-async def test_every_api_the_javascript_calls_is_a_real_route(web_app):
+async def test_every_api_the_javascript_calls_is_a_real_route(web_app, default_db, session_key):
     # 経路の打ち間違い・メソッドの違い・パスの変数名の違いを、ブラウザなしで見つける。
     paths = web_app.app.openapi()["paths"]
+    # 入口の「金庫の確認(TEE)」が呼ぶ経路は、TEE モードの app にだけある(そうでない app では 404)ので、TEE モードの app の経路も照合に含める。
+    tee_app = create_app(vault=object(), default_db=default_db, session_key=session_key, tee=TeeAttestationConfig(object(), []))
+    paths = {**paths, **tee_app.openapi()["paths"]}
     called = routes_called_by_the_javascript()
 
     assert len(called) >= 44  # 読み取りが壊れて、何も確かめずに通らない
@@ -512,6 +521,7 @@ async def test_every_api_the_javascript_calls_is_a_real_route(web_app):
         ("POST", "/v1/demo/meter"),
         ("GET", "/v1/demo/meter/simulation"),
         ("POST", "/v1/demo/attack/bisection"),
+        ("GET", "/api/tee/attestation"),  # 入口の「金庫の確認(TEE)」
     ):
         assert expected in called, expected
 
@@ -602,7 +612,7 @@ def test_the_sections_of_the_second_package_are_filled_in_and_the_navigation_lin
         assert '<a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>' in source, path.name
 
 
-# 設計書が求める、画面の言葉(§6.2・§7・§8.3)。どれかが消えたら、確かめ直す。
+# 設計書が求める、画面の言葉(§6.2・§7・§8.3・§9)。どれかが消えたら、確かめ直す。
 SCREEN_TEXT = [
     ("attack.html", meter_api.NOTE),  # 「金庫の答えをすべて見られたとしても、ここまで」
     ("attack.html", "シミュレーション(防御なしの場合の計算。金庫は使っていません)"),
@@ -614,12 +624,36 @@ SCREEN_TEXT = [
     ("panels.js", "まだ隠しているもの"),
     ("panels.js", "辞めた理由(面談時に破棄済み)"),
     ("panels.js", "軸どうしの組み合わせ"),  # 軸ごとに分けて見せるので、組み合わせの情報は落ちている、の 1 文
+    # 入口の「金庫の確認(TEE)」(§9 の表の 6 行目)。「TEE で言えること」の 3 段と、「TEE でも言えないこと」
+    ("index.html", "金庫の確認(TEE)"),
+    ("tee.js", "検証済み"),
+    ("tee.js", "検証できていません"),
+    ("tee.js", "この環境では、金庫は TEE(Confidential Space)で動いていません(開発用の構成)"),
+    ("tee.js", "uv run python scripts/verify_attestation.py --web"),
+    ("tee.js", "Google の証明で確かめられます"),  # 段 1: 動いているもの(第三者が確かめられる)
+    ("tee.js", "Cloud KMS の監査ログ"),  # 段 2: 鍵の排他性(オーナーは技術的には復号できる。記録による抑止)
+    ("tee.js", "コミットとの対応は運営者の記録"),  # 段 3: ソースの由来(L0 は運営者の申告)
+    ("tee.js", "web がその金庫にだけデータを送っている"),  # 言えないこと: 確かめられるのは、存在と nonce への応答まで
 ]
 
 
 @pytest.mark.parametrize(("name", "phrase"), SCREEN_TEXT)
 def test_the_screens_say_what_the_design_asks_them_to_say(name, phrase):
     assert phrase in (STATIC / name).read_text(encoding="utf-8")
+
+
+def test_the_tee_section_is_on_the_top_page_calls_the_route_without_a_nonce_and_never_refers_to_the_token():
+    # 入口の「金庫の確認(TEE)」(§9 の表の 6 行目)。区画の id と、呼び出し(nonce なし。nonce つきは、利用者ごとに 10 秒に 1 回の転送の枠を使う)。
+    # 応答のトークン(JWT)は、画面のコードが参照しない(単語そのものがない)。L0 の間は「公開されたコードで動く」と書かない(§9)。
+    page = page_of(STATIC / "index.html")
+    index_js = (STATIC / "index.js").read_text(encoding="utf-8")
+
+    assert {"tee", "tee-title", "tee-body"} <= set(page.ids)
+    assert 'call("GET /api/tee/attestation")' in index_js  # 第 2 引数(query)がない
+    assert 'from "./tee.js"' in index_js
+    for name in ("index.html", "index.js", "tee.js"):
+        assert "token" not in (STATIC / name).read_text(encoding="utf-8").lower(), name
+    assert "公開されたコードで動く" not in (STATIC / "tee.js").read_text(encoding="utf-8")
 
 
 def js_numbers(name: str, constant: str) -> dict[str, int]:
@@ -1457,11 +1491,12 @@ def test_the_manual_checklist_covers_every_page_and_every_part_of_the_second_pac
     # 確認の表は、すべて「操作」と「合格」の 2 列
     headers = [line for line in source.splitlines() if line.startswith("| 操作")]
     assert len(headers) == 6 and set(headers) == {"| 操作 | 合格 |"}
-    # AC-19(活動ログ・開示台帳の閲覧、2 つのパネルの並列表示、一時停止・取消)と、後半の要点を、画面で確かめる行がある
+    # AC-19(活動ログ・開示台帳の閲覧、2 つのパネルの並列表示、一時停止・取消)と、後半の要点と、入口の「金庫の確認(TEE)」(§9。AC-23)を、画面で確かめる行がある
     for required in (
         "活動ログ", "並んで", "一時停止", "取消", "開示台帳", "段階開示", "ここで連絡先が開示されます", "架空の求人(自動応答)",
         "金庫の答えをすべて見られたとしても、ここまで", "シミュレーション(防御なしの場合の計算。金庫は使っていません)", "台本の攻撃者で実演",
         "最悪漏れてもここまで", "まだ隠しているもの", "scripts/serve_local.py",
+        "金庫の確認(TEE)", "scripts/verify_attestation.py", "この環境では、金庫は TEE(Confidential Space)で動いていません",
     ):  # fmt: skip
         assert required in source, required
 
@@ -1566,6 +1601,48 @@ def test_the_activity_watcher_of_the_screens_streams_falls_back_to_polling_and_s
 # ----------------------------------------------------------------------
 
 
+TEE_TOKEN = "eyJhbGciOiJSUzI1NiJ9.TOKEN-MUST-NOT-BE-SHOWN.c2lnbmF0dXJl"  # 画面に出してはいけない値(描画のテストが、どこにも出ないことを確かめる)
+
+
+def tee_fixtures() -> dict:
+    """金庫の確認(TEE)の描画のテストに渡す、サンプルの応答(GET /api/tee/attestation の形。本番の応答の例と同じ 8 つのキーと、claims の 9 項目)。
+
+    claims は、本物の形のペイロードから、web が使う summarize_claims で作る。ほかは、本番の応答の例と同じ形(値は、テスト用の定数。コミットのリンクの土台がなければ、url は null)。
+    """
+    nonce = "N" * 43
+    claims = summarize_claims(attestation_payload([nonce, CERT_HASH]))
+    release = {"commit": COMMIT, "url": None, "built_at": BUILT_AT, "status": "active"}
+    verified = {
+        "verified": True,
+        "reason": None,
+        "checked_at": "2026-10-04T23:23:04.445103+00:00",
+        "nonce": nonce,
+        "certificate_sha256": CERT_HASH,
+        "claims": claims,
+        "release": release,
+        "token": TEE_TOKEN,
+    }
+    assert set(verified) == CONTRACT_KEYS and set(claims) == CLAIM_KEYS  # tests/test_web_tee_api.py の、契約のキーと同じ
+    return {
+        "verified": verified,
+        "with_link": {**verified, "release": {**release, "url": f"{TEE_REPO}/commit/{COMMIT}"}},
+        # 検証できていない(debug イメージ): 取れた範囲の claims(署名は確かめていない)は返るが、release は引かない。トークンは返る
+        "unverified": {**verified, "verified": False, "reason": "debug", "claims": {**claims, "dbgstat": "enabled"}, "release": None},
+        # 金庫に届かず、トークンも claims も取れなかった
+        "unreachable": {
+            **verified,
+            "verified": False,
+            "reason": "unavailable",
+            "certificate_sha256": None,
+            "claims": summarize_claims({}),
+            "release": None,
+            "token": None,
+        },
+        # 画面が信用しない値: https でない URL(リンクにしない)・端末にそのまま貼れない project_id(検証のコマンドに入れない)
+        "unsafe": {**verified, "claims": {**claims, "project_id": "x; rm -rf ~"}, "release": {**release, "url": "javascript:alert(1)"}},
+    }
+
+
 def screen_fixtures() -> dict:
     """描画のテストに渡す、サンプルのデータ(StageView・LedgerEntry・build_panels・build_meter・simulate_bisection が返す形)。"""
     package = sample_package(salary=700, remote_days=2, night_duty=2, review_months=6)
@@ -1666,6 +1743,7 @@ def screen_fixtures() -> dict:
         "ledger": ledger,
         "answers": answers,
         "panels": panels,
+        "tee": tee_fixtures(),
         "meter_one": meter_api.build_meter([probes]).model_dump(mode="json"),
         "meter_wide": meter_api.build_meter([probes[:1]]).model_dump(mode="json"),
         "meter_empty": meter_api.build_meter([]).model_dump(mode="json"),
@@ -1695,6 +1773,7 @@ import { mountStages } from "__STAGES__";
 import { groupRecords, mountLedger } from "__LEDGER__";
 import { cellText, mountPanels } from "__PANELS__";
 import { cellRange, describeInterval, mountMeter, mountSimulation } from "__METER__";
+import { showTee } from "__TEE__";
 
 const DATA = __DATA__;
 const NID = DATA.views.open.nid; // 段階開示のサンプルの交渉 ID(サーバーが返す StageView の nid)
@@ -1997,18 +2076,103 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
   assert.ok(text(error).includes("10 万円刻み"));
   console.log("ok simulation");
 }
+
+{ // 金庫の確認(TEE): 検証済み(リンクなし・あり)・検証できていない・取れなかった・信用しない値・TEE でない環境(404)・ほかの失敗。トークンは、どれにも出ない
+  const TEE = DATA.tee;
+  const ORIGIN = "https://web.example";
+  const command = (project, origin = ORIGIN) => `uv run python scripts/verify_attestation.py --web ${origin} --project ${project} --service-account <金庫の SA>`;
+  const show = async (load, origin = ORIGIN) => {
+    const body = new FakeElement("div");
+    body.textContent = "読み込み中…"; // ページの HTML にある、最初の表示
+    await showTee(body, { load, origin });
+    return body;
+  };
+  const badges = (body) => byClass(body, "badge").map(text);
+  const clean = (body) => { // トークン(JWT)は、どこにも出ない。最初の「読み込み中…」は消える
+    assert.ok(!text(body).includes("TOKEN-MUST-NOT-BE-SHOWN") && !text(body).includes("eyJ"));
+    assert.ok(!text(body).includes("読み込み中"));
+  };
+  const { claims, release } = TEE.verified;
+
+  // 検証済み・コミットのリンクの土台がない(url が null): コミットは文字のまま、その旨の注記
+  let calls = 0;
+  let body = await show(async () => { calls += 1; return TEE.verified; });
+  assert.equal(calls, 1);
+  assert.deepEqual(badges(body), ["検証済み"]);
+  includesAll(text(body), [claims.image_digest, "GCP_AMD_SEV", "CONFIDENTIAL_SPACE", claims.swversion[0], "disabled-since-boot", "LATEST, STABLE, USABLE",
+    claims.project_id, claims.zone, claims.instance_name, TEE.verified.checked_at, TEE.verified.certificate_sha256,
+    release.commit, release.built_at, "有効(active)", "GitHub のコミットへのリンクは、この環境では設定されていません"]);
+  assert.equal(byTag(body, "a").length, 0);
+  assert.deepEqual(byTag(body, "pre").map(text), [command(claims.project_id)]); // この URL と、証明の project_id が入る。金庫の SA は応答にないので、置き換え用
+  // 説明文は、設計書 §9 の 3 段と「言えないこと」。「公開されたコードで動く」とは書かない
+  assert.deepEqual(byTag(body, "li").map((item) => text(byTag(item, "strong")[0])), ["動いているもの", "鍵の排他性", "ソースの由来", "確かめられるのはここまで", "TEE の外にあるもの"]);
+  includesAll(text(body), ["Cloud KMS の監査ログ", "コミットとの対応は運営者の記録", "web がその金庫にだけデータを送っている"]);
+  assert.ok(!text(body).includes("公開されたコードで動く"));
+  clean(body);
+
+  // 検証済み・url がある: コミットが、その URL へのリンクになる(注記は出ない)
+  body = await show(async () => TEE.with_link);
+  const links = byTag(body, "a");
+  assert.equal(links.length, 1);
+  assert.deepEqual([links[0].getAttribute("href"), text(links[0]), links[0].getAttribute("rel")], [TEE.with_link.release.url, release.commit, "noopener noreferrer"]);
+  assert.ok(!text(body).includes("リンクは、この環境では設定されていません"));
+  clean(body);
+
+  // 検証できていない(理由つき): release は null。値は、確かめられていないものとして出す。説明文は出す
+  body = await show(async () => TEE.unverified);
+  assert.deepEqual(badges(body), ["検証できていません"]);
+  includesAll(text(body), ["理由: debug", "確かめられていないトークンに書かれていたもの", "enabled", "運営者のリリースの表", "にありません"]);
+  assert.equal(byTag(body, "a").length, 0);
+  assert.equal(byTag(body, "li").length, 5);
+  clean(body);
+
+  // 金庫に届かず、何も取れなかった: 取れなかった項目(9 つの claims と、証明書のハッシュ)は「—」。コマンドは、置き換え用の文字
+  body = await show(async () => TEE.unreachable);
+  assert.deepEqual(badges(body), ["検証できていません"]);
+  assert.ok(text(body).includes("理由: unavailable"));
+  assert.equal(byClass(body, "muted").filter((node) => text(node) === "—").length, 10);
+  assert.deepEqual(byTag(body, "pre").map(text), [command("<プロジェクト ID>")]);
+  clean(body);
+
+  // 信用しない値: https でない URL(javascript: など)はリンクにしない。端末に貼れない project_id と配信元は、コマンドに入れない。ポートつきの配信元は入る
+  body = await show(async () => TEE.unsafe, "https://web.example; rm -rf ~");
+  assert.equal(byTag(body, "a").length, 0);
+  assert.ok(text(body).includes(release.commit));
+  assert.deepEqual(byTag(body, "pre").map(text), [command("<プロジェクト ID>", "<この URL>")]);
+  body = await show(async () => TEE.verified, "http://127.0.0.1:8080");
+  assert.deepEqual(byTag(body, "pre").map(text), [command(claims.project_id, "http://127.0.0.1:8080")]);
+
+  // 404(TEE モードでない環境): 淡い色の注記だけ。エラーの枠にも、証明の欄にもならない
+  body = await show(async () => { throw new ApiError(404, "Not Found", { detail: "Not Found" }); });
+  assert.equal(text(body), "この環境では、金庫は TEE(Confidential Space)で動いていません(開発用の構成)。");
+  assert.deepEqual([byClass(body, "muted").length, byClass(body, "msg-error").length, byTag(body, "pre").length], [1, 0, 0]);
+
+  // ほかの失敗: ほかの区画と同じ、エラーの枠(404 の注記にはならない)
+  for (const [failure, phrase] of [
+    [new ApiError(0, "network", null), "サーバーに接続できません"],
+    [new ApiError(500, null, null), "サーバーで問題が起きました"],
+    [new TypeError("unexpected"), "予期しないエラーが起きました"],
+  ]) {
+    body = await show(async () => { throw failure; });
+    assert.ok(text(body).includes(phrase) && !text(body).includes("で動いていません"), phrase);
+    assert.equal(byClass(body, "msg-error").length, 1);
+    assert.ok(!text(body).includes("読み込み中"));
+  }
+  console.log("ok tee");
+}
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_the_sections_render_the_apis_data_and_behave_as_designed():
-    # stages.js・ledger.js・panels.js・meter.js を、そのまま node で読み込み、偽の DOM に、実際の API のモデルから作ったデータを描く。
+    # stages.js・ledger.js・panels.js・meter.js・tee.js を、そのまま node で読み込み、偽の DOM に、実際の API のモデルから作ったデータを描く。
     script = (
         SCREENS_SCRIPT.replace("__API__", (STATIC / "api.js").as_uri())
         .replace("__STAGES__", (STATIC / "stages.js").as_uri())
         .replace("__LEDGER__", (STATIC / "ledger.js").as_uri())
         .replace("__PANELS__", (STATIC / "panels.js").as_uri())
         .replace("__METER__", (STATIC / "meter.js").as_uri())
+        .replace("__TEE__", (STATIC / "tee.js").as_uri())
         .replace("__DATA__", json.dumps(screen_fixtures(), ensure_ascii=False))
     )
 
@@ -2017,4 +2181,5 @@ def test_the_sections_render_the_apis_data_and_behave_as_designed():
     assert result.returncode == 0, result.stderr + result.stdout
     assert result.stdout.split() == [
         "ok", "stages-own", "ok", "stages-demo", "ok", "stages-states", "ok", "ledger", "ok", "panels", "ok", "meter-cells", "ok", "meter", "ok", "simulation",
+        "ok", "tee",
     ]  # fmt: skip

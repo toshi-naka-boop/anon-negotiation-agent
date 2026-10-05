@@ -443,3 +443,19 @@ th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   white-space: nowrap;
 }
 .banner-simulation { background: var(--replay-bg); color: var(--replay); border-color: var(--replay); }
+
+/* ---- 金庫の確認(tee.js) ---- */
+
+#tee-body h3 { margin-top: 1.2rem; }
+.tee-facts { margin: 0 0 0.9rem; }
+.tee-fact {
+  display: grid;
+  grid-template-columns: minmax(9rem, 16rem) minmax(0, 1fr);
+  gap: 0.1rem 0.8rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.tee-fact:last-child { border-bottom: 0; }
+.tee-fact dt { color: var(--muted); }
+.tee-fact dd { margin: 0; overflow-wrap: anywhere; } /* digest・証明書のハッシュは、途中で折り返す */
+@media (max-width: 480px) { .tee-fact { grid-template-columns: 1fr; } }
