@@ -93,11 +93,15 @@ class VaultClientConfig:
 
 @dataclass(frozen=True)
 class LimitsConfig:
-    """画面 API の入力の大きさの上限(暫定)。"""
+    """画面 API の入力の大きさの上限(暫定)。
+
+    max_request_body_bytes は、すべての要求の本文の全体の上限(バイト。台帳 X-85)。ルートごとの上限(32 KB)は別にそのまま残る。
+    """
 
     max_anchors_per_kind: int
     max_blocklist_entries: int
     max_company_id_length: int
+    max_request_body_bytes: int
 
 
 @dataclass(frozen=True)
@@ -153,11 +157,14 @@ def load_web_config(path: Path = _CONFIG_PATH) -> WebConfig:
             max_anchors_per_kind=int(web_raw["limits"]["max_anchors_per_kind"]),
             max_blocklist_entries=int(web_raw["limits"]["max_blocklist_entries"]),
             max_company_id_length=int(web_raw["limits"]["max_company_id_length"]),
+            max_request_body_bytes=int(web_raw["limits"]["max_request_body_bytes"]),
         )
     except KeyError as exc:
         raise ValueError(f"{path} is missing a required [web] key: {exc}") from exc
     if not referee.agent_retry_backoff_seconds:
         raise ValueError(f"{path}: agent_retry_backoff_seconds must not be empty")
+    if limits.max_request_body_bytes < 1:
+        raise ValueError(f"{path}: web.limits.max_request_body_bytes must be positive")
     if llm_budget.daily_limit < 1 or llm_budget.per_negotiation_limit < 1:
         raise ValueError(f"{path}: web.llm_budget limits must be positive")
     if not 1 <= llm_budget.max_checks_per_plan <= MAX_PLANNED_CHECKS:

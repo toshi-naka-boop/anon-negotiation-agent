@@ -42,9 +42,16 @@ from web.interview.config import InterviewConfig
 from web.interview.profile import ProfileError, profile_to_bands
 from web.interview.salary import NormalizedSalary, SalaryBasis, SalaryConversionError, nearest_grid_index, normalize_salary
 from web.interview.sentences import describe_anchor, describe_offer, describe_statement, display_value
-from web.interview.state import InterviewState, InterviewStateStore, InterviewStoreFull, SalaryProposal
+from web.interview.state import (
+    InterviewClientLimitReached,
+    InterviewState,
+    InterviewStateStore,
+    InterviewStoreFull,
+    SalaryProposal,
+)
 from web.interview.statements import choice_not_saved_reason, statement_skip_reason
 from web.interview.templates import DISCRETE_AXIS_KEYS, InterviewTemplates
+from web.limits import INTERVIEW_CONCURRENT_ENTRANCE, rate_limited_error
 from web.llm_budget import LlmBudgetUnavailable
 from web.principals_meta import PrincipalsMetaStore
 from web.vault_client import VaultClient
@@ -104,8 +111,11 @@ class InterviewService:
     # 状態の取り出しと、手順の前提の確認
     # ------------------------------------------------------------------
 
-    def _state(self, principal_id: str) -> InterviewState:
-        state = self.store.get(principal_id)
+    def _state(self, principal_id: str, *, touch: bool = True) -> InterviewState:
+        """面談の状態(なければ 409)。書き込みの手順は、既定の touch=True で、アイドルの時計を進め直す。
+        読み取り(GET)は touch=False で呼ぶ: 読んでも、アイドルの寿命は延びない(台帳 C-69・X-87)。
+        """
+        state = self.store.get(principal_id, touch=touch)
         if state is None:
             raise InterviewError(409, "interview_not_started")
         return state
@@ -203,7 +213,7 @@ class InterviewService:
         return "ready"
 
     def view(self, principal_id: str) -> dict[str, Any]:
-        return self._view(self._state(principal_id))
+        return self._view(self._state(principal_id, touch=False))
 
     def _view(self, state: InterviewState) -> dict[str, Any]:
         pairs = self._pairs(state) if state.salary is not None and state.removed_axes is not None else []
@@ -231,12 +241,25 @@ class InterviewService:
     # 手順 0: 始める(入口の注記を出す)
     # ------------------------------------------------------------------
 
-    def begin(self, principal_id: str, restart: bool) -> dict[str, Any]:
-        """面談を始める(すでに途中のものがあれば、restart でなければそのまま続ける)。最初の応答に、入口の注記を含める。"""
-        state = self.store.get(principal_id)
+    def begin(self, principal_id: str, restart: bool, client: str) -> dict[str, Any]:
+        """面談を始める(すでに途中のものがあれば、restart でなければそのまま続ける)。最初の応答に、入口の注記を含める。
+
+        client は、要求を送ってきた送信元のキー(web.client_ip.client_key。IPv6 は /64 単位)。続きを読み込むだけの begin は、書き込み(アイドルの時計を進め直す)だが、
+        同時数には数えない。新しく状態を作る begin(やり直しを含む)は、この送信元が、置き換えるもの以外に max_concurrent_per_client 件持っていれば
+        429(入口 interview_concurrent。台帳 C-69・X-87)。全体の上限なら 503。
+        """
+        state = self.store.get(principal_id, touch=True)
         if state is None or restart:
             try:
-                state = self.store.create(principal_id)
+                state = self.store.create(principal_id, client)
+            except InterviewClientLimitReached as reached:
+                raise rate_limited_error(
+                    INTERVIEW_CONCURRENT_ENTRANCE,
+                    "client",
+                    limit=reached.limit,
+                    window_seconds=None,
+                    retry_after_seconds=reached.retry_after_seconds,
+                ) from None
             except InterviewStoreFull:
                 raise InterviewError(503, "too_many_interviews") from None
         return {"notice": self.notice(), "texts": self.texts(), "state": self._view(state)}
@@ -318,7 +341,7 @@ class InterviewService:
     # ------------------------------------------------------------------
 
     def axes_view(self, principal_id: str) -> dict[str, Any]:
-        state = self._state(principal_id)
+        state = self._state(principal_id, touch=False)
         removed = self._removed(state)
         return {
             "notice": self._templates.axes.notice,
@@ -367,7 +390,7 @@ class InterviewService:
         return {"id": pair.id, "question": removed_axes_question(removed, self._templates), "options": options}
 
     def choices_view(self, principal_id: str) -> dict[str, Any]:
-        state = self._state(principal_id)
+        state = self._state(principal_id, touch=False)
         pairs = self._pairs(state)
         return {
             "intro": self._templates.two_choice.intro,
@@ -473,7 +496,7 @@ class InterviewService:
 
     def confirmation(self, principal_id: str) -> dict[str, Any]:
         """確認画面: アンカーを平文にして見せる(埋めた値も含めて。FR-03)。二択を最小の組数以上答えるまでは出せない(AC-01)。"""
-        state = self._state(principal_id)
+        state = self._state(principal_id, touch=False)
         derived = self._require_ready_for_confirmation(state)
         removed = self._removed(state)
         by_key = {entry.key: entry for entry in derived.entries}
@@ -540,7 +563,7 @@ class InterviewService:
 
     def worst_case(self, principal_id: str) -> dict[str, Any]:
         """軸ごとの「最悪ここまで」: 丸めた後のマス。外した軸は「外しています(交渉中に確認)」。確認のあとに出せる。"""
-        state = self._state(principal_id)
+        state = self._state(principal_id, touch=False)
         derived = self._require_confirmed(state)
         return {
             "axes": worst_case_view(derived.entries, self._removed(state)),

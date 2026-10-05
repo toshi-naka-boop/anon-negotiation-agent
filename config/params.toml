@@ -261,6 +261,20 @@ rate_counter_ttl_seconds = 3600
 sse_max_connections = 20
 sse_max_connections_per_client = 2
 
+# --- リクエスト本文の全体の上限(design.md §8.2「本文の全体の上限」。台帳 X-85。web.body_limit の RequestBodyLimitMiddleware) ---
+# web のすべての要求の本文を、ルートの前(ASGI のミドルウェア。セッションのミドルウェアより外)で、この長さまでに抑える(バイト)。Content-Length がこれを超えていれば、
+# 本文を読まずに 413。宣言がなければ(チャンク送信)、読みながら数えて、超えた時点で 413({"detail": "request_body_too_large"})。FastAPI は、依存(枠・認証)より先に本文を
+# 読むので、ルートごとの上限だけでは、枠の外で大きな本文を読ませられる。ルートごとの上限(段階開示 32 KB・攻撃 32 KB・面談の LLM 入力 32 KB)は、そのまま残る(これは、その上の天井)。
+max_request_body_bytes = 65536
+
+# --- ログインなしの読み取りの枠(design.md §8.2「ログインなしの読み取りの枠」。台帳 C-68。web.limits の AnonymousReadLimiter・AnonymousReadLimitMiddleware) ---
+# セッションなしで金庫(と Firestore)を読む GET(デモの活動・2 パネル・イベント・段、攻撃のイベント・壁 2・壁 3。web.api の ANONYMOUS_READ_PATH_PREFIXES)に、
+# クライアントごと(IPv6 は /64 単位。台帳 C-71)・1 分あたりの回数の枠を掛ける。web は 1 インスタンスなので、メモリの中だけで数える(再起動で数え直し。Firestore には書かない)。
+# 全体の枠 rate_overall_limit には数えない。超えたら 429(入口 anonymous_read。Retry-After つき)。SSE・/api/tee/attestation・静的ファイル・/health・面談の注記は対象外。
+# 画面の再取得(SSE がつながらないときの 2 秒ごと)は、1 ページで毎分 30 回ほど(両側を 1 回で返す /panels。攻撃画面は壁 3 の読み直しが加わって 60 回ほど)なので、この枠に収まる。
+# 【発表の日の運用】会場の同じ Wi-Fi は同じクライアントになる(SSE の席はクライアントごとに 2 本までなので、2 人目からは 2 秒ごとの再取得に落ちる)。聴衆が同時に見るなら上げる(目安: 見る人数 × 60)。
+anonymous_read_per_minute = 120
+
 # --- 面談(design.md §5・§8.2。src/web/interview/)の暫定値 ---
 # モデル名と temperature は [agents] の値を使う(キーを持たない)。LLM の一時的なエラーの再試行の回数・待ち時間・1 呼び出しの上限は
 # [web.referee] と同じ(§4.1)。面談の文面は fixtures/interview_templates.toml(U-01)。
@@ -274,9 +288,15 @@ max_output_tokens = 2048
 thinking_level = "LOW"
 # 面談の LLM 呼び出しの回数の枠(§8.2「面談の LLM 呼び出し 30 回／10 分」)は、ここではなく [web.limits.per_client] の interview_llm
 # (クライアント IP ごと。web.limits)。1 日の物理の数の上限は [web.llm_budget] が別に受け持つ
-# 面談の途中の状態(サーバのメモリ)。最後に使ってからこの秒数でメモリから消す。同時に持てる面談の数の上限
+# 面談の途中の状態(サーバのメモリ)。最後に書き込んでからこの秒数でメモリから消す。同時に持てる面談の数の上限
+# アイドルの時計は、書き込み(開始・プロフィール・回答・確認など)でだけ進め直し、読み取り(GET)では延ばさない(台帳 C-69・X-87)
 state_idle_ttl_seconds = 3600
 max_active_interviews = 500
+# 作ってから、アイドルかどうかによらず消す秒数(3 時間。台帳 C-69・X-87)。見回りが、メモリからも消す。読み取りも書き込みも途切れない 1 つの送信元が、状態を持ち続けられないように
+max_lifetime_seconds = 10800
+# 送信元(クライアントの見分け方。IPv6 は /64 単位。web.client_ip.client_key)ごとに、同時に持てる面談の状態の数(台帳 C-69・X-87)。begin で新しく状態を作るときに数え、
+# 超えたら 429(入口 interview_concurrent。続きを読むだけの begin・やり直しは数えない)。会場の同じ Wi-Fi は同じ送信元になる(発表の日は上げる)
+max_concurrent_per_client = 3
 # パッケージ二択(§5 の 4。5〜8 組): 出す組の数と、確認画面に進むために答え終えるべき組の最小数
 choice_pairs = 6
 min_answered_pairs = 5

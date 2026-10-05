@@ -400,6 +400,18 @@ async def test_the_client_is_the_last_element_of_x_forwarded_for_and_what_the_us
 
 
 @pytest.mark.anyio
+async def test_an_ipv6_client_is_one_client_per_64_prefix_for_the_ten_second_window(tee_client, source, clock):
+    # 台帳 C-71: IPv6 は /64 単位(web.client_ip.client_key)。同じ /64 の中でアドレスを変えても、10 秒の枠は逃れられない。別の /64 は別のクライアント。
+    assert (await get(tee_client, "a" * 43, ip="2001:db8:1:2::1")).status_code == 200
+
+    clock.advance(dt.timedelta(seconds=3))  # 全体の 2 秒は過ぎた
+    same_prefix = await get(tee_client, "b" * 43, ip="2001:db8:1:2:abcd::9")
+    assert (same_prefix.status_code, same_prefix.headers["retry-after"]) == (429, "10")  # 同じ /64: 10 秒の枠(全体の 2 秒ではない)
+    assert (await get(tee_client, "c" * 43, ip="2001:db8:1:3::1")).status_code == 200  # 別の /64
+    assert source.calls == ["a" * 43, "c" * 43]
+
+
+@pytest.mark.anyio
 async def test_without_the_header_the_client_is_the_connection_address(vault_client, default_db, session_key, clock, source):
     # ヘッダがないとき(ローカル・テスト)は、接続元のアドレスがクライアント: 同じ接続元は 10 秒に 1 回、別の接続元は 2 秒空けば通る
     app = build_app(

@@ -1,4 +1,4 @@
-"""入口ごとのレート制限(design.md §8.2「レート制限」。台帳 L4-2・C-3・X-10・X-30・C-65・C-66・L19-7・L19-12。調査事項 R-7)。
+"""入口ごとのレート制限(design.md §8.2「レート制限」。台帳 L4-2・C-3・X-10・X-30・C-65・C-66・C-68・C-71・L19-7・L19-12。調査事項 R-7)。
 
 LLM を呼ぶか交渉を作るか、1 回で金庫を何件も読むか、面談の状態をメモリに作るすべての入口に、クライアントごと・入口ごとの回数の上限を掛ける。
 入口は ENTRANCES の 9 つで、全体の枠(全入口の合計の上限)に数えるかどうかで 2 つに分かれる。
@@ -16,8 +16,8 @@ LLM を呼ぶか交渉を作るか、1 回で金庫を何件も読むか、面�
 - 1 回の要求で、(入口, クライアント, 窓)の文書と、(全体, 窓)の文書を、1 つのトランザクションで読み、どちらも上限に達していなければ
   両方を 1 進める。どちらかが上限に達していれば、何も進めずに断る(拒否した要求は、どの枠にも数えない。web.llm_budget と同じ)。
   断る理由は、クライアントの枠(scope=client)を先に見て、次に全体(scope=overall)。クライアントごとの枠だけの入口は、(入口, クライアント, 窓)の文書だけを読み・進める。
-- クライアントは、web.client_ip.client_ip(Cloud Run のフロントエンドが X-Forwarded-For に追記した、末尾の IP。先頭側の、利用者が
-  書ける値は使わない。台帳 C-3)。文書の ID には IP をそのまま入れず、鍵つきの HMAC-SHA256 の先頭 32 桁にする(文書 ID に使えない文字が入っても
+- クライアントは、web.client_ip.client_key(Cloud Run のフロントエンドが X-Forwarded-For に追記した、末尾の IP。先頭側の、利用者が
+  書ける値は使わない。台帳 C-3。IPv6 は /64 の接頭辞にまとめる。台帳 C-71)。文書の ID には IP をそのまま入れず、鍵つきの HMAC-SHA256 の先頭 32 桁にする(文書 ID に使えない文字が入っても
   壊れない)。鍵がない SHA-256 だと、IPv4 の全数(約 43 億)を試して IP を戻せて、`(default)` を読める者に、直近の窓で入口を使った IP の一覧が渡る
   (台帳 L19-12)。鍵は、セッションの署名の鍵(SESSION_SIGNING_KEY。web.session)から、用途を表す固定のラベルで派生させる(derive_limiter_key)。
   鍵を替えると文書の ID が変わる(その窓の数え直しになる)。文書には TTL 用の ttl_at を持たせる(Firestore の TTL ポリシーの設定はデプロイの段)。
@@ -35,6 +35,13 @@ SSE の同時本数(SseConnectionLimiter。台帳 C-65): SSE(/v1/stream/。web.u
 (sse_max_connections_per_client)に数え、超えたら 429(入口は sse。Retry-After は 2 秒。画面は、通常の GET の再取得に切り替える)。
 時間窓の回数ではなく、メモリの中の同時本数なので、Firestore には触れず、全体の枠にも数えない(ENTRANCES には入れない)。接続が終われば、
 必ず戻す(SseSlot.release。web.ui_api の応答が、終わり方によらず呼ぶ)。
+
+ログインなしの読み取りの枠(AnonymousReadLimiter・AnonymousReadLimitMiddleware。台帳 C-68): セッションなしで金庫(と Firestore)を読む GET(デモの活動・2 パネル・
+イベント・段、攻撃のイベント・壁 2・壁 3。web.api の ANONYMOUS_READ_PATH_PREFIXES)に、クライアントごとの 1 分あたりの回数の枠([web.limits] の
+anonymous_read_per_minute。暫定 120 回)を掛ける。1 回の GET が金庫を 1〜2 回・Firestore を数十件読むので、匿名の 1 クライアントが、金庫への接続(web の全員で共有)と
+読み出しの課金を増やせないように。web は 1 インスタンスなので、メモリの中だけで数える(Firestore に書くと、読み取りのたびに書き込みの課金が増える)。
+全体の枠(rate_overall_limit)には数えず、Firestore には触れない。超えたら 429(入口は anonymous_read、Retry-After は窓の終わりまでの秒数。本文は同じ形)。
+SSE(自前の同時本数の上限)・TEE の attestation(自前の転送の間隔)・静的ファイル・/health・面談の注記は、対象にしない。
 
 Firestore(同期クライアント)の呼び出しは別スレッドで行う(web.llm_budget と同じ)。
 """
@@ -56,10 +63,12 @@ from typing import Literal, get_args
 from fastapi import HTTPException, Request
 from google.api_core.exceptions import Aborted
 from google.cloud import firestore
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from vault.clock import Clock
 
-from web.client_ip import client_ip
+from web.client_ip import client_key
 from web.session import validate_session_key
 
 _log = logging.getLogger(__name__)
@@ -185,6 +194,32 @@ def load_sse_limit_config(path: Path = _CONFIG_PATH) -> SseLimitConfig:
 DEFAULT_SSE_LIMIT_CONFIG: SseLimitConfig = load_sse_limit_config()
 
 
+@dataclass(frozen=True)
+class AnonymousReadLimitConfig:
+    """ログインなしの読み取りの枠の上限([web.limits] の anonymous_read_per_minute。台帳 C-68)。
+
+    per_minute は、クライアント 1 つあたりの、1 分(ANONYMOUS_READ_WINDOW_SECONDS)あたりの回数。
+    """
+
+    per_minute: int
+
+    def __post_init__(self) -> None:
+        _positive_int(self.per_minute, "anonymous_read_per_minute")
+
+
+def load_anonymous_read_limit_config(path: Path = _CONFIG_PATH) -> AnonymousReadLimitConfig:
+    """config/params.toml からログインなしの読み取りの枠の上限([web.limits] の anonymous_read_per_minute)を読み込む。"""
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    try:
+        return AnonymousReadLimitConfig(per_minute=raw["web"]["limits"]["anonymous_read_per_minute"])
+    except KeyError as exc:
+        raise ValueError(f"{path} is missing a required [web.limits] key: {exc}") from exc
+
+
+DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG: AnonymousReadLimitConfig = load_anonymous_read_limit_config()
+
+
 # 文書 ID の HMAC の鍵を、セッションの署名の鍵から派生させるときの、用途を表す固定のラベル(秘密ではない)。
 _LIMITER_KEY_LABEL = b"rate-limits"
 
@@ -199,12 +234,12 @@ def derive_limiter_key(session_signing_key: str) -> bytes:
     return hmac.new(session_signing_key.encode("utf-8"), _LIMITER_KEY_LABEL, hashlib.sha256).digest()
 
 
-def _rate_limited(
+def rate_limited_error(
     entrance: str, scope: LimitScope, *, limit: int, window_seconds: int | None, retry_after_seconds: int
 ) -> HTTPException:
     """429 の応答(本文は {"detail": {"code": "rate_limited", "entrance", "scope", "limit", "window_seconds", "retry_after_seconds"}}、Retry-After つき)。
 
-    window_seconds は、時間窓の長さ。時間窓のない上限(SSE の同時本数)は None。
+    window_seconds は、時間窓の長さ。時間窓のない上限(SSE の同時本数・面談の同時数)は None。面談の同時数(web.interview.service)も、この形で断る。
     """
     return HTTPException(
         status_code=429,
@@ -350,15 +385,15 @@ class RateLimiter:
     def guard(self, entrance: Entrance) -> Callable[[Request], Awaitable[None]]:
         """FastAPI の依存(`Depends(limiter.guard("demo_run"))`)。要求を数え、超えていれば 429、数えられなければ 503 にする。
 
-        依存は、本文を読む前に動く(本文を宣言しないルートなら、本文を読む前に断れる)。
+        依存は、本文を読む前に動く(本文を宣言しないルートなら、本文を読む前に断れる)。クライアントは client_key(IPv6 は /64 にまとめる。台帳 C-71)。
         """
 
         async def dependency(request: Request) -> None:
             try:
-                await self.admit(entrance, client_ip(request))
+                await self.admit(entrance, client_key(request))
             except RateLimitExceeded as exc:
                 _log.info("rate limited entrance=%s scope=%s", exc.entrance, exc.scope)
-                raise _rate_limited(
+                raise rate_limited_error(
                     exc.entrance,
                     exc.scope,
                     limit=exc.limit,
@@ -377,6 +412,9 @@ class RateLimiter:
 
 # 429 の本文の入口の名前。ENTRANCES には入れない(時間窓の回数ではなく、同時本数。Firestore には数えない)。
 SSE_ENTRANCE = "sse"
+# 面談の同時数(送信元ごとに同時に持てる面談の状態の数。web.interview.state・service。台帳 C-69・X-87)の 429 の入口の名前。これも時間窓ではなく、メモリの中の同時数
+# (window_seconds は null)。上限は [web.interview] max_concurrent_per_client。
+INTERVIEW_CONCURRENT_ENTRANCE = "interview_concurrent"
 # 429 の Retry-After(秒)。画面が、SSE をあきらめて通常の GET の再取得に切り替えたときの間隔と同じ(web.ui_api の StreamConfig の周期)。
 SSE_RETRY_AFTER_SECONDS = 2
 
@@ -435,12 +473,12 @@ class SseConnectionLimiter:
         return SseSlot(self, client)
 
     def acquire_for_request(self, request: Request) -> SseSlot:
-        """request を送ってきたクライアント(web.client_ip)の席を取る。上限なら 429(本文は _rate_limited の形。入口は sse、Retry-After は 2 秒)。"""
+        """request を送ってきたクライアント(web.client_ip.client_key。IPv6 は /64 にまとめる。台帳 C-71)の席を取る。上限なら 429(本文は rate_limited_error の形。入口は sse、Retry-After は 2 秒)。"""
         try:
-            return self.acquire(client_ip(request))
+            return self.acquire(client_key(request))
         except SseLimitReached as exc:
             _log.info("sse connection limit reached scope=%s", exc.scope)
-            raise _rate_limited(
+            raise rate_limited_error(
                 SSE_ENTRANCE, exc.scope, limit=exc.limit, window_seconds=None, retry_after_seconds=SSE_RETRY_AFTER_SECONDS
             ) from None
 
@@ -451,3 +489,89 @@ class SseConnectionLimiter:
             self._open_by_client[client] = remaining
         else:
             self._open_by_client.pop(client, None)
+
+
+# ----------------------------------------------------------------------
+# ログインなしの読み取りの枠(台帳 C-68)
+# ----------------------------------------------------------------------
+
+# 429 の本文の入口の名前。ENTRANCES には入れない(Firestore の時間窓カウンタではなく、メモリの中の窓。全体の枠にも数えない)。
+ANONYMOUS_READ_ENTRANCE = "anonymous_read"
+# 窓の長さ(秒)。設計は「1 分」。上限の回数だけを設定ファイルに置く。
+ANONYMOUS_READ_WINDOW_SECONDS = 60
+
+
+class AnonymousReadLimitReached(Exception):
+    """ログインなしの読み取りの枠に達している。limit は、その上限の回数(窓あたり)。retry_after_seconds は、窓の終わりまでの秒数(1 以上)。"""
+
+    def __init__(self, *, limit: int, retry_after_seconds: int) -> None:
+        super().__init__("anonymous read limit reached")
+        self.limit = limit
+        self.retry_after_seconds = retry_after_seconds
+
+
+class AnonymousReadLimiter:
+    """ログインなしで金庫を読む GET の、クライアントごとの回数の枠(固定の 1 分の窓。メモリの中だけ。台帳 C-68)。
+
+    web は 1 インスタンスなので、メモリで足りる(Firestore に書くと、読み取りのたびに書き込みの課金が増える)。窓は UNIX 時刻を窓の長さで割った商が同じ間
+    (境目の前後で短い間に最大 2 倍通ることは、固定の窓の性質として受け入れる。Firestore の時間窓カウンタと同じ)。断った要求は数えない。
+    窓が変わったら、前の窓の数を全部捨てる(覚えているのは、いまの窓で読んだクライアントだけ。クライアントごとの記録が、増え続けない)。
+    数えるのに await をはさまない(1 つのイベントループの中で、途中で割り込まれない)。時刻は注入できる時計から取る。
+    """
+
+    def __init__(self, clock: Clock, config: AnonymousReadLimitConfig = DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG) -> None:
+        self._clock = clock
+        self._config = config
+        self._window: int | None = None
+        self._counts: dict[str, int] = {}
+
+    def __len__(self) -> int:
+        """いまの窓で数えているクライアントの数。"""
+        return len(self._counts)
+
+    def admit(self, client: str) -> None:
+        """client の読み取りを 1 回数える。上限に達していれば AnonymousReadLimitReached(何も数えない)。"""
+        now_seconds = self._clock.now().timestamp()
+        window = int(now_seconds) // ANONYMOUS_READ_WINDOW_SECONDS
+        if window != self._window:
+            self._window, self._counts = window, {}
+        count = self._counts.get(client, 0)
+        if count >= self._config.per_minute:
+            window_end = (window + 1) * ANONYMOUS_READ_WINDOW_SECONDS
+            raise AnonymousReadLimitReached(
+                limit=self._config.per_minute, retry_after_seconds=max(1, math.ceil(window_end - now_seconds))
+            )
+        self._counts[client] = count + 1
+
+
+class AnonymousReadLimitMiddleware:
+    """ログインなしで金庫を読む GET に、クライアントごとの枠(AnonymousReadLimiter)を掛ける、純粋な ASGI ミドルウェア(台帳 C-68)。
+
+    prefixes のどれかで始まる経路への GET だけを、クライアント(web.client_ip.client_key。IPv6 は /64 にまとめる。台帳 C-71)ごとに数える。
+    超えたら、ルートに渡さずに 429(本文は {"detail": {"code": "rate_limited", "entrance": "anonymous_read", "scope": "client", "limit",
+    "window_seconds": 60, "retry_after_seconds"}}、Retry-After つき)。ほかの要求は、そのまま通す。
+    経路の前置きで選ぶので、ルートごとの依存を付け忘れない(同じルーターに、セッションの要る経路と要らない経路が混ざっていても、前置きで分けられる)。
+    """
+
+    def __init__(self, app: ASGIApp, *, limiter: AnonymousReadLimiter, prefixes: tuple[str, ...]) -> None:
+        self.app = app
+        self._limiter = limiter
+        self._prefixes = prefixes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"].startswith(self._prefixes):
+            try:
+                self._limiter.admit(client_key(Request(scope)))
+            except AnonymousReadLimitReached as reached:
+                refused = rate_limited_error(
+                    ANONYMOUS_READ_ENTRANCE,
+                    "client",
+                    limit=reached.limit,
+                    window_seconds=ANONYMOUS_READ_WINDOW_SECONDS,
+                    retry_after_seconds=reached.retry_after_seconds,
+                )
+                await JSONResponse({"detail": refused.detail}, status_code=refused.status_code, headers=refused.headers)(
+                    scope, receive, send
+                )
+                return
+        await self.app(scope, receive, send)

@@ -653,6 +653,18 @@ def test_the_screens_say_what_the_design_asks_them_to_say(name, phrase):
     assert phrase in (STATIC / name).read_text(encoding="utf-8")
 
 
+def test_every_rate_limit_entrance_the_server_can_return_has_a_label_on_the_screen():
+    # 429 の rate_limited の入口の名前(web.limits)に、画面の呼び名(static/api.js の ENTRANCE_LABELS)がない場合、画面は「この操作」としか言えない。
+    # v23 で足した面談の同時数(interview_concurrent)とログインなしの読み取りの枠(anonymous_read)も含める(C-68・C-69)
+    from web.limits import ANONYMOUS_READ_ENTRANCE, ENTRANCES, INTERVIEW_CONCURRENT_ENTRANCE
+
+    source = (STATIC / "api.js").read_text(encoding="utf-8")
+    block = source[source.index("const ENTRANCE_LABELS = {") : source.index("};", source.index("const ENTRANCE_LABELS = {"))]
+    labelled = set(re.findall(r"^\s+([a-z_]+):", block, re.M))
+    assert set(ENTRANCES) | {INTERVIEW_CONCURRENT_ENTRANCE, ANONYMOUS_READ_ENTRANCE, "sse"} <= labelled
+    assert '"件" : "本"' in source  # 面談の同時数は「件」、接続は「本」
+
+
 def test_the_tee_section_is_on_the_top_page_calls_the_route_without_a_nonce_and_never_refers_to_the_token():
     # 入口の「金庫の確認(TEE)」(§9 の表の 6 行目)。区画の id と、呼び出し(nonce なし。nonce つきは、利用者ごとに 10 秒に 1 回の転送の枠を使う)。
     # 応答のトークン(JWT)は、画面のコードが参照しない(単語そのものがない)。L0 の間は「公開されたコードで動く」と書かない(§9)。

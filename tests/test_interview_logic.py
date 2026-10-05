@@ -152,8 +152,11 @@ def test_the_interview_config_is_read_from_params_toml_and_validated():
     assert config == CONFIG
     assert config.max_request_body_bytes == 32 * 1024  # C-49
     assert config.max_output_tokens == 2048  # C-49
+    assert (config.max_lifetime_seconds, config.max_concurrent_per_client) == (10800, 3)  # 台帳 C-69・X-87(v23)
     assert 5 <= config.min_answered_pairs <= config.choice_pairs <= 8
     for changes in (
+        {"max_lifetime_seconds": 3599},  # アイドルの寿命(3600)より短い絶対の寿命は、意味がない
+        {"max_concurrent_per_client": 0},
         {"max_output_tokens": 100},
         {"max_output_tokens": 9999},
         {"choice_pairs": 9},

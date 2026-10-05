@@ -57,7 +57,11 @@ def build_interview_service(
         budget=llm_budget, clock=clock, sleep=sleep, retry=web_config.referee, config=config, model=model
     )
     store = InterviewStateStore(
-        clock, idle_ttl_seconds=config.state_idle_ttl_seconds, max_states=config.max_active_interviews
+        clock,
+        idle_ttl_seconds=config.state_idle_ttl_seconds,
+        max_lifetime_seconds=config.max_lifetime_seconds,
+        max_states=config.max_active_interviews,
+        max_per_client=config.max_concurrent_per_client,
     )
     return InterviewService(
         vault=vault,

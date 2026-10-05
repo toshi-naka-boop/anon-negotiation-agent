@@ -176,6 +176,8 @@ const ENTRANCE_LABELS = {
   session_start: "面談の開始",
   interview_begin: "面談の開始(途中の状態の作成)",
   sse: "画面への配信(同時接続)",
+  interview_concurrent: "同時に進められる面談",
+  anonymous_read: "画面の読み込み",
 };
 
 // 422 の検証エラーで、場所(項目名)を画面の言葉にする。入力の値は、サーバーが返さない。
@@ -217,7 +219,8 @@ function describeRateLimit(error, overrides) {
     const entrance = ENTRANCE_LABELS[detail.entrance] ?? "この操作";
     const scope = detail.scope === "overall" ? "全体の上限" : "あなたの上限";
     if (detail.window_seconds == null) {
-      return `${entrance}が、${scope}(同時に ${detail.limit} 本)に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;
+      const unit = detail.entrance === "interview_concurrent" ? "件" : "本"; // 面談は件、接続は本
+      return `${entrance}が、${scope}(同時に ${detail.limit} ${unit})に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;
     }
     const minutes = Math.max(1, Math.round(Number(detail.window_seconds) / 60));
     return `${entrance}の回数が、${scope}(${minutes} 分あたり ${detail.limit} 回)に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;

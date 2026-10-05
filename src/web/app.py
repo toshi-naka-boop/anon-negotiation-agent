@@ -15,6 +15,10 @@
   (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
   乱数でない鍵)でも拒否する。create_app_from_env・create_app のどちらでも同じ。
 - GET /health(死活確認。AC-22): 認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(利用記録の Firestore にも触れない)。
+- セッションのミドルウェアより外に、ASGI のミドルウェアを 2 つ置く(外 → 内: 本文の上限 → ログインなしの読み取りの枠 → セッション)。
+  本文の全体の上限(web.body_limit。[web.limits] max_request_body_bytes。台帳 X-85): FastAPI は依存(枠・認証)より先に本文を読むので、ルートの前で数えて 413。
+  ログインなしの読み取りの枠(web.limits。[web.limits] anonymous_read_per_minute。台帳 C-68): セッションなしで金庫を読む GET(web.api の ANONYMOUS_READ_PATH_PREFIXES)に、
+  クライアントごと(IPv6 は /64 単位。台帳 C-71)・1 分あたりの回数の枠を、メモリで掛ける(超えたら 429)。
 - FastAPI の既定の /docs・/redoc・/openapi.json は、本番の起動口(create_app_from_env)では出さない(台帳 L19-10)。/docs は CDN の Swagger UI の JS を読み込み、
   ページに付けている CSP が掛からないので、セッションのクッキーと同じ配信元で第三者の JS が動いてしまうため。開発用(scripts/serve_local.py や試験)だけ、
   create_app(docs=True) で出せる(既定は出さない。金庫の app が /docs・/openapi.json を出さないのと同じ)。
@@ -52,11 +56,12 @@ from negotiation_core.log_privacy import mask_ids_in_logs
 from negotiation_core.tee_settings import load_tee_settings
 from vault.clock import Clock
 
-from web.api import DEMO_PATH_PREFIX, TEE_PATH_PREFIX, TeeAttestationConfig, build_router
+from web.api import ANONYMOUS_READ_PATH_PREFIXES, DEMO_PATH_PREFIX, TEE_PATH_PREFIX, TeeAttestationConfig, build_router
 from web.attack import RawMessageSender, bind_raw_sender
 from web.attested_transport import AttestedVaultTransport
+from web.body_limit import RequestBodyLimitMiddleware
 from web.config import DEFAULT_WEB_CONFIG, WebConfig
-from web.limits import DEFAULT_RATE_LIMIT_CONFIG, RateLimitConfig
+from web.limits import DEFAULT_RATE_LIMIT_CONFIG, AnonymousReadLimitMiddleware, RateLimitConfig
 from web.fictional_answerer import FixtureCatalog
 from web.referee import FictionalAnswerer, SendTurn, Sleep
 from web.service_auth import IdTokenAuth, IdTokenProvider, id_token_provider_from_env
@@ -220,6 +225,13 @@ def create_app(
         clock=services.clock,
         session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTH_PATH, STATIC_PATH_PREFIX, STREAM_PATH_PREFIX),
     )
+    # 後から足したものほど外側になる(外 → 内: 本文の上限 → ログインなしの読み取りの枠 → セッション → ルート)。どちらも、セッションの前で断る。
+    app.add_middleware(
+        AnonymousReadLimitMiddleware, limiter=services.read_limiter, prefixes=ANONYMOUS_READ_PATH_PREFIXES
+    )  # セッションなしで金庫を読む GET の、クライアントごとの枠(メモリ。台帳 C-68)
+    app.add_middleware(
+        RequestBodyLimitMiddleware, max_bytes=config.limits.max_request_body_bytes
+    )  # 本文の全体の上限。ルートの前(FastAPI は依存より先に本文を読むため。台帳 X-85)
 
     @app.exception_handler(RequestValidationError)
     async def _invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:

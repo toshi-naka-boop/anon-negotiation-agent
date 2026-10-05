@@ -34,7 +34,7 @@
 
 TEE モード(build_router に tee を渡したときだけ。契約 research/tee-spike-contract.md §8): GET /api/tee/attestation?nonce= が、
 金庫の attestation の検証結果(検証したか・理由・claims・GitHub のコミット・トークン)を返す。公開情報だけなので、セッションを
-見ない。nonce つきの転送は、クライアント IP(web.client_ip)ごとに 10 秒に 1 回 ＋ 全体で 2 秒に 1 回に制限する(契約 §19・台帳 L18-5)。
+見ない。nonce つきの転送は、クライアント(web.client_ip.client_key。IPv6 は /64 単位)ごとに 10 秒に 1 回 ＋ 全体で 2 秒に 1 回に制限する(契約 §19・台帳 L18-5)。
 TEE モードでなければ、このルートはなく、404。
 
 ログには、例外の型名だけを書く(組み合わせの値・クッキー・依頼者の入力は書かない)。
@@ -86,7 +86,7 @@ from web.api_models import (
 )
 from web.attack.router import build_attack_router
 from web.attested_transport import AttestationSource
-from web.client_ip import client_ip
+from web.client_ip import client_key
 from web.deletion import DeletionOutcome
 from web.interview.api import build_interview_router
 from web.llm_budget import LlmBudgetUnavailable
@@ -103,6 +103,18 @@ _log = logging.getLogger(__name__)
 
 # デモ用のエンドポイントのパス。ミドルウェアは、ここでは依頼者のセッションを見ない(§6.3)。
 DEMO_PATH_PREFIX = "/v1/demo/"
+
+# セッションなしで金庫(と Firestore)を読む GET の経路の前置き(台帳 C-68): デモの活動・2 パネル・イベント・段(/v1/demo/negotiations/{nid}/...)・攻撃のイベント
+# (/v1/demo/attack/negotiations/{nid}/events)・壁 2・壁 3。web.limits の AnonymousReadLimitMiddleware が、クライアントごとに 1 分あたりの回数の枠を掛ける
+# (全体の枠にも Firestore にも数えない)。前置きで選ぶので、この下に GET を足せば、自動で枠に入る。数えないもの: SSE(/v1/stream/。自前の同時本数の上限)・
+# /api/tee/attestation(自前の転送の間隔)・静的ファイル・/health・面談の注記・デモのケース一覧とリプレイ・壁 1 の初期値・メーターのシミュレーション(どれも金庫を読まない)・
+# POST(それぞれの入口の枠を持つ)。
+ANONYMOUS_READ_PATH_PREFIXES = (
+    f"{DEMO_PATH_PREFIX}negotiations/",
+    f"{DEMO_PATH_PREFIX}attack/negotiations/",
+    f"{DEMO_PATH_PREFIX}attack/walls/2/",
+    f"{DEMO_PATH_PREFIX}attack/walls/3/",
+)
 
 # TEE モードの attestation の口(契約 §8)。公開情報だけなので、ミドルウェアは、ここでも依頼者のセッションを見ない。
 TEE_PATH_PREFIX = "/api/tee/"
@@ -136,8 +148,8 @@ class _TeeAttestationEndpoint:
     """GET /api/tee/attestation の中身(契約 §8)。転送の間隔の制限と、nonce なしの結果の保持を持つ。
 
     - nonce あり(契約 §2 の形。違えば 400): 金庫へ転送して検証する。同じクライアント IP の前回の転送から 10 秒未満、または、全体の前回の
-      転送から 2 秒未満なら 429(契約 §19・台帳 L18-5。拒否した要求は、どちらの枠にも数えない)。クライアント IP は web.client_ip.client_ip
-      (X-Forwarded-For の最後の要素)。状態はメモリに持つ(web は 1 インスタンス)。
+      転送から 2 秒未満なら 429(契約 §19・台帳 L18-5。拒否した要求は、どちらの枠にも数えない)。クライアントは web.client_ip.client_key
+      (X-Forwarded-For の最後の要素。IPv6 は /64 にまとめる。台帳 C-71)。状態はメモリに持つ(web は 1 インスタンス)。
     - nonce なし: 直近 5 分以内の結果があれば、それを返す。なければ、新しい nonce で 1 回だけ検証する(同時の要求は 1 回にまとめる。
       この転送は、全体の枠の時刻だけを進める)。金庫に届かず、トークンが取れなかった結果は、短く(10 秒だけ)覚える: 金庫が応えない間に、
       匿名の要求が次々と金庫の発行枠を使わないように。
@@ -517,7 +529,7 @@ def build_router(services: WebServices, tee: TeeAttestationConfig | None = None)
         @router.get(TEE_ATTESTATION_PATH)
         async def tee_attestation(request: Request, nonce: str | None = Query(default=None)) -> dict[str, Any]:
             """金庫の attestation を検証した結果。nonce を渡すと、その nonce で金庫に確かめさせる(クライアントごとに 10 秒に 1 回まで)。"""
-            return await endpoint.respond(nonce, client_ip(request))
+            return await endpoint.respond(nonce, client_key(request))
 
     router.include_router(build_activity_router(services, require_own_negotiation))  # 活動ログ・並べて見る画面(§7)
     router.include_router(build_meter_router(services))  # 推定区間メーター(§8.3)
