@@ -21,18 +21,6 @@
 - 残したもの（判断待ち。デプロイの前に）: IP ごとの同時に持てる面談の数の上限。デモの 2 パネルを 1 本の SSE で送る。GET の再取得への IP ごとの枠。`/start`・`begin` を「新しく作るとき」だけ数えるか（いまは呼ぶたび）。二分探索の実演が失敗・時間切れで取消を待つ短い間に見回りが本物のレフェリーを起こし得る（確率は極小。直すなら `release` を足して取消まで予約を保つ）。
 - 会場の運用: 同じ Wi-Fi は同じ IP。聴衆が同時に見る日は `sse_max_connections_per_client`・`interview_begin`・`interview_llm`・`meter` を上げる（`params.toml` の運用メモ）。
 
-### I-37（実装時の気づき / 実測 / low。次の設計書の改訂で文面を確定する）拒否ポリシーは組織の無いプロジェクトでは作れない
-
-- `roles/iam.denyAdmin`（`iam.denypolicies.*`）は付与できる最下位の資源が組織で、オーナーの基本ロールにも含まれない。プロジェクト `anon-nego-toshixa` は組織の配下でない（I-36）ので、手順 G は実行できない。
-- v22 の規定どおり既定（監査ログによる記録の抑止）のまま。`deploy_check` の (i) は NG のまま（AC-22 は (i) を除いて判定する。v22 の AC-22 の但し書き）。説明文・README・Zenn には「オーナー（運営者）の復号は技術的には止められず、Data Access 監査ログに主体と時刻が残る」と書く。
-- 次の改訂で §9（TEE で言えること 2 段目）・§10 (i)・§13 P-13 の「手順 G で確かめる」を「作れない（組織が無い）」に確定する。
-
-### I-38（実装時の気づき / 文面 / low。次の設計書の改訂で §9 の表の 6 行目に写す）点 6 の画面（入口の「金庫の確認(TEE)」）を実装した（fbdb7b8）
-
-- `GET /api/tee/attestation`（nonce なし。web の直近 5 分の結果）を入口のページに描く。状態（検証済み／検証できていません＋reason の生のコード）、claims 9 項目、`checked_at`、証明書のハッシュ、コミット（`release.url` が https のときだけリンク）、§9 の 3 段と「言えないこと」2 つ、自分で確かめるコマンド。トークン(JWT)は出さない。TEE でない環境（404）は注記だけ。
-- 分かったこと: API の claims に `service_accounts` は入らない（`summarize_claims` は 9 項目）。画面の検証コマンドの `--service-account` は置き換え用の `<金庫の SA>` のまま。`release` が null になるのは「表にない」だけでなく「検証が通らず表と照合していない」場合もある（文言をそれに合わせた）。
-- 確認: 試験 251 件（UI と TEE の API）・全体 3,596 件通過。node の偽 DOM で 4 つの場合と信用しない値の扱いを試験。呼び出し側がスタブ（本番と同じ CSP）で、リンクあり・TEE でない・検証できていないの 3 つを実ブラウザで確認。本番へは 2026-10-05 に反映（`web-00002-fqc`。ユーザーの了承）。公開 URL で検証済みの表示を確認。
-
 ### 反証 20 巡目（2026-10-05。正しさ = design-critic、安全性 = design-critic と codex gpt-6.1-sol xhigh。原文は reviews/round-20-correctness.md・round-20-security.md・round-20-security-codex.md）
 
 high は 3 レンズとも無し。medium は重なりを除いて 8 件（呼び出し側の実測で 1 件を low から格上げ、1 件を追加）。I-34 の積み残しのうち 2 つが、ここで medium として再提起された。
@@ -46,6 +34,7 @@ high は 3 レンズとも無し。medium は重なりを除いて 8 件（呼�
 - **X-86（実装 / medium。codex 2）agents を呼べる主体の照合が、サービスに直に付いた束縛しか見ない**: 継承と custom role を見落とす。呼び出し側の実測: `roles/editor` は `run.routes.invoke` を含み、Compute Engine の既定のサービスアカウントがプロジェクトの editor なので、web を通さずに agents（Gemini）を呼べる主体がいま存在する（使っている実行環境は無い）。直し方: Policy Analyzer で `run.routes.invoke` を継承込みで列挙し、許す主体を明示。既定の SA の editor を外すかはユーザーの判断（P-21）。
 - **I-39（呼び出し側の実測 / medium）deploy_check のプール管理者の問い合わせが、存在しない権限名を使っていた**: `iam.workloadIdentityPoolProviders.create` などの形では Policy Analyzer は常に 0 件（完了扱い）を返す。役割の権限の一覧での実際の名前は `iam.googleapis.com/workloadIdentityPoolProviders.create` などで、この名前で問い合わせるとオーナーが返る。I-36 の「基本ロールの権限は Policy Analyzer に出ない」は誤りで、原因は名前の形だった（I-36・v22 §10 (b) の文面を直す）。直し方: 完全な形の名前で問い合わせる（プロジェクトの IAM の束縛からも拾う二重の守りは残す）。
 - **P-21（前提 / ユーザーの判断待ち）Compute Engine の既定のサービスアカウントの `roles/editor` を外すか**: X-86 の実測による。外す前に、Cloud Build がどのサービスアカウントで動いているかを確かめる（外すとビルドが壊れる恐れ）。
+- **方針（2026-10-05、ユーザーの了承「書いて良い」）**: medium 8 件と low の L20-1・L20-3・L20-8・L20-10 を v23 に写して直す。残りの low（L20-2・L20-4・L20-5・L20-7・L20-9・L20-11）は持ち越し。L20-6 は却下。v23 の承認の後、実装（sonnet・worktree）→ 反証 21 巡目 → web の再デプロイ（了承）。
 - low（件数に数えない）: L20-1 開示台帳の画面が `result` を内部の語のまま出す。L20-2 二分探索の続きの再送で 1 件に枠を 2 回数える。L20-3 二分探索で 503・504 のとき画面が request_id を捨てる。L20-4 二分探索の途中の再起動で本物の LLM を最大 2 回呼ぶ。L20-5 デモの FR-39 の文と §7 の食い違い。L20-6（L-a）editor のプール権限: 実測で editor は読み取りの権限だけ（作成・更新・削除なし）→ 却下（ただし調べる過程で I-39 が見つかった）。L20-7（L-b）(b) が鍵の IAM を書き換えられる主体（setIamPolicy）を列挙しない。L20-8（L-c）手順書の `gcloud run deploy web` に `VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE` が無く、deploy_check も見ない。L20-9（L-d）healthz-vault が動いているダイジェストを (e) と突き合わせない。L20-10（L-f）`tee.js` の「言えないこと」が 2 つだけ。L20-11（L-g）agents-url の照合が手元の設定を読む。
 
 ## 解決済み（一行索引）
@@ -286,3 +275,5 @@ high は 3 レンズとも無し。medium は重なりを除いて 8 件（呼�
 | P-20 | 期待する主体の正本に、オーナーのメールを載せてよいか | 確定を改めた（ユーザー、2026-10-04 (b)）: 「git の作者として公開済み」という前提が崩れた（オーナーは個人の gmail、作者は GitHub の noreply）ので、公開は雛形のまま、実値は手元の git 管理外のファイルを `EXPECTED_KMS_PRINCIPALS_FILE` で渡す。README は反映済み。design.md §10・§13 の文面は v22 で直す（I-35） |
 | I-35 | TEE 手順 A〜B で分かったこと（P-20 (b) の文面、(default) の作成、オーナーの一覧、なりすましの権限） | v22 に反映（§10・§13）。手順書・README・案内は反映済み |
 | I-36 | TEE スパイク 2 日目の実測（組織なし、Policy Analyzer の限界、vTPM の DA カウンタ、OnFailure の形、ラベルの非推奨、拒否ポリシーは手順 G 待ち） | v22 に反映（§9・§10・§13・AC-22）。deploy_check の (b)・(h) を直した（519190d・3528371） |
+| I-37 | 拒否ポリシーは組織の無いプロジェクトでは作れない | 確定。v23 §9・§10 (i)・§13: 作らず、記録による抑止のまま。deploy_check の (i) は組織が無ければ SKIP（実装は 21 巡目の修正で） |
+| I-38 | 点 6 の画面（入口の「金庫の確認(TEE)」）を実装 | 記録。v23 §9 の表の 6 行目に写した（文言の限定は C-70 で直す） |

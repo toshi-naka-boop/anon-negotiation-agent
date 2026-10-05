@@ -1757,3 +1757,15 @@ codex は high 2・medium 3（X-70〜X-74）。design-critic は high 2・medium
 - 合格した試験: 停止→開始（`unwrapped the stored DEK` → self-test ok）、本番条件の attestation（`verify_attestation.py --direct`、dbgstat disabled-since-boot・STABLE）、負の試験 2（別 digest → `KMS encrypt (primary probe) was refused (status 403)`）、負の試験 3（なりすまし `PERMISSION_DENIED`、オーナー `INVALID_ARGUMENT`、Data Access ログ 2 件）、C-56（`non-primary key version` で起動拒否）、Cloud Run Job（4 項目）、外部 IP なし、暗号文の確認。片付け（なりすまし 4 件の取り消し、IAP 規則の削除）済み。
 - 手順の注意: `gcloud logging read --freshness` は `--order=asc` と組み合わせると窓が効かない。`timestamp>=` をフィルタに書く。
 - **解決**: v22 §9（スパイクの結果）・§10（(b)・(h)・(i)、再起動、OnFailure、ラベル、デプロイ手順書）・§13（P-13 の訂正）・AC-22。コード: deploy_check の (b)・(h)（3528371・519190d）。残り: 手順 G（ユーザー）、デプロイ（`research/deploy-runbook.md`）、次のイメージでラベル。
+
+### I-37（実装時の気づき / 実測 / low。次の設計書の改訂で文面を確定する）拒否ポリシーは組織の無いプロジェクトでは作れない
+
+- `roles/iam.denyAdmin`（`iam.denypolicies.*`）は付与できる最下位の資源が組織で、オーナーの基本ロールにも含まれない。プロジェクト `anon-nego-toshixa` は組織の配下でない（I-36）ので、手順 G は実行できない。
+- v22 の規定どおり既定（監査ログによる記録の抑止）のまま。`deploy_check` の (i) は NG のまま（AC-22 は (i) を除いて判定する。v22 の AC-22 の但し書き）。説明文・README・Zenn には「オーナー（運営者）の復号は技術的には止められず、Data Access 監査ログに主体と時刻が残る」と書く。
+- 次の改訂で §9（TEE で言えること 2 段目）・§10 (i)・§13 P-13 の「手順 G で確かめる」を「作れない（組織が無い）」に確定する。
+### I-38（実装時の気づき / 文面 / low。次の設計書の改訂で §9 の表の 6 行目に写す）点 6 の画面（入口の「金庫の確認(TEE)」）を実装した（fbdb7b8）
+
+- `GET /api/tee/attestation`（nonce なし。web の直近 5 分の結果）を入口のページに描く。状態（検証済み／検証できていません＋reason の生のコード）、claims 9 項目、`checked_at`、証明書のハッシュ、コミット（`release.url` が https のときだけリンク）、§9 の 3 段と「言えないこと」2 つ、自分で確かめるコマンド。トークン(JWT)は出さない。TEE でない環境（404）は注記だけ。
+- 分かったこと: API の claims に `service_accounts` は入らない（`summarize_claims` は 9 項目）。画面の検証コマンドの `--service-account` は置き換え用の `<金庫の SA>` のまま。`release` が null になるのは「表にない」だけでなく「検証が通らず表と照合していない」場合もある（文言をそれに合わせた）。
+- 確認: 試験 251 件（UI と TEE の API）・全体 3,596 件通過。node の偽 DOM で 4 つの場合と信用しない値の扱いを試験。呼び出し側がスタブ（本番と同じ CSP）で、リンクあり・TEE でない・検証できていないの 3 つを実ブラウザで確認。本番へは 2026-10-05 に反映（`web-00002-fqc`。ユーザーの了承）。公開 URL で検証済みの表示を確認。
+- **解決**: v23（2026-10-05）に写した。
