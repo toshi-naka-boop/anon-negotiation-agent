@@ -7,12 +7,20 @@
  * - 匿名職務要約は、書いた本人の画面にだけ出す。送ったらフォームから消し、ブラウザの保存領域には何も書かない(§1.2)。
  * - 聞くイベント(document): negotiation:selected({nid})= 表示する交渉が決まった、negotiation:ended({nid})= 交渉が終わった(最終結果が
  *   届いた。段の状態を読み直す)、negotiation:cleared = 表示していた交渉がなくなった(データの削除・デモの実行の切り替え)。
+ * - 決着の待ち(design.md §6.2。v23・C-67): GET は読み出しだけで、判定の後の決着処理(架空の求人の自動応答・台帳)は、サーバがレフェリーの完了のフックか
+ *   見回りで行うので、判定の直後に読むと、段 0 のまま(StageView の settled が false)返ることがある。読んだ結果が judged で settled でない間は、間隔を
+ *   伸ばしながら(SETTLE_RETRY_DELAYS_MS)操作なしで読み直し、settled になったら止める。合計 60 秒(見回りが決着させる上限)で諦める。選び直した・
+ *   消した・操作した後は、古い交渉の読み直しをしない(札 token)。
  */
 
 import { LIKELIHOOD_LABELS, clear, counterFor, h, message, packageChips, replace, resultView, showError, showMessage, waiting, withBusy } from "./ui.js";
 
-// 段階開示で見せるものの種類(web.stages の Item)。開示台帳(ledger.js)も同じ言葉で書く。
-export const ITEM_LABELS = { likelihood: "見込み", package: "組み合わせ", job_summary: "匿名職務要約", name: "氏名", email: "連絡先(メール)" };
+// 段階開示で見せるものの種類(web.stages の Item)。開示台帳(ledger.js)も同じ言葉で書く。result は、見込み「なし」で終わった交渉の、段 0 の台帳の行の項目(web.stages の UNAGREED_DISCLOSURE_ITEMS。L19-14)で、段 0 と同じ「見込みと組み合わせ」と呼ぶ(L20-1)。
+export const ITEM_LABELS = { likelihood: "見込み", package: "組み合わせ", result: "見込みと組み合わせ", job_summary: "匿名職務要約", name: "氏名", email: "連絡先(メール)" };
+
+// 判定の後、決着(settled)するまで、段の状態を読み直す前の待ち(ミリ秒)。1 秒から始めて倍にし、合計 60 秒([web.sweeper] の見回りの間隔。見回りが拾う上限)で諦める。
+// tests/test_ui_static.py が、合計が見回りの間隔以上であることを確かめる。
+export const SETTLE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 29000];
 
 // 匿名職務要約の上限(文字数)。サーバの [web.stages] job_summary_max_chars と同じ(暫定。tests/test_ui_static.py が一致を確かめる)。
 export const JOB_SUMMARY_MAX_CHARS = 400;
@@ -60,7 +68,9 @@ function disclosureBox(title, text) {
 export function mountStages({ body, error }, { mode, loadStage, meet, approve, onChange, emptyText }) {
   const own = mode === "own";
   const candidateName = own ? "あなた" : "架空の候補者";
-  const shown = { nid: null, token: 0 }; // token: 古い読み込みの結果を捨てるための札
+  // token: 古い読み込みの結果を捨てるための札。json: いま描いている段の状態(決着の待ちの読み直しで、変わっていなければ描き直さない)。
+  // draft: 「会う」の匿名職務要約の書きかけ(読み直しでフォームが作り直されても残す。メモリだけ。送ったら消す)。
+  const shown = { nid: null, token: 0, json: null, draft: "" };
 
   const changed = () => {
     if (onChange) onChange();
@@ -104,15 +114,18 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
       maxlength: String(JOB_SUMMARY_MAX_CHARS),
       autocomplete: "off",
       "aria-describedby": "stages-summary-hint",
+      value: shown.draft,
     });
-    const button = h("button", { class: "btn btn-primary", type: "button", disabled: true }, "会う");
+    const button = h("button", { class: "btn btn-primary", type: "button", disabled: summary.value.trim() === "" }, "会う");
     summary.addEventListener("input", () => {
+      shown.draft = summary.value;
       button.disabled = summary.value.trim() === "";
     });
     button.addEventListener("click", () =>
       operate(button, async () => {
         const next = await meet(view.nid, summary.value.trim());
         summary.value = ""; // 送ったら、フォームから消す
+        shown.draft = "";
         return next;
       }),
     );
@@ -211,6 +224,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
       nodes.push(h("p", { class: "small muted" }, `いま求人側に見えているもの: ${view.disclosed_to_employer.visible.map((item) => ITEM_LABELS[item] ?? item).join("・")}`));
     }
     replace(body, nodes);
+    shown.json = JSON.stringify(view);
   }
 
   // ---- 読み込みと操作 ----
@@ -220,17 +234,42 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
       const view = await loadStage(nid);
       if (token !== shown.token) return;
       render(view);
+      if (view.judged && !view.settled) waitForSettlement(nid, token, 0);
     } catch (failure) {
       if (token !== shown.token) return;
       clear(body);
+      shown.json = null;
       showError(error, failure);
     }
     changed();
   }
 
+  /**
+   * 判定の後で決着していない(judged で settled でない)間、間隔を伸ばしながら段の状態を読み直す(C-67)。待ちは SETTLE_RETRY_DELAYS_MS の順で、使い切ったら諦める。
+   * 読み直すたびに、表示と台帳を更新する。読み直しの失敗は、すでに出ている表示を変えずに、次の待ちへ進む。待っている間に札が変わった(選び直した・消した・操作した)
+   * ときは、古い交渉を読まずに、やめる。
+   */
+  function waitForSettlement(nid, token, attempt) {
+    if (attempt >= SETTLE_RETRY_DELAYS_MS.length) return;
+    setTimeout(async () => {
+      if (token !== shown.token) return;
+      try {
+        const view = await loadStage(nid);
+        if (token !== shown.token) return;
+        if (JSON.stringify(view) !== shown.json) render(view); // 変わっていなければ描き直さない(入力中のフォームのフォーカスを、奪わない)
+        changed();
+        if (view.judged && !view.settled) waitForSettlement(nid, token, attempt + 1);
+      } catch {
+        if (token === shown.token) waitForSettlement(nid, token, attempt + 1);
+      }
+    }, SETTLE_RETRY_DELAYS_MS[attempt]);
+  }
+
   async function show(nid) {
     shown.nid = nid;
     shown.token += 1;
+    shown.json = null;
+    shown.draft = "";
     showMessage(error, null);
     replace(body, waiting("段階開示の状態を読み込んでいます…"));
     await load(nid, shown.token);
@@ -267,6 +306,8 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
   document.addEventListener("negotiation:cleared", () => {
     shown.nid = null;
     shown.token += 1;
+    shown.json = null;
+    shown.draft = "";
     showMessage(error, null);
     showEmpty();
   });

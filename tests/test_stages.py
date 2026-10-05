@@ -10,6 +10,8 @@
 - GET は純粋な読み出し(台帳 X-84): 何度呼んでも、段の状態も台帳も変わらない。判定の検出(agreed_at)・架空人物の自動応答・台帳は、レフェリーの
   完了のフック(StageSettler.settle)と、見回りが行う(フックと見回りの試験は、tests/test_stages_settle.py)。
 - 見込み「なし」で終わった交渉も、段 0 の開示を台帳に 1 行書く(台帳 L19-14)。段 1 以降には進めない。
+- 段の状態の応答の settled: 決着処理(settled_at)を済ませたか。判定の直後で決着処理の前は false で、決着処理の前後で false → true に変わる(台帳 C-67)。
+  GET は決着の印を立てない。画面は、判定の後 settled でない間だけ読み直す(static/stages.js。試験は tests/test_ui_static.py)。
 
 金庫は本物の vault の app を ASGI のままつなぐ(web の app へは Browser から入る)。LLM・GCP には接続しない。ほかの段階開示の試験
 (tests/test_stages_*.py)は、ここの部品(stage_env・make_case・agree・settle など)を import して使う。
@@ -228,6 +230,87 @@ async def test_a_negotiation_that_ended_without_agreement_stops_at_stage_zero_wi
 
 
 # ----------------------------------------------------------------------
+# 決着の印(settled。台帳 C-67): 画面は、判定の後 settled でない間だけ、読み直す
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_the_view_says_settled_only_after_the_settlement_and_a_get_never_sets_it(stage_env):
+    # C-67: GET は読み出しだけ(X-84)なので、判定の直後で、決着処理(完了のフック・見回り)の前は、judged で settled でなく、段 0 のまま(架空の求人の
+    # 自動応答もまだ)。何度 GET しても決着の印は立たない。決着処理を済ませると settled になり、段の状態(自動応答の結果)も揃う。その後は変わらない。
+    env = stage_env()
+    browser = env.browser()
+    pid, nid = await live_negotiation(env, browser, settled=False)  # 合意で終わったが、決着処理はまだ
+
+    unsettled = [await stage_of(browser, nid) for _ in range(3)]
+
+    for view in unsettled:
+        assert (view["judged"], view["agreed"], view["settled"], view["stage"]) == (True, True, False, 0)
+        assert view["meet"] == dict(candidate=False, employer=False)
+    assert stage_doc(env, nid)["settled_at"] is None  # 読み出しは、決着の印を立てない
+    assert ledger_docs(env, pid) == {}
+
+    assert await settle(env, nid, pid) is True  # 完了のフックの代わり
+    settled = await stage_of(browser, nid)
+
+    assert (settled["judged"], settled["agreed"], settled["settled"], settled["stage"]) == (True, True, True, 0)
+    assert settled["meet"] == dict(candidate=False, employer=True)  # 自動応答が済んでいる
+    assert stage_doc(env, nid)["settled_at"] is not None
+    assert (await stage_of(browser, nid)) == settled  # 以後は変わらない
+
+
+@pytest.mark.anyio
+async def test_the_view_of_a_negotiation_without_agreement_turns_settled_when_the_sweeper_settles_it(stage_env):
+    # C-67: 見込み「なし」の交渉は、決着処理が段 0 の台帳の行と決着の印を同じトランザクションで書く(L19-14)。完了のフックが失敗しても、見回りが決着させるので、
+    # 画面は、見回りが拾うまで(最大 60 秒)読み直せば、settled を見られる。
+    env = stage_env()
+    browser = env.browser()
+    pid, nid = await live_negotiation(env, browser, agreed=False)
+    assert (await browser.post(f"/v1/negotiations/{nid}/control", dict(action="cancel"))).json()["status"] == "judged"
+
+    before = await stage_of(browser, nid)
+    assert (before["judged"], before["agreed"], before["settled"], before["stage"]) == (True, False, False, 0)
+    assert ledger_docs(env, pid) == {}
+
+    report = await env.services.sweeper.sweep_once()  # 完了のフックを通らずに終わった交渉を、見回りが拾う
+    after = await stage_of(browser, nid)
+
+    assert report.stages_settled == 1
+    assert (after["judged"], after["agreed"], after["settled"], after["stage"]) == (True, False, True, 0)
+    assert [row["items"] for row in ledger_docs(env, pid).values()] == [["result"]]
+
+
+@pytest.mark.anyio
+async def test_the_view_of_a_negotiation_that_is_still_running_is_not_settled_and_stays_so(stage_env):
+    # 判定の前は、決着するものがない: settled は false のまま。決着処理は何もしない(False を返す)。
+    env = stage_env()
+    browser = env.browser()
+    pid, nid = await live_negotiation(env, browser, agreed=False)
+
+    assert await settle(env, nid, pid) is False
+    view = await stage_of(browser, nid)
+
+    assert (view["judged"], view["settled"]) == (False, False)
+    assert stage_doc(env, nid)["settled_at"] is None
+
+
+@pytest.mark.anyio
+async def test_the_demo_view_turns_settled_across_the_settlement(stage_env):
+    # デモ・攻撃(候補者が架空人物)の口も同じ: 決着処理の前は settled が false(段 0 のまま)、後は true(自動応答が段 2 まで進める)。
+    env = stage_env()
+    visitor = env.browser()
+    nid = await demo_negotiation(env, visitor, settled=False)
+
+    before = (await visitor.get(f"/v1/demo/negotiations/{nid}/stage")).json()
+    assert (before["judged"], before["settled"], before["stage"]) == (True, False, 0)
+
+    assert await settle(env, nid) is True
+    after = (await visitor.get(f"/v1/demo/negotiations/{nid}/stage")).json()
+
+    assert (after["judged"], after["settled"], after["stage"]) == (True, True, 2)
+
+
+# ----------------------------------------------------------------------
 # AC-06(段階開示の部分): 段ごとに、相手に見えるものが表のとおり
 # ----------------------------------------------------------------------
 
@@ -280,7 +363,7 @@ async def test_the_stage_view_shows_the_final_record_and_the_flags_but_never_the
     view = await stage_of(browser, nid)
 
     assert set(view) == set(
-        ["nid", "judged", "agreed", "stage", "result", "meet", "approve", "employer_fictional", "employer_auto_response", "company", "disclosed_to_employer"]
+        ["nid", "judged", "settled", "agreed", "stage", "result", "meet", "approve", "employer_fictional", "employer_auto_response", "company", "disclosed_to_employer"]
     )
     assert set(view["result"]) == set(["likelihood", "package"])
     assert set(view["disclosed_to_employer"]) == set(["visible", *STAGE_FIELDS, "simulated"])

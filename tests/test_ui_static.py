@@ -14,9 +14,12 @@
 - 画面の活動ログの購読(static/ui.js の watchNegotiation)は、node があれば、偽の EventSource で動かして確かめる(なければ、そのテストは飛ばす)。
 - 画面の後半(作業パッケージ L2): 段階開示・開示台帳・FR-39 の 2 パネル・推定区間メーター・シミュレーション・二分探索の実演の区画が埋まっていること(data-status="ready"・
   ナビが本物のリンク)、画面の言葉(設計書が求める文言)、画面にある定数がサーバーの値と一致すること、デモ・攻撃の画面が本物の依頼者の API を呼ばないこと。
-  node があれば、区画の描画を偽の DOM で動かして確かめる(サンプルのデータは、実際の API のモデルから作る)。
+  node があれば、区画の描画を偽の DOM で動かして確かめる(サンプルのデータは、実際の API のモデルから作る)。段階開示の決着の待ち(判定の後 settled でない間の
+  読み直し。仮のタイマー。台帳 C-67)・開示台帳の「見込みと組み合わせ」(L20-1)・攻撃の画面の二分探索の実演の request_id の持ち方(503・504 でも保つ。L20-3)も、
+  同じ偽の DOM で動かして確かめる。
 - 入口の「金庫の確認(TEE)」(static/tee.js。設計書 §9 の表の 6 行目): 区画の id・nonce なしの呼び出し・応答のトークン(JWT)を画面のコードが参照しないこと・
-  説明文の言葉。node があれば、応答(検証済みでリンクなし・あり、検証できていない、TEE でない環境の 404)の描画を偽の DOM で確かめる。
+  説明文の言葉(鍵の排他性の限定 X-78・C-62・I-37 と、「言えないこと」。C-70・L20-10)。node があれば、応答(検証済みでリンクなし・あり、検証できていない、
+  TEE でない環境の 404)の描画を偽の DOM で確かめる。
 金庫は本物の vault の app を ASGI のままつなぎ、web の app へは Browser(クッキーを持つ httpx のクライアント)から入る。
 """
 
@@ -51,10 +54,11 @@ from web.activity_api import ActivityEntry, ActivityLog
 from web.api import TeeAttestationConfig
 from web.app import create_app, create_app_from_env
 from web.attack.scripted import probe_package
+from web.config import DEFAULT_WEB_CONFIG
 from web.ledger import LedgerEntry, LedgerOperator, LedgerRecipient
 from web.limits import SseConnectionLimiter, SseLimitConfig
 from web.panels_api import build_panels
-from web.stages import DEFAULT_STAGES_CONFIG, CompanyView, EmployerDisclosure, Item, SideFlagsView, StageView
+from web.stages import DEFAULT_STAGES_CONFIG, UNAGREED_DISCLOSURE_ITEMS, CompanyView, EmployerDisclosure, Item, SideFlagsView, StageView
 from web.session import SESSION_COOKIE_NAME, SESSION_KEY_ENV
 from web.ui_api import StreamConfig, StreamNotAllowed, activity_event_stream, build_ui_router, list_cases, list_jobs
 from web.vault_client import VaultUnavailableError
@@ -631,9 +635,16 @@ SCREEN_TEXT = [
     ("tee.js", "この環境では、金庫は TEE(Confidential Space)で動いていません(開発用の構成)"),
     ("tee.js", "uv run python scripts/verify_attestation.py --web"),
     ("tee.js", "Google の証明で確かめられます"),  # 段 1: 動いているもの(第三者が確かめられる)
-    ("tee.js", "Cloud KMS の監査ログ"),  # 段 2: 鍵の排他性(オーナーは技術的には復号できる。記録による抑止)
+    ("tee.js", "Cloud KMS の Data Access 監査ログ"),  # 段 2: 鍵の排他性(オーナーは基本ロールで復号できる。記録による抑止)
+    ("tee.js", "監査の設定が有効で除外がない間は"),  # 段 2 の限定: 復号の記録が残るのは、この間だけ(X-78)
+    ("tee.js", "その変更は Admin Activity の監査ログに必ず残る"),  # 段 2 の限定: 設定・IAM・鍵の版・プロバイダの変更の記録(X-78)
+    ("tee.js", "記録を読み解けるのは運営者だけ"),  # 段 2 の限定: プロバイダを足した復号の記録は、金庫と同じ形の主体になる(C-62)
+    ("tee.js", "拒否ポリシー"),  # 段 2 の限定: 組織の配下にないので作らない。記録による抑止だけ(I-37)
     ("tee.js", "コミットとの対応は運営者の記録"),  # 段 3: ソースの由来(L0 は運営者の申告)
     ("tee.js", "web がその金庫にだけデータを送っている"),  # 言えないこと: 確かめられるのは、存在と nonce への応答まで
+    ("tee.js", "古い版に戻すことと、消すことは、防げません"),  # 言えないこと: 巻き戻しと削除(§9)
+    ("tee.js", "運営側のコードは、手を登録できます"),  # 言えないこと: 手の登録(§9)
+    ("tee.js", "運営者が書き換えれば、デモの筋書きは変えられます"),  # 言えないこと: テンプレートは書き換えられる(§9。L19-13)
 ]
 
 
@@ -664,6 +675,14 @@ def js_numbers(name: str, constant: str) -> dict[str, int]:
     return {key: int(value) for key, value in re.findall(r"(\w+):\s*(\d+)", body.group(1))}
 
 
+def js_list(name: str, constant: str) -> list[int]:
+    """JS の `export const CONSTANT = [1000, 2000, ...];` の中身を、整数の list にする。"""
+    source = (STATIC / name).read_text(encoding="utf-8")
+    body = re.search(rf"export const {constant} = \[([^\]]*)\]", source)
+    assert body is not None, (name, constant)
+    return [int(value) for value in re.findall(r"\d+", body.group(1))]
+
+
 def js_keys(name: str, constant: str) -> set[str]:
     """JS の `const CONSTANT = { key: "...", ... };` の、キーの集合。"""
     source = (STATIC / name).read_text(encoding="utf-8")
@@ -683,7 +702,12 @@ def test_the_constants_the_screens_copy_are_the_servers_values():
     }
     assert f"export const MAX_NEGOTIATION_IDS = {meter_api.MAX_NEGOTIATION_IDS};" in (STATIC / "meter.js").read_text(encoding="utf-8")
     assert f"export const JOB_SUMMARY_MAX_CHARS = {DEFAULT_STAGES_CONFIG.job_summary_max_chars};" in (STATIC / "stages.js").read_text(encoding="utf-8")
-    assert js_keys("stages.js", "ITEM_LABELS") == set(get_args(Item))  # 段階開示で見せるものの種類
+    # 段階開示で見せるものの種類 と、見込み「なし」で終わった交渉の段 0 の台帳の行の項目(result。画面は「見込みと組み合わせ」と呼ぶ。L20-1)。台帳の行が持ちうる項目の全種類
+    assert js_keys("stages.js", "ITEM_LABELS") == set(get_args(Item)) | set(UNAGREED_DISCLOSURE_ITEMS)
+    # 決着の待ち(C-67): 1 秒から、間隔を伸ばして、合計が見回りの間隔(見回りが決着させる上限)まで
+    delays = js_list("stages.js", "SETTLE_RETRY_DELAYS_MS")
+    assert delays[0] == 1000 and delays == sorted(set(delays))
+    assert sum(delays) >= DEFAULT_WEB_CONFIG.sweeper.interval_seconds * 1000
     assert js_keys("ledger.js", "OPERATOR_LABELS") == set(get_args(LedgerOperator))  # 台帳の、操作した主体
     assert js_keys("ledger.js", "RECIPIENT_LABELS") == set(get_args(LedgerRecipient))  # 台帳の、見せた相手
 
@@ -1658,6 +1682,7 @@ def screen_fixtures() -> dict:
         values = dict(
             nid="0123456789abcdef",
             judged=True,
+            settled=True,  # 決着処理が済んでいる(判定の直後で、まだのときは False。下の unsettled・running)
             agreed=True,
             stage=0,
             result=result,
@@ -1675,7 +1700,7 @@ def screen_fixtures() -> dict:
     with_summary = ("likelihood", "package", "job_summary")
     with_contact = (*with_summary, "name", "email")
     views = {
-        "running": stage_view(visible=(), judged=False, agreed=False, result=None, meet=neither, disclosure=dict(likelihood=None, package=None)),
+        "running": stage_view(visible=(), judged=False, settled=False, agreed=False, result=None, meet=neither, disclosure=dict(likelihood=None, package=None)),
         "none": stage_view(
             visible=("likelihood",),
             agreed=False,
@@ -1684,6 +1709,8 @@ def screen_fixtures() -> dict:
             disclosure=dict(likelihood="none", package=None),
         ),
         "open": stage_view(),
+        # 判定の直後で、決着処理(完了のフック・見回り)の前: judged で settled でない。段 0 のまま、求人側の自動応答もまだ(C-67)
+        "unsettled": stage_view(settled=False, meet=neither),
         "confidential": stage_view(company=CompanyView(confidential=True, name=None)),
         "no_auto_response": stage_view(employer_auto_response=False, meet=neither),
         "stage1": stage_view(
@@ -1704,8 +1731,8 @@ def screen_fixtures() -> dict:
     def at(minute: int) -> dt.datetime:
         return dt.datetime(2026, 10, 4, 3, minute, tzinfo=dt.timezone.utc)
 
-    def row(action, stage, operator, minute, **fields) -> dict:
-        return LedgerEntry(nid="n1", action=action, stage=stage, operator=operator, at=at(minute), **fields).model_dump(mode="json")
+    def row(action, stage, operator, minute, nid="n1", **fields) -> dict:
+        return LedgerEntry(nid=nid, action=action, stage=stage, operator=operator, at=at(minute), **fields).model_dump(mode="json")
 
     ledger = [
         row("disclose", 0, "system", 1, items=["likelihood", "package"], to="both"),
@@ -1715,6 +1742,7 @@ def screen_fixtures() -> dict:
         row("approve", 1, "fictional_employer", 2),
         row("approve", 1, "principal", 3),
         row("disclose", 2, "principal", 3, items=["name", "email"], to="employer", simulated=True),
+        row("disclose", 0, "system", 5, nid="n3", items=list(UNAGREED_DISCLOSURE_ITEMS), to="both"),  # 見込み「なし」で終わった交渉の段 0 の行(L19-14)
     ]
     answers = [
         ActivityEntry(seq=3, actor="self", action="principal_answer", package=package, own_evaluation="acceptable", answer="accept").model_dump(mode="json")
@@ -1769,7 +1797,7 @@ def screen_fixtures() -> dict:
 SCREENS_SCRIPT = r"""
 import assert from "node:assert/strict";
 import { ApiError } from "__API__";
-import { mountStages } from "__STAGES__";
+import { SETTLE_RETRY_DELAYS_MS, mountStages } from "__STAGES__";
 import { groupRecords, mountLedger } from "__LEDGER__";
 import { cellText, mountPanels } from "__PANELS__";
 import { cellRange, describeInterval, mountMeter, mountSimulation } from "__METER__";
@@ -1934,8 +1962,124 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
   fire("negotiation:ended", { nid: "other" });
   fire("negotiation:ended", { nid: "n2" });
   await wait(30);
-  assert.deepEqual(loads, ["n1", "n2", "n2"]); // 選んでいる交渉が終わったときだけ、読み直す
+  assert.deepEqual(loads, ["n1", "n2", "n2"]); // 選んでいる交渉が終わったときだけ、読み直す。読んだ状態が決着済み(settled)なら、読み直しは 1 回で、待たない
   console.log("ok stages-states");
+}
+
+{ // 決着の待ち(C-67): 判定の後で決着していない(judged で settled でない)間は、操作なしで間隔を伸ばしながら読み直し、決着したら止まる
+  // setTimeout を仮のものに差し替えて、待ちの長さを記録し、1 つずつ手で進める(本物の 1〜60 秒は待たない)。
+  const realSetTimeout = globalThis.setTimeout;
+  const timers = [];
+  globalThis.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
+  const settleAsync = () => new Promise((resolve) => realSetTimeout(resolve, 5)); // 読み込み・描画の続きが終わるのを待つ
+  const fireNext = async () => { timers.shift().callback(); await settleAsync(); };
+  const delays = () => timers.map((timer) => timer.delay);
+  try {
+    // (1) 進行中 → 終わった(未決着)→ 1 秒後に読み直す(決着済み): 操作なしで、段 2 まで描かれる。決着したら止まる。読み直すたびに、台帳へ知らせる
+    resetListeners();
+    let { body, error } = mounted();
+    const sequence = [DATA.views.running, DATA.views.unsettled, DATA.views.stage2_demo];
+    const loads = [];
+    const changes = [];
+    mountStages({ body, error }, { mode: "demo", emptyText: "-", onChange: () => changes.push(loads.length),
+      loadStage: async (nid) => { loads.push(nid); return sequence[loads.length - 1]; } });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    assert.deepEqual(delays(), []); // 進行中は、決着を待たない
+    fire("negotiation:ended", { nid: "n1" });
+    await settleAsync();
+    assert.deepEqual(delays(), [1000]); // 判定の後で、未決着: 1 秒後に読み直す
+    assert.ok(text(body).includes("段 0: 見込みと組み合わせ") && !text(body).includes("氏名: 架空 花子"));
+    await fireNext();
+    includesAll(text(body), ["氏名: 架空 花子", "hanako.kako@example.com"]); // 決着済みの状態が、操作なしで描かれる
+    assert.deepEqual([loads.length, delays(), changes], [3, [], [1, 2, 3]]); // 決着したので、これ以上読まない
+
+    // (2) ずっと未決着(完了のフックが失敗して、見回りもまだ): 待ちは、1 秒から始めて伸び、合計 60 秒で諦める(それ以上は読まない)。選んだとき(show)でも同じ
+    resetListeners();
+    ({ body, error } = mounted());
+    let reads = 0;
+    mountStages({ body, error }, { mode: "own", emptyText: "-", loadStage: async () => { reads += 1; return DATA.views.unsettled; } });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    const waited = [];
+    while (timers.length) { waited.push(timers[0].delay); await fireNext(); }
+    assert.deepEqual(waited, SETTLE_RETRY_DELAYS_MS);
+    assert.ok(waited[0] === 1000 && waited.every((delay, index) => index === 0 || delay > waited[index - 1])); // 1 秒から、間隔を伸ばす
+    assert.equal(waited.reduce((sum, delay) => sum + delay, 0), 60000); // 合計 60 秒で諦める
+    assert.equal(reads, 1 + waited.length);
+    assert.ok(text(body).includes("段 0: 見込みと組み合わせ") && text(error) === ""); // 諦めても、表示はそのまま(エラーにしない)
+
+    // (3) 読み直しの失敗は、出ている表示を変えずに、次の待ちへ進む(エラーも出さない)
+    resetListeners();
+    ({ body, error } = mounted());
+    const plan = [DATA.views.unsettled, new ApiError(503, "temporarily_unavailable", null), DATA.views.stage2_demo];
+    let step = 0;
+    mountStages({ body, error }, { mode: "demo", emptyText: "-", loadStage: async () => { const next = plan[step]; step += 1; if (next instanceof Error) throw next; return next; } });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    await fireNext(); // 失敗
+    assert.ok(text(body).includes("段 0: 見込みと組み合わせ") && text(error) === "");
+    assert.deepEqual(delays(), [2000]); // 次の待ち
+    await fireNext();
+    assert.ok(text(body).includes("氏名: 架空 花子"));
+    assert.deepEqual(delays(), []);
+
+    // (4) 古い交渉は読み直さない: 選び直した・消した・同じ交渉を読み直した・操作した後の、待ちの順番は、何も読まずにやめる
+    resetListeners();
+    ({ body, error } = mounted());
+    const read = [];
+    mountStages({ body, error }, { mode: "own", emptyText: "空です", loadStage: async (nid) => { read.push(nid); return DATA.views.unsettled; },
+      meet: async () => DATA.views.stage1 });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    fire("negotiation:selected", { nid: "n2" }); // 選び直し: n1 の待ちは古い
+    await settleAsync();
+    fire("negotiation:ended", { nid: "n2" }); // 同じ交渉の読み直し: 前の待ちは古く、新しい待ちだけが生きる
+    await settleAsync();
+    assert.deepEqual([read, delays()], [["n1", "n2", "n2"], [1000, 1000, 1000]]);
+    await fireNext(); // n1 の待ち
+    await fireNext(); // n2 の、前の待ち
+    assert.deepEqual(read, ["n1", "n2", "n2"]); // どちらも、何も読まない
+    await fireNext(); // n2 の、いまの待ち: 読む
+    assert.deepEqual([read, delays()], [["n1", "n2", "n2", "n2"], [2000]]);
+    fire("negotiation:cleared"); // 消した
+    await fireNext();
+    assert.deepEqual([read.length, delays(), text(body)], [4, [], "空です"]);
+    fire("negotiation:selected", { nid: "n3" });
+    await settleAsync();
+    const [typed] = byTag(body, "textarea");
+    typed.value = "業務システムの開発(確認用)";
+    typed.emit("input");
+    buttonOf(body, "会う").click(); // 操作した(「会う」)後は、その交渉の待ちも古い
+    await settleAsync();
+    includesAll(text(body), ["求人側に見えている職務要約"]); // 操作の結果(決着済み)が描かれている
+    await fireNext();
+    assert.deepEqual([read.length, delays()], [5, []]);
+
+    // (5) 変わっていない状態は描き直さない(入力中のフォームを、作り直さない)。変わって描き直しても、書きかけの要約は残る
+    resetListeners();
+    ({ body, error } = mounted());
+    const views = [DATA.views.unsettled, DATA.views.unsettled, DATA.views.open];
+    let count = 0;
+    mountStages({ body, error }, { mode: "own", emptyText: "-", loadStage: async () => views[Math.min(count++, views.length - 1)] });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    const [field] = byTag(body, "textarea");
+    field.value = "書きかけの要約";
+    field.emit("input");
+    await fireNext(); // 読み直したが、変わっていない
+    assert.equal(byTag(body, "textarea")[0], field);
+    assert.equal(field.value, "書きかけの要約");
+    await fireNext(); // 決着して、求人側の「会う」が見える(状態が変わった)
+    const [rebuilt] = byTag(body, "textarea");
+    assert.notEqual(rebuilt, field);
+    assert.equal(rebuilt.value, "書きかけの要約");
+    assert.equal(buttonOf(body, "会う").disabled, false);
+    assert.deepEqual(delays(), []);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  console.log("ok stages-settle");
 }
 
 { // 開示台帳: 交渉ごと(始めた順)に、途中確認の回答(時刻なし)を台帳の行より先に。終わった交渉の回答は、読み直さない
@@ -1945,6 +2089,7 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
     { nid: "n2", title: "進行中の交渉", createdAt: "2026-10-04T04:00:00Z", ended: false },
     { nid: "n1", title: "インフラエンジニア", createdAt: "2026-10-04T03:00:00Z", ended: true },
     { nid: "n0", title: "記録のない交渉", createdAt: "2026-10-03T03:00:00Z", ended: true },
+    { nid: "n3", title: "合意に至らなかった交渉", createdAt: "2026-10-04T05:00:00Z", ended: true },
   ];
   const loaded = [];
   const ledger = mountLedger({ body, error }, {
@@ -1958,6 +2103,9 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
     "段 2 が開きました: 氏名・連絡先(メール)を、求人側に表示(模擬表示。連絡先は集めていないので、実際には渡っていません)",
     "「会う」が押されました", "「承認」が押されました", "架空の求人の自動応答", "あなたの操作", "システム(自動)", "途中確認に答えました", "→ 受ける"]);
   assert.ok(shown.indexOf("途中確認に答えました") < shown.indexOf("段 0 が開きました")); // 回答は、その交渉の台帳の行より先
+  // 見込み「なし」で終わった交渉の、段 0 の行(items は result): 内部の語のままでなく、段 0 と同じ「見込みと組み合わせ」と呼ぶ(L20-1)
+  includesAll(shown, ["合意に至らなかった交渉", "段 0 が開きました: 見込みと組み合わせを、双方に表示"]);
+  assert.ok(!shown.includes("result"));
   assert.ok(!shown.includes("記録のない交渉") && !shown.includes("進行中の交渉")); // 記録のない交渉は出さない
   assert.ok(!shown.includes(DATA.summary)); // 職務要約の本文は、台帳に出ない
   await ledger.refresh();
@@ -2105,8 +2253,20 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
   assert.equal(byTag(body, "a").length, 0);
   assert.deepEqual(byTag(body, "pre").map(text), [command(claims.project_id)]); // この URL と、証明の project_id が入る。金庫の SA は応答にないので、置き換え用
   // 説明文は、設計書 §9 の 3 段と「言えないこと」。「公開されたコードで動く」とは書かない
-  assert.deepEqual(byTag(body, "li").map((item) => text(byTag(item, "strong")[0])), ["動いているもの", "鍵の排他性", "ソースの由来", "確かめられるのはここまで", "TEE の外にあるもの"]);
-  includesAll(text(body), ["Cloud KMS の監査ログ", "コミットとの対応は運営者の記録", "web がその金庫にだけデータを送っている"]);
+  assert.deepEqual(byTag(body, "li").map((item) => text(byTag(item, "strong")[0])), ["動いているもの", "鍵の排他性", "ソースの由来", "確かめられるのはここまで", "TEE の外にあるもの",
+    "古い版への巻き戻しと削除", "手の登録と予算", "テンプレートの書き換え"]);
+  includesAll(text(body), ["コミットとの対応は運営者の記録", "web がその金庫にだけデータを送っている"]);
+  // 鍵の排他性: オーナーの復号の記録の限定(X-78・C-62・I-37。C-70)を落とさない。復号の記録に「必ず」とは書かない(必ずと言えるのは、止められない Admin Activity の記録だけ)
+  const keyText = text(byTag(body, "li")[1]);
+  includesAll(keyText, ["オーナーは基本ロールで復号できます。これは TEE でも防げません", "監査の設定が有効で除外がない間は、復号が Cloud KMS の Data Access 監査ログに主体と時刻つきで残る",
+    "監査の設定・鍵の IAM・鍵の版・WIF のプールのプロバイダを変えられるが、その変更は Admin Activity の監査ログに必ず残る", "変更の記録による抑止", "既定で 30 日",
+    "Data Access ログの主体は金庫と同じ形になるので、記録を読み解けるのは運営者だけです", "第三者に示せるのは、Admin Activity にあるプロバイダの作成まで",
+    "組織の配下にないので、IAM の拒否ポリシー", "オーナーに対しては、記録による抑止だけです"]);
+  assert.ok(!keyText.replace("Admin Activity の監査ログに必ず残る", "").includes("必ず"));
+  // 言えないこと(§9): 巻き戻しと削除・手の登録と予算・テンプレートの書き換え
+  includesAll(text(byTag(body, "li")[5]), ["Firestore のエクスポートやバックアップを手にした者", "古い版に戻すことと、消すことは、防げません"]);
+  includesAll(text(byTag(body, "li")[6]), ["運営側のコードは、手を登録できます", "予算(回数の上限)の強制は、運営者に対する歯止めになりません", "依頼者を作り直したりできる"]);
+  includesAll(text(byTag(body, "li")[7]), ["テンプレートは、Firestore の文書", "運営者が書き換えれば、デモの筋書きは変えられます"]);
   assert.ok(!text(body).includes("公開されたコードで動く"));
   clean(body);
 
@@ -2123,7 +2283,8 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
   assert.deepEqual(badges(body), ["検証できていません"]);
   includesAll(text(body), ["理由: debug", "確かめられていないトークンに書かれていたもの", "enabled", "運営者のリリースの表", "にありません"]);
   assert.equal(byTag(body, "a").length, 0);
-  assert.equal(byTag(body, "li").length, 5);
+  assert.equal(byTag(body, "li").length, 8);
+  includesAll(text(body), ["監査の設定が有効で除外がない間は", "運営者が書き換えれば、デモの筋書きは変えられます"]); // 説明文は、検証の結果によらず同じ
   clean(body);
 
   // 金庫に届かず、何も取れなかった: 取れなかった項目(9 つの claims と、証明書のハッシュ)は「—」。コマンドは、置き換え用の文字
@@ -2160,6 +2321,64 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
   }
   console.log("ok tee");
 }
+
+{ // 二分探索の実演(攻撃の画面 attack.js。L20-3): 503・504 で失敗しても request_id を保ち、次に押したとき、同じ request_id で続きから進める。終わったら消す
+  // ページのコードは、読み込んだときに document の要素を引くので、偽の document・fetch を差し替えたままにする(最後のブロック)。
+  resetListeners();
+  globalThis.EventSource = undefined; // つなぎ直しの再取得は、404 などで止まる
+  const elements = new Map();
+  globalThis.document.getElementById = (id) => { // ページの HTML の代わり: どの id にも、要素が 1 つある
+    if (!elements.has(id)) {
+      const element = new FakeElement("div");
+      element.classList = { add() {}, remove() {} };
+      elements.set(id, element);
+    }
+    return elements.get(id);
+  };
+  const requests = [];
+  let reply = { status: 200, body: {} };
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, body: init.body ?? null });
+    const route = url.split("?")[0];
+    const answer = route === "/v1/demo/attack/bisection" ? reply
+      : route === "/v1/demo/attack/walls/1/example" ? { status: 200, body: { limit_bytes: 32768, message: {} } }
+      : { status: 403, body: { detail: "forbidden" } };
+    return { ok: answer.status < 400, status: answer.status, headers: { get: () => "application/json" }, json: async () => answer.body };
+  };
+  await import("__ATTACK__");
+  const press = async () => { elements.get("bisection-button").click(); await wait(30); };
+  const requestIds = () => requests.filter((request) => request.url === "/v1/demo/attack/bisection").map((request) => JSON.parse(request.body).request_id);
+  const shownMessage = () => text(elements.get("bisection-message"));
+  const done = { negotiation_ids: ["a1", "a2", "a3"], interval: { lower: 600, upper: 650, cells: 1 }, stopped_reason: null };
+  const note = "もう一度押すと、この続きから進みます(できた交渉は、作り直しません)。";
+
+  reply = { status: 503, body: { detail: "temporarily_unavailable" } }; // 起動時の待ち・カウンタに書けない
+  await press();
+  includesAll(shownMessage(), ["一時的に使えません", note]);
+  assert.equal(elements.get("bisection-button").disabled, false); // もう一度押せる
+  reply = { status: 504, body: { detail: "bisection_timeout" } }; // 時間切れ
+  await press();
+  includesAll(shownMessage(), ["時間内に終わりませんでした", note]);
+  reply = { status: 200, body: { ...done, stopped_reason: "rate_limited" } }; // 枠が尽きて途中で止まった(いままでどおり、request_id を保つ)
+  await press();
+  assert.ok(shownMessage().includes("回数の上限に達したので、止めました"));
+  reply = { status: 200, body: done }; // 終わった
+  await press();
+  assert.ok(shownMessage().includes("これ以上は絞れません"));
+  const first = requestIds();
+  assert.equal(first.length, 4);
+  assert.ok(first.every((id) => id === first[0])); // 4 回とも同じ実演(503・504・途中で止まった・終わった)
+  reply = { status: 409, body: { detail: "refused" } }; // 終わった後は、新しい実演。503・504 以外の失敗は、request_id を保たない
+  await press();
+  assert.ok(!shownMessage().includes(note));
+  reply = { status: 200, body: done };
+  await press();
+  const all = requestIds();
+  assert.equal(all.length, 6);
+  assert.ok(all[4] !== first[0] && all[5] !== all[4]);
+  assert.ok(text(elements.get("attack-select")).includes("攻撃 1")); // 終わったときに、作った交渉が一覧に並ぶ
+  console.log("ok bisection");
+}
 """
 
 
@@ -2173,6 +2392,7 @@ def test_the_sections_render_the_apis_data_and_behave_as_designed():
         .replace("__PANELS__", (STATIC / "panels.js").as_uri())
         .replace("__METER__", (STATIC / "meter.js").as_uri())
         .replace("__TEE__", (STATIC / "tee.js").as_uri())
+        .replace("__ATTACK__", (STATIC / "attack.js").as_uri())
         .replace("__DATA__", json.dumps(screen_fixtures(), ensure_ascii=False))
     )
 
@@ -2180,6 +2400,6 @@ def test_the_sections_render_the_apis_data_and_behave_as_designed():
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert result.stdout.split() == [
-        "ok", "stages-own", "ok", "stages-demo", "ok", "stages-states", "ok", "ledger", "ok", "panels", "ok", "meter-cells", "ok", "meter", "ok", "simulation",
-        "ok", "tee",
+        "ok", "stages-own", "ok", "stages-demo", "ok", "stages-states", "ok", "stages-settle", "ok", "ledger", "ok", "panels", "ok", "meter-cells", "ok", "meter",
+        "ok", "simulation", "ok", "tee", "ok", "bisection",
     ]  # fmt: skip
