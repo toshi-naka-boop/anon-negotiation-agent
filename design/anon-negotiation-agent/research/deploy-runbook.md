@@ -192,3 +192,4 @@ uv run python scripts/verify_attestation.py --web "$WEB_URL"
 - 次の反映: GitHub のリポジトリができたら `gcloud run services update web --region=asia-northeast1 --update-env-vars=GITHUB_REPO_URL=https://github.com/<owner>/<repo>`（イメージの作り直しは不要）。
 - GitHub: `toshi-naka-boop/anon-negotiation-agent`。PR #1 をユーザーがマージコミットでマージ（abada3c。ca5791a は main から辿れる）。
 - `GITHUB_REPO_URL` を反映（ユーザーの指示「反映して」。`web-00003-j6l`）。`/api/tee/attestation` の `release.url` が `…/commit/ca5791a…` になった。反映の時点でリポジトリはまだ非公開（ログインなしで 404）。公開に切り替わればリンクがそのまま使える。
+- リポジトリを公開（ユーザー、2026-10-05）。ログインなしでリポジトリと ca5791a のコミットのページが 200。web の画面のコミットのリンクが誰にでも開けるようになった。
