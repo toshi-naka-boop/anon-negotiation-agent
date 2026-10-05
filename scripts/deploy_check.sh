@@ -9,7 +9,8 @@
 #
 # 項目ごとに [OK]・[NG]・[SKIP] を 1 行ずつ出す(NG と SKIP には、理由・差分を、字下げした行で添える)。NG が 1 つでもあれば終了コード 1、
 # なければ 0。必須の環境変数がない・引数が違うときは終了コード 2。
-#   [SKIP] は「このスクリプトでは確かめられない」「VAULT_MODE の対象外」。AC-22 の合格には、確かめられない項目を人が済ませること。
+#   [SKIP] は「このスクリプトでは確かめられない」「VAULT_MODE の対象外」「組織の配下でないプロジェクトの tee-i(拒否ポリシーは作れない。I-37)」。
+#   AC-22 の合格には、確かめられない項目を人が済ませること。
 #   gcloud や curl が失敗して確かめられなかった項目は [NG] にする(確かめられないものを、通ったことにしない)。
 #
 # 環境変数
@@ -17,7 +18,8 @@
 #   WEB_URL     web の URL(必須)                        AGENTS_URL  agents の URL(必須。IAM で守られているので、ID トークンつきで呼ぶ)
 #   ZONE        VM のゾーン(VAULT_MODE=tee では必須。例 asia-northeast1-b)
 #   VAULT_MODE  tee(既定。金庫は Confidential Space の VM) または cloudrun(金庫も Cloud Run)
-#   ORG_ID      組織 ID(任意。あれば Policy Analyzer を --organization で、なければ --project で呼ぶ。P-13)
+#   ORG_ID      組織 ID(任意。あれば Policy Analyzer を --organization で、なければ --project で呼ぶ。P-13。
+#               ORG_ID も組織の祖先もないプロジェクトでは、tee-i は SKIP: 拒否ポリシーは作れない。I-37)
 #   WEB_SA      web のサービスアカウントのメール(既定 web-run@<PROJECT_ID>.iam.gserviceaccount.com)
 #   VAULT_SA    金庫の VM のサービスアカウントのメール(既定 vault-tee@<PROJECT_ID>.iam.gserviceaccount.com)
 #   PROJECT_NUMBER  プロジェクト番号(任意。なければ gcloud projects describe で取る)
@@ -25,7 +27,7 @@
 #   WEB_SERVICE・AGENTS_SERVICE・VAULT_SERVICE  Cloud Run のサービス名(既定 web・agents・vault)
 #   HEALTH_PATH  死活確認のパス(既定 /health。下の注意を読む)
 #   CACHE_CONFIG_URL  Vertex AI の cacheConfig の URL(既定 https://aiplatform.googleapis.com/v1/projects/<PROJECT_ID>/cacheConfig)
-#   EXPECTED_KMS_PRINCIPALS_FILE  期待する主体の正本(既定 deploy/expected-kms-principals.json)
+#   EXPECTED_KMS_PRINCIPALS_FILE  期待する主体の正本(既定 deploy/expected-kms-principals.json。tee-b・tee-b-pool・iam-agents が、承認済みのオーナーに使う)
 #   RELEASES_FILE  digest の許可表(既定 deploy/vault-releases.json)
 #   GCLOUD・CURL・UV・PYTHON3  外部コマンドの置き換え(既定 gcloud・curl・uv・python3。試験が偽物を差し込む)
 #   RESET_POLLS・POLL_INTERVAL_SECONDS  --reset-vault の後、ログを待つ回数(既定 36)と間隔(既定 10 秒)
@@ -40,7 +42,7 @@
 #     の名前から作る。現在の IAM から期待値を作らない(正本は手で書く。X-75)。
 #
 # 実機の出力の形は、公開の API 文書に合わせて書いてある。実機で NG が出たら、差分(字下げした行)で、スクリプトの想定が違うのか、
-# GCP の設定が違うのかを見分ける。Policy Analyzer(tee-b・tee-b-pool)は Cloud Asset API(cloudasset.googleapis.com)を有効にし、
+# GCP の設定が違うのかを見分ける。Policy Analyzer(iam-agents・tee-b・tee-b-pool)は Cloud Asset API(cloudasset.googleapis.com)を有効にし、
 # 呼ぶ主体に cloudasset.assets.analyzeIamPolicy の権限が要る(手順 A の API の一覧にはない)。
 #
 # 死活確認のパスの注意: Cloud Run の *.run.app では、末尾が z のパス(/healthz など)を Google のフロントエンドが予約していて、コンテナに届く前に自前の 404 を返す
@@ -69,9 +71,9 @@ web-workers|all|§10 web は uvicorn workers=1・インスタンスは min・max
 session-key|all|§10 SESSION_SIGNING_KEY は Secret Manager の参照
 service-auth|all|§10 SERVICE_AUTH_ENABLED が false でない(web)
 vertex-env|all|§10 GOOGLE_GENAI_USE_VERTEXAI=TRUE・GOOGLE_CLOUD_PROJECT・GOOGLE_CLOUD_LOCATION=global(web・agents)
-web-vault-env|all|§10 web の金庫の設定(VAULT_BASE_URL。TEE なら VAULT_TEE・VAULT_SERVICE_ACCOUNT・GOOGLE_CLOUD_PROJECT)
+web-vault-env|all|§10 web の金庫の設定(VAULT_BASE_URL。TEE なら VAULT_TEE・VAULT_SERVICE_ACCOUNT・GOOGLE_CLOUD_PROJECT・VAULT_EXPECTED_ZONE が ZONE・VAULT_EXPECTED_INSTANCE が金庫の VM の名前と一致)
 agents-url|all|§10 agents の URL(config/params.toml の [agents] public_base_url が AGENTS_URL と一致)
-iam-agents|all|§10 Cloud Run IAM: agents の起動元が web のサービスアカウントだけ
+iam-agents|all|§10 Cloud Run IAM: agents の起動元が web のサービスアカウントだけ(サービスの束縛)で、run.routes.invoke を持つ主体(Policy Analyzer。継承・custom role 込み)が web の SA と承認済みのオーナーだけ
 iam-vault|cloudrun|§10 Cloud Run IAM: 金庫(Cloud Run 版)の起動元が web のサービスアカウントだけ
 vault-command|cloudrun|§10 金庫(Cloud Run 版)の起動コマンドが vault.app:create_app_from_env --factory
 ttl-default|all|§10 Firestore の TTL ポリシー((default): stages・llm_call_counters・rate_limits の ttl_at)
@@ -97,7 +99,7 @@ tee-f|tee|(f) ファイアウォール規則 allow-iap-to-vault が消えてい�
 tee-g|tee|(g) Cloud KMS の Data Access 監査ログが有効で exemptedMembers が空、新しい版の後の Encrypt・Decrypt の主体が本番の VM の subject だけ
 tee-h|tee|(h) _tee/dek.kek_version が KEK の primary の版と一致
 tee-h-reset|tee|(h) 金庫を停止→開始しても sealing self-test ok(既存の暗号文が開く。--reset-vault のときだけ)
-tee-i|tee|(i) 拒否ポリシー vault-kek-deny があり、本文が手順 G と一致'
+tee-i|tee|(i) 拒否ポリシー vault-kek-deny があり、本文が手順 G と一致(組織の配下でなければ SKIP: 拒否ポリシーは作れない。I-37)'
 
 # 手順書(research/tee-spike.md)と設定(config/params.toml の [vault.tee])の名前。期待値の元。
 POOL="vault-tee-pool"
@@ -207,6 +209,8 @@ ROOT = ENV.get("ROOT", ".")
 MODE = ENV.get("VAULT_MODE", "tee")
 PROJECT_ID = ENV.get("PROJECT_ID", "")
 PROJECT_NUMBER = ENV.get("PROJECT_NUMBER", "")
+ZONE = ENV.get("ZONE", "")
+VM_NAME = ENV.get("VM_NAME", "vault-tee")
 WEB_SA = ENV.get("WEB_SA", "")
 VAULT_SA = ENV.get("VAULT_SA", "")
 AGENTS_URL = ENV.get("AGENTS_URL", "")
@@ -482,18 +486,25 @@ def check_web_vault_env():
         problems.append("VAULT_TEE が true でない(値: %s)" % shown(plain(env, "VAULT_TEE")))
     if not base.startswith("https://"):
         problems.append("VAULT_BASE_URL(%s)が https でない(TEE の金庫は、証明書をピン留めした TLS でつなぐ)" % base)
-    for key, want in (("VAULT_SERVICE_ACCOUNT", VAULT_SA), ("GOOGLE_CLOUD_PROJECT", PROJECT_ID)):
+    # VAULT_EXPECTED_ZONE・VAULT_EXPECTED_INSTANCE(L20-8): web は、あれば金庫の attestation の VM のゾーン・名前を照合し、なければ照合しない。
+    # 同じダイジェスト・プロジェクト・SA でも、別のゾーン・別の名前の VM を受け付けないよう、必須にして、金庫の VM(ZONE・VM_NAME)と一致させる
+    for key, want, note in (
+        ("VAULT_SERVICE_ACCOUNT", VAULT_SA, ""),
+        ("GOOGLE_CLOUD_PROJECT", PROJECT_ID, ""),
+        ("VAULT_EXPECTED_ZONE", ZONE, "。未設定だと web は、金庫の VM のゾーンを照合しない。L20-8"),
+        ("VAULT_EXPECTED_INSTANCE", VM_NAME, "。未設定だと web は、金庫の VM の名前を照合しない。L20-8"),
+    ):
         got = plain(env, key)
         if got is None:
-            problems.append("%s が未設定(TEE モードでは必須)" % key)
+            problems.append("%s が未設定(TEE モードでは必須%s)" % (key, note))
         elif got.strip() != want:
             problems.append("%s が %s(期待: %s)" % (key, shown(got), want))
     if problems:
         ng("web の TEE モードの設定が合わない", *problems)
     releases = plain(env, "VAULT_RELEASES_FILE")
     ok(
-        "VAULT_TEE=true・VAULT_BASE_URL=%s・VAULT_SERVICE_ACCOUNT・GOOGLE_CLOUD_PROJECT(VAULT_RELEASES_FILE: %s)"
-        % (base, releases or "未設定 = イメージ内の deploy/vault-releases.json")
+        "VAULT_TEE=true・VAULT_BASE_URL=%s・VAULT_SERVICE_ACCOUNT・GOOGLE_CLOUD_PROJECT・VAULT_EXPECTED_ZONE=%s・VAULT_EXPECTED_INSTANCE=%s(VAULT_RELEASES_FILE: %s)"
+        % (base, ZONE, VM_NAME, releases or "未設定 = イメージ内の deploy/vault-releases.json")
     )
 
 
@@ -518,6 +529,7 @@ def check_agents_url():
 
 
 def check_iam(name):
+    """Cloud Run のサービスに直に付いた束縛の確認。問題があれば NG で終わる。なければ、OK の文を返す(続きの確認があれば、呼び出し側が足して ok にする)。"""
     service = data("svc-" + name)
     policy = data("iam-" + name)
     web_member = "serviceAccount:" + WEB_SA
@@ -536,15 +548,39 @@ def check_iam(name):
         problems.append("起動元の IAM の確認が無効(run.googleapis.com/invoker-iam-disabled=true)")
     if problems:
         ng("%s の起動元が web のサービスアカウントだけになっていない" % name, *problems)
-    ok("%s の roles/run.invoker は web の SA だけ(公開の設定なし)" % name)
+    return "%s の roles/run.invoker は web の SA だけ(公開の設定なし)" % name
 
 
 def check_iam_agents():
-    check_iam("agents")
+    summary = check_iam("agents")
+    # X-86: サービスに直に付いた束縛だけでは、プロジェクトなど上位の階層の束縛(roles/editor・roles/run.invoker・run.routes.invoke を含む custom role)を
+    # 見落とす。その主体は、web の入口の制限・1 日の LLM の枠を通らずに agents(Gemini)を呼べる。run.routes.invoke を持つ主体を、継承込みで列挙して照合する。
+    # web の SA が結果にないのも不合格(権限名・資源名の形が違うと、エラーにならずに 0 件が返ることがある。I-39)
+    owners, _ = expected_principals()
+    expected = {norm("serviceAccount:" + WEB_SA)} | set(owners)
+    # このプロジェクトの Google 管理のサービスエージェント(Vertex AI・Cloud Run)は、役割に run.routes.invoke を含む(実測 2026-10-05)。
+    # Google がサービスを動かすための主体で、プロジェクトの利用者はなりすませず、外すとサービスが動かない。名前で 2 つだけ許し、ほかのサービスエージェントは想定外にする
+    service_agents = (
+        {norm("serviceAccount:service-%s@%s" % (PROJECT_NUMBER, domain)) for domain in ("gcp-sa-aiplatform.iam.gserviceaccount.com", "serverless-robot-prod.iam.gserviceaccount.com")}
+        if PROJECT_NUMBER
+        else set()
+    )
+    actual = {norm(identity) for identity in analysis_identities("agents-analysis")}
+    allowed_agents = actual & service_agents
+    if actual - service_agents != expected:
+        details = ["想定外(run.routes.invoke を持つが、web の SA でも承認済みのオーナーでも、このプロジェクトの Vertex AI・Cloud Run のサービスエージェントでもない。web を通さずに agents を呼べる): %s" % name for name in sorted(actual - expected - service_agents)]
+        details += ["足りない(期待にあって、解析の結果にない): %s" % name for name in sorted(expected - actual)]
+        if not actual:
+            details.append("Policy Analyzer の結果が 0 件(権限名・資源名の形が違うと、エラーにならずに 0 件が返ることがある。I-39)")
+        ng("agents を呼べる主体(run.routes.invoke を持つ主体。Policy Analyzer。継承・custom role 込み)が、web の SA と承認済みのオーナーだけになっていない(X-86)", *details)
+    ok(
+        "%s。run.routes.invoke を持つ主体(Policy Analyzer。継承・custom role 込み)は %d 件(web の SA 1・承認済みのオーナー %d・Google 管理のサービスエージェント %d)で、期待集合と完全一致。解析は完了。範囲: %s"
+        % (summary, len(actual), len(owners), len(allowed_agents), analysis_scope())
+    )
 
 
 def check_iam_vault():
-    check_iam("vault")
+    ok(check_iam("vault"))
 
 
 def check_vault_command():
@@ -819,8 +855,8 @@ def check_tee_b():
     )
 
 
-# プール・プロバイダを変えられる役割。Policy Analyzer は基本ロール(roles/owner)にこの権限を数えない(実測 2026-10-04: オーナーがプールを
-# 作れたのに、owner の権限一覧にも解析結果にも iam.workloadIdentityPools.update 等が出ない)ので、プロジェクトの IAM の束縛からも拾う。
+# プール・プロバイダを変えられる役割。Policy Analyzer(完全な形の権限名で問い合わせる。I-39)の結果に加えて、プロジェクトの IAM の束縛からも拾う
+# (二重の守り。解析が 0 件・欠けでも、オーナーと pool admin の束縛は数える)。
 POOL_ADMIN_ROLES = ("roles/owner", "roles/iam.workloadIdentityPoolAdmin")
 
 
@@ -989,12 +1025,33 @@ def canonical_rule(rule):
     return {"denyRule": {key: (sorted(value) if isinstance(value, list) else value) for key, value in deny.items()}}
 
 
+def in_organization():
+    """プロジェクトが組織の配下か(祖先に組織があるか。ORG_ID があれば、配下とする)。祖先を確かめられなかった・読めなかったときは None。"""
+    if ENV.get("ORG_ID"):
+        return True
+    if read("ancestors", "rc", "none") != "0":
+        return None
+    try:
+        with open("%s/ancestors.out" % WORK, encoding="utf-8", errors="replace") as handle:
+            ancestors = json.load(handle)
+        if not ancestors:  # 空(プロジェクト自身も返らない)なら、確かめられていない
+            return None
+        return any(item.get("type") == "organization" for item in ancestors)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+
+
 def check_tee_i():
+    # I-37: 拒否ポリシーを作る役割(Deny Admin)は組織にだけ付与できるので、組織の配下でないプロジェクトには、拒否ポリシーは作れない。
+    # 祖先に組織がないと確かめられたときだけ SKIP にする(祖先を確かめられなかったときは、これまでどおり確かめる。確かめられないものを、通ったことにしない)
+    if in_organization() is False:
+        skip("組織の配下でないので拒否ポリシーは作れない(Deny Admin は組織にだけ付与できる。I-37)。オーナーの抑止は監査ログの記録のみ")
     # gcloud iam policies list は、ポリシーのメタデータだけを返し、rules は含まない(IAM v2 の API の仕様)。本文は get で取る。
     if read("deny-policy", "rc", "none") != "0":
         ng(
             "拒否ポリシー %s を取得できない(ない・権限がない。プロジェクトのオーナーが KEK を復号できてしまう。手順 G。P-13)" % DENY_POLICY,
             read("deny-policy", "err") or "gcloud の終了コード %s" % read("deny-policy", "rc", "none"),
+            *(["祖先を確かめられなかったので、組織の配下でないとは言えず、SKIP にしない(I-37)"] if in_organization() is None else [])
         )
     policy = data("deny-policy")
     if not isinstance(policy, dict) or str(policy.get("name", "")).rsplit("/", 1)[-1] != DENY_POLICY:
@@ -1056,11 +1113,18 @@ def value_boot_disk_name():
     return source.rsplit("/", 1)[-1]
 
 
+def value_in_organization():
+    """yes(組織の配下)・no(組織の配下でない)・unknown(祖先を確かめられなかった)。bash が、tee-i の gcloud を呼ぶかを決めるのに使う。"""
+    state = in_organization()
+    return "unknown" if state is None else ("yes" if state else "no")
+
+
 VALUES = {
     "service-url": value_service_url,
     "primary-create-time": value_primary_create_time,
     "vm-subject": value_vm_subject,
     "boot-disk-name": value_boot_disk_name,
+    "in-organization": value_in_organization,
 }
 
 
@@ -1164,7 +1228,7 @@ PROJECT_NUMBER="${PROJECT_NUMBER:-}"
 ORG_ID="${ORG_ID:-}"
 VAULT_URL="${VAULT_URL:-}"
 export PROJECT_ID REGION ZONE VAULT_MODE WEB_URL AGENTS_URL WEB_SA VAULT_SA WEB_SERVICE AGENTS_SERVICE VAULT_SERVICE
-export POOL PROVIDER KEY DENY_POLICY IAP_FIREWALL_RULE PROJECT_NUMBER ORG_ID
+export POOL PROVIDER KEY VM_NAME DENY_POLICY IAP_FIREWALL_RULE PROJECT_NUMBER ORG_ID
 
 # gcloud が対話の質問で止まらないようにする(質問は、既定の答え = 何もしない、になる)
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
@@ -1332,13 +1396,17 @@ fetch_vm() {
     "$GCLOUD" compute instances describe "$VM_NAME" --zone "$ZONE" --project "$PROJECT_ID" --format json
 }
 
+fetch_ancestors() { # プロジェクトの祖先(組織の配下か)を取る。Policy Analyzer の範囲の確認と、tee-i を SKIP にするかの判断(I-37)に使う
+  fetch ancestors "gcloud projects get-ancestors" "$GCLOUD" projects get-ancestors "$PROJECT_ID" --format json
+}
+
 analyze() { # analyze NAME 資源の完全な名前 権限(コンマ区切り): Policy Analyzer。ORG_ID があれば組織、なければプロジェクトの範囲
   local scope="--project=$PROJECT_ID"
   if [ -n "$ORG_ID" ]; then
     scope="--organization=$ORG_ID"
   else
     # 組織の配下なのに ORG_ID がないことに気づけるよう、祖先を取っておく(評価プログラムが、組織があれば NG にする)
-    fetch ancestors "gcloud projects get-ancestors" "$GCLOUD" projects get-ancestors "$PROJECT_ID" --format json
+    fetch_ancestors
   fi
   fetch "$1" "gcloud asset analyze-iam-policy($2)" \
     "$GCLOUD" asset analyze-iam-policy "$scope" "--full-resource-name=$2" "--permissions=$3" --show-response --format=json
@@ -1361,7 +1429,15 @@ check_web_vault_env() {
 }
 
 check_agents_url() { py_check agents-url; }
-check_iam_agents() { fetch_service agents; fetch_iam agents; py_check iam-agents; }
+check_iam_agents() {
+  fetch_service agents
+  fetch_iam agents
+  # X-86: サービスに直に付いた束縛に加えて、run.routes.invoke を持つ主体を、継承(プロジェクトなど上位の階層)・custom role 込みで Policy Analyzer に列挙させる。
+  # 資源名は Cloud Run のサービス(Cloud Asset の資産の種類 run.googleapis.com/Service)の完全な名前
+  analyze agents-analysis "//run.googleapis.com/projects/${PROJECT_ID}/locations/${REGION}/services/${AGENTS_SERVICE}" run.routes.invoke
+  need_project_number || true # サービスエージェントの名前に使う(取れなければ許さない側に倒れる)
+  py_check iam-agents
+}
 check_iam_vault() { fetch_service vault; fetch_iam vault; py_check iam-vault; }
 check_vault_command() { fetch_service vault; py_check vault-command; }
 
@@ -1467,8 +1543,10 @@ check_tee_b() {
 check_tee_b_pool() {
   # Policy Analyzer は Workload Identity Pool の full resource name を受け付けない(実測 2026-10-04: INVALID_ARGUMENT)ので、
   # プロジェクトを対象に「プール・プロバイダを変えられる権限」を持つ主体を列挙する(プールの IAM は、プロジェクト〔と上位〕の束縛で決まる)。
+  # 権限名は完全な形(iam.googleapis.com/ を付ける。役割の権限の一覧にある名前)で渡す。iam.workloadIdentityPoolProviders.create の形では、
+  # Policy Analyzer はエラーにならずに常に 0 件(完了扱い)を返す。完全な形で問い合わせると、プロジェクトのオーナーが返る(実測 2026-10-05。I-39)。
   analyze pool-analysis "//cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" \
-    iam.workloadIdentityPoolProviders.create,iam.workloadIdentityPoolProviders.update,iam.workloadIdentityPoolProviders.delete,iam.workloadIdentityPools.update
+    iam.googleapis.com/workloadIdentityPoolProviders.create,iam.googleapis.com/workloadIdentityPoolProviders.update,iam.googleapis.com/workloadIdentityPoolProviders.delete,iam.googleapis.com/workloadIdentityPoolProviders.undelete,iam.googleapis.com/workloadIdentityPools.update,iam.googleapis.com/workloadIdentityPools.undelete
   fetch project-iam "gcloud projects get-iam-policy" "$GCLOUD" projects get-iam-policy "$PROJECT_ID" --format json
   py_check tee-b-pool
 }
@@ -1585,12 +1663,17 @@ check_tee_h_reset() {
 }
 
 check_tee_i() {
-  if ! need_project_number; then
-    emit NG tee-i "プロジェクト番号を取れない(PROJECT_NUMBER を設定するか、gcloud projects describe の権限を確かめる)"
-    return 0
+  # I-37: 組織の配下でないプロジェクトには、拒否ポリシーは作れない(Deny Admin は組織にだけ付与できる)。祖先に組織がないと分かったときは、
+  # 拒否ポリシーを取りに行かずに、評価プログラム(python3)が SKIP にする。ORG_ID があれば組織の配下。祖先を確かめられなかったときは、これまでどおり確かめる
+  [ -n "$ORG_ID" ] || fetch_ancestors
+  if [ "$(py_value in-organization)" != no ]; then
+    if ! need_project_number; then
+      emit NG tee-i "プロジェクト番号を取れない(PROJECT_NUMBER を設定するか、gcloud projects describe の権限を確かめる)"
+      return 0
+    fi
+    fetch deny-policy "gcloud iam policies get $DENY_POLICY" \
+      "$GCLOUD" iam policies get "$DENY_POLICY" "--attachment-point=cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" --kind=denypolicies --format json
   fi
-  fetch deny-policy "gcloud iam policies get $DENY_POLICY" \
-    "$GCLOUD" iam policies get "$DENY_POLICY" "--attachment-point=cloudresourcemanager.googleapis.com/projects/${PROJECT_ID}" --kind=denypolicies --format json
   py_check tee-i
 }
 
