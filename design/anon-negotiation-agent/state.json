@@ -1,5 +1,5 @@
 {
-  "currentNode": "実装",
+  "currentNode": "反証",
   "status": "in_progress",
   "designVersion": "v22",
   "approvedDesignVersion": "v22",
@@ -18,7 +18,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v22 承認済み。本番デプロイ済み・公開（web-00003-j6l〔点 6 の画面とコミットのリンク〕、agents-00001-zlw）。GitHub は公開（toshi-naka-boop/anon-negotiation-agent、PR #1 マージ済み）。次: I-34 の小さな積み残し、反証、デモ動画、信頼境界図・説明文・Zenn。次の設計書の改訂で I-37・I-38 を写す。作業ブランチの以後の変更は PR で main へ。VM は稼働中（DA カウンタ 10/32 の見込み）。",
+  "nextAction": "反証 20 巡目（2026-10-05 決定）。対象: 19 巡目の批評（1a1b6d9）以降のコードの変更（src・static・scripts・tests・config・Dockerfile・Dockerfile.vault。39 コミット）と本番の構成（research/deploy-runbook.md の実施記録）。レンズ 2 つ: 正しさ = design-critic（opus）→ reviews/round-20-correctness.md、安全性 = codex exec xhigh → reviews/round-20-security-codex.md（公開中の web の入口・レート制限・SSE・面談・攻撃モード・CSP、TEE の経路〔attestation の検証とピン留め・呼び出し元の検証・鍵の解放と封印〕、deploy_check の照合、static/tee.js を重点）。本番 https://web-341888860511.asia-northeast1.run.app には読み取りだけ（負荷・攻撃の要求は送らない、gcloud で設定を変えない）。実装の不具合は修正して再反証、設計の欠陥は改訂へ。上限 3 巡。反証の後: I-34 の積み残しを反証の指摘と合わせて優先順位を付けて提案（着手前にユーザー確認）。Linux 向けの試験の手直し（tests/conftest.py の JDK・エミュレータの jar のパス）は保留（クラウドのセッションか CI を使うときに）。その後: デモ動画、信頼境界図・説明文・Zenn。設計書の次の改訂で I-37・I-38 を写す。作業ブランチの変更は PR で main へ。VM は稼働中。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
