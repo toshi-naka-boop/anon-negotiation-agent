@@ -33,6 +33,21 @@
 - 分かったこと: API の claims に `service_accounts` は入らない（`summarize_claims` は 9 項目）。画面の検証コマンドの `--service-account` は置き換え用の `<金庫の SA>` のまま。`release` が null になるのは「表にない」だけでなく「検証が通らず表と照合していない」場合もある（文言をそれに合わせた）。
 - 確認: 試験 251 件（UI と TEE の API）・全体 3,596 件通過。node の偽 DOM で 4 つの場合と信用しない値の扱いを試験。呼び出し側がスタブ（本番と同じ CSP）で、リンクあり・TEE でない・検証できていないの 3 つを実ブラウザで確認。本番へは 2026-10-05 に反映（`web-00002-fqc`。ユーザーの了承）。公開 URL で検証済みの表示を確認。
 
+### 反証 20 巡目（2026-10-05。正しさ = design-critic、安全性 = design-critic と codex gpt-6.1-sol xhigh。原文は reviews/round-20-correctness.md・round-20-security.md・round-20-security-codex.md）
+
+high は 3 レンズとも無し。medium は重なりを除いて 8 件（呼び出し側の実測で 1 件を low から格上げ、1 件を追加）。I-34 の積み残しのうち 2 つが、ここで medium として再提起された。
+
+- **C-67（実装 / medium。正しさ 1）段階開示が段 0 のまま止まって見える**: X-84 で GET を読み出しだけにした後、画面は最終結果が届いたときに 1 回しか読み直さない。完了のフック（自動応答の「会う」「承認」）が書き終える前に読むと段 0 のまま。直し方: `StageView` に `settled` を足し、画面は `judged && !settled` の間だけ間隔を伸ばしながら読み直す。§6.2 に 1 文。呼び出し側がコードで確認（`static/stages.js` の `reload` は 1 回、`web/stages.py` の `view` の docstring も「決着処理の前は段 0」）。
+- **C-68（設計 / medium。安全性 1。I-34 の「GET の再取得の枠」の格上げ）匿名で金庫を読む口に枠が無い**: デモの activity・panels、攻撃の events・walls/3 に送信元ごとの枠が無く、meter は全体の枠の外（L19-7）。1 つの送信元から web → 金庫の接続（共有 100 本）と Firestore の読み出しの課金を増幅できる。
+- **C-69 = X-87（設計 / medium。安全性 2・codex 3。I-34 の「同時に持てる面談の数」）面談の同時 500 件の枠を 1 つの送信元が占有できる**: `begin` の枠は回数の窓（10 分に 10 回）で同時数の上限ではなく、`GET .../interview/state` が枠なしで寿命を延ばすので、アイドルの掃除（C-66）が効かない。約 8 時間で 500 件に達し、約 500 GET／時で保持できる。直し方: 送信元ごとの同時数の上限と、読み取りでは延びない絶対の寿命。
+- **C-70（実装 / medium。安全性 3）入口の「金庫の確認」がオーナーの復号の記録を無条件に書く**: `static/tee.js` の「Cloud KMS の監査ログに主体と時刻が残ります」に、X-78（監査の設定が有効で除外がない間）と C-62（プロバイダを足した復号は金庫と同じ形の主体になり、読み解けるのは運営者だけ）の限定が無い。I-37 の文案も同じ。
+- **C-71（実装 / medium。安全性の low L-e を呼び出し側の実測で格上げ）IPv6 をアドレス単位で数えている**: 公開 URL は AAAA を返す（`dig` で 3 件）。送信元ごとの枠（SSE の 2 本・`session_start`・`interview_begin`・`meter`・攻撃と面談の窓）は、/64 の中でアドレスを変えるだけで外れる。直し方: IPv6 は /64 の接頭辞で数える。
+- **X-85（実装 / medium。codex 1）面談の口が本文全体を読んでから認証と枠を評価する**: web には段階開示と攻撃の口にしか本文の上限が無く、FastAPI は依存（枠）より先に本文を読む。Cloud Run の上限（32 MiB）までの本文を並行で送れば、1 GiB・1 台の web のメモリと CPU を枠の外で使える。呼び出し側がコードで確認。直し方: 解析の前に本文の大きさを数える全体の上限（ASGI のミドルウェア）。
+- **X-86（実装 / medium。codex 2）agents を呼べる主体の照合が、サービスに直に付いた束縛しか見ない**: 継承と custom role を見落とす。呼び出し側の実測: `roles/editor` は `run.routes.invoke` を含み、Compute Engine の既定のサービスアカウントがプロジェクトの editor なので、web を通さずに agents（Gemini）を呼べる主体がいま存在する（使っている実行環境は無い）。直し方: Policy Analyzer で `run.routes.invoke` を継承込みで列挙し、許す主体を明示。既定の SA の editor を外すかはユーザーの判断（P-21）。
+- **I-39（呼び出し側の実測 / medium）deploy_check のプール管理者の問い合わせが、存在しない権限名を使っていた**: `iam.workloadIdentityPoolProviders.create` などの形では Policy Analyzer は常に 0 件（完了扱い）を返す。役割の権限の一覧での実際の名前は `iam.googleapis.com/workloadIdentityPoolProviders.create` などで、この名前で問い合わせるとオーナーが返る。I-36 の「基本ロールの権限は Policy Analyzer に出ない」は誤りで、原因は名前の形だった（I-36・v22 §10 (b) の文面を直す）。直し方: 完全な形の名前で問い合わせる（プロジェクトの IAM の束縛からも拾う二重の守りは残す）。
+- **P-21（前提 / ユーザーの判断待ち）Compute Engine の既定のサービスアカウントの `roles/editor` を外すか**: X-86 の実測による。外す前に、Cloud Build がどのサービスアカウントで動いているかを確かめる（外すとビルドが壊れる恐れ）。
+- low（件数に数えない）: L20-1 開示台帳の画面が `result` を内部の語のまま出す。L20-2 二分探索の続きの再送で 1 件に枠を 2 回数える。L20-3 二分探索で 503・504 のとき画面が request_id を捨てる。L20-4 二分探索の途中の再起動で本物の LLM を最大 2 回呼ぶ。L20-5 デモの FR-39 の文と §7 の食い違い。L20-6（L-a）editor のプール権限: 実測で editor は読み取りの権限だけ（作成・更新・削除なし）→ 却下（ただし調べる過程で I-39 が見つかった）。L20-7（L-b）(b) が鍵の IAM を書き換えられる主体（setIamPolicy）を列挙しない。L20-8（L-c）手順書の `gcloud run deploy web` に `VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE` が無く、deploy_check も見ない。L20-9（L-d）healthz-vault が動いているダイジェストを (e) と突き合わせない。L20-10（L-f）`tee.js` の「言えないこと」が 2 つだけ。L20-11（L-g）agents-url の照合が手元の設定を読む。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |
