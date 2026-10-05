@@ -95,11 +95,12 @@ gcloud run services describe agents --region="$REGION" --format="value(status.ur
 ## 5. web をデプロイする（公開。Direct VPC egress で金庫へ）
 
 ```bash
-gcloud run deploy web --region="$REGION" --image="${REPO}/app:$(git rev-parse --short HEAD)" --service-account="$WEB_SA" --no-allow-unauthenticated --min-instances=1 --max-instances=1 --no-cpu-throttling --concurrency=200 --memory=1Gi --cpu=1 --timeout=300 --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --set-secrets="SESSION_SIGNING_KEY=session-signing-key:latest" --set-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_LOCATION=global,ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false,GITHUB_REPO_URL=<GitHub のリポジトリの URL>"
+gcloud run deploy web --region="$REGION" --image="${REPO}/app:$(git rev-parse --short HEAD)" --service-account="$WEB_SA" --no-allow-unauthenticated --min-instances=1 --max-instances=1 --no-cpu-throttling --concurrency=200 --memory=1Gi --cpu=1 --timeout=300 --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --set-secrets="SESSION_SIGNING_KEY=session-signing-key:latest" --set-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},VAULT_EXPECTED_ZONE=${ZONE},VAULT_EXPECTED_INSTANCE=vault-tee,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_LOCATION=global,ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false,GITHUB_REPO_URL=<GitHub のリポジトリの URL>"
 ```
 
 - 公開（`allUsers` への `roles/run.invoker`）は権限の付与で、Claude の自動実行では止まる。デプロイは `--no-allow-unauthenticated` で行い、確かめてからユーザーが公開する（`gcloud run services add-iam-policy-binding web --region=asia-northeast1 --member=allUsers --role=roles/run.invoker`）。
 - イメージの CMD（`uvicorn web.app:create_app_from_env --factory --workers 1`）をそのまま使う。
+- `VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE` は、web が attestation のゾーンとインスタンス名も照合するための値（v23 で必須。`deploy_check` の `web-vault-env` が金庫の VM と一致を確かめる。L20-8）。
 - `GITHUB_REPO_URL` は、画面の「コミットへのリンク」の土台（点 6）。公開リポジトリの URL を入れる。
 
 死活確認。
