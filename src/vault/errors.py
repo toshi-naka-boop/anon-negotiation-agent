@@ -1,0 +1,51 @@
+"""金庫の例外階層(design.md §3.3・§3.5)。
+
+app.py がこれらを HTTP ステータスに変換する。store.py はこれ以外の例外(想定外のバグ)を
+そのまま投げてよい(FastAPI が 500 にする)。
+"""
+
+
+class VaultError(Exception):
+    """金庫の例外の基底クラス。"""
+
+
+class NotFoundError(VaultError):
+    """交渉・依頼者・テンプレートが見つからない(404)。"""
+
+
+class MovePreconditionFailed(VaultError):
+    """手の操作の前提が崩れている(409。§3.5)。
+
+    expected_version の不一致・手番違い・状態(active でない)・一時停止中・
+    トランザクションの再試行を使い切った(競合。子クラス ContentionExhausted)のいずれか。
+    このいずれでも、回数・記録を一切消費しない。レフェリーは 409 を受けたら状態を読み直す。
+    """
+
+
+class ContentionExhausted(MovePreconditionFailed):
+    """手の操作(moves・principal-answer)のトランザクションが、競合で再試行を使い切った(409)。
+
+    HTTP の 409 と detail は MovePreconditionFailed と同じ(呼び出し側から見た扱いは変えない)。
+    expected_version の不一致などの前提の崩れと区別するための子クラスで、テストとログで
+    「並行の競合で落ちた 409」を見分けられる(台帳 I-5)。何も消費していない点は親と同じ。
+    """
+
+
+class TransactionRetryExhausted(VaultError):
+    """冪等な操作(control・expire)・作成のトランザクションが、競合で再試行を使い切った
+    (503。再試行してよい)。手の操作(moves)は同じ場面でも 409 にする(MovePreconditionFailed)。
+    """
+
+
+class PolicyValidationError(VaultError):
+    """ポリシーがグリッド外・矛盾などで拒否された(§3.3 の PUT policy)。"""
+
+
+class PrincipalDeletingError(VaultError):
+    """依頼者が削除中(deleting)で、その依頼者が関わる操作が拒否された(409。§3.8 手順 1)。
+
+    「依頼者を単位にする操作」(PUT/GET policy・PUT blocklist・本人の交渉一覧)と、
+    「交渉を単位にする操作」のうち手の操作(moves)・control・読み出し(view・events)から
+    投げる。交渉の作成(create_negotiation)は例外にせず、既存の断り方(status="refused")に
+    合わせる。expire はシステムの操作(終わらせるだけ)なのでここには含めない。
+    """

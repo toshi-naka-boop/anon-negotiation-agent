@@ -1,0 +1,359 @@
+# negotiation_core が使う暫定値（design.md §2.1・§2.6）。
+# 「暫定」は design.md の未決事項（U-01〜U-14）が決まるまでの仮の値。
+# ここに置くのは 1a（negotiation_core）が使う値だけ。上限・期限・レート制限などは後の段で足す。
+
+# --- §2.1 語彙（軸）とグリッド ---
+# kind: "numeric"（数値軸）または "categorical"（区分軸）
+# grid: そのままグリッド（=取り得る値の全集合）として並べる。数値軸は昇順、区分軸は列挙順。
+# direction: 各軸の値が大きい／後ろにあるほど良いか悪いかを、候補者・求人側それぞれについて示す。
+#   "higher_is_better" / "lower_is_better"（数値軸） or "unordered"（区分軸）
+
+[axes.salary]
+label = "比較基準年収（万円）"
+kind = "numeric"
+discrete = false
+grid = [300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400, 1450, 1500]
+candidate_direction = "higher_is_better"
+employer_direction = "lower_is_better"
+
+[axes.remote_days]
+label = "リモート日数（週）"
+kind = "numeric"
+discrete = true
+grid = [0, 1, 2, 3, 4, 5]
+candidate_direction = "higher_is_better"
+employer_direction = "lower_is_better"
+
+[axes.night_duty]
+label = "当直回数（月）"
+kind = "numeric"
+discrete = true
+grid = [0, 2, 4, 6, 8]
+candidate_direction = "lower_is_better"
+employer_direction = "higher_is_better"
+
+[axes.review_months]
+label = "昇給見直しまでの月数"
+kind = "numeric"
+discrete = true
+grid = [6, 12]
+candidate_direction = "lower_is_better"
+employer_direction = "higher_is_better"
+
+[axes.training]
+label = "研修"
+kind = "categorical"
+discrete = true
+grid = ["none", "available"]
+candidate_direction = "unordered"
+employer_direction = "unordered"
+
+[axes.side_job]
+label = "副業"
+kind = "categorical"
+discrete = true
+grid = ["not_allowed", "allowed"]
+candidate_direction = "unordered"
+employer_direction = "unordered"
+
+[axes.start]
+label = "入職時期"
+kind = "categorical"
+discrete = true
+grid = ["within_1_month", "within_3_months", "within_6_months"]
+candidate_direction = "unordered"
+employer_direction = "unordered"
+
+# --- §2.6 候補者の属性帯（暫定） ---
+
+[attribute_bands.experience_band]
+label = "経験年数の帯"
+grid = ["under_3y", "3_to_5y", "5_to_10y", "10y_plus"]
+
+[attribute_bands.region_block]
+label = "地域ブロック"
+grid = ["hokkaido_tohoku", "kanto", "chubu", "kinki", "chugoku_shikoku", "kyushu_okinawa"]
+
+[attribute_bands.job_category]
+label = "職種"
+grid = ["medical_welfare", "it_web", "sales", "administration", "other"]
+
+# --- agents が使う暫定値(design.md §4.2・§4.3) ---
+
+[agents]
+# 交渉エージェント(候補者側・求人側・攻撃モードの求人側)が使う LLM(Gemini の Flash 系。§4.2)。
+# gemini-3.5-flash(台帳 I-10。調査事項 R-3 で、2026-10-01 に Vertex AI の global エンドポイントを 1 回呼んで確かめた)。
+# Vertex AI のプロジェクトと場所は、このファイルにもコードにも書かず、ADK と google-genai の標準の環境変数で渡す。
+#   GOOGLE_GENAI_USE_VERTEXAI=TRUE、GOOGLE_CLOUD_PROJECT=<プロジェクト ID>、GOOGLE_CLOUD_LOCATION=global
+# 場所は global を使う。3.x の Flash は、東京(asia-northeast1)が提供の一覧になく、global では処理される国が決まらない(台帳 I-10)。
+model = "gemini-3.5-flash"
+# 交渉の探索を揺らさないため 0(§4.2)
+temperature = 0
+# 思考の量(§4.2・R-9。thinking_level: MINIMAL / LOW / MEDIUM / HIGH。3.5 Flash の既定は MEDIUM)。
+# 設計書 v14 の暫定は 計画 LOW・決定 MINIMAL だが、ユーザーの指示(2026-10-02: 費用より品質を優先。台帳 I-18)で、
+# 計画は既定の MEDIUM、決定は LOW から始める。DV-15 の実測を見てから下げる。
+plan_thinking_level = "MEDIUM"
+decide_thinking_level = "LOW"
+# 1 回の呼び出しの出力＋思考の上限(§4.2・台帳 X-50)。切れた出力は output_truncated の無効手になる(台帳 C-53)
+# 2026-10-04: 計画の思考が MEDIUM で 1,900 トークンに達し、2,048 では 1 回切れた(本物の Gemini、DV-15 の再実行)。X-63 の範囲(256〜4,096)の中で 3,072 に上げた。§8.2 の最悪額は 1.5 倍(台帳 I-29)
+max_output_tokens = 3072
+# google-genai のクライアント側の自動再試行の回数(1 = 再試行なし。§4.2・台帳 X-55)。再試行はレフェリーだけが行う
+http_retry_attempts = 1
+# 受信本文の上限(バイト。暫定 32 KB。§4.3・U-03)
+max_request_body_bytes = 32768
+# 応答の usage の prompt_tokens の上限(トークン数。暫定。§4.3・§10・台帳 X-58)。入力は、前文(約 2,000 トークン)と、本文 32 KB の上限
+# (max_request_body_bytes)から多くても約 10,000 トークンの TurnInput(§8.2)なので、余裕を見て 20,000 にした。超えた応答は、
+# レフェリーが schema_invalid の無効手にする。起動時に 1 以上であることを検証する。
+max_prompt_tokens = 20000
+# 1 回の LLM 実行の上限(秒)。レフェリーの 1 呼び出しの上限(暫定 60 秒。§4.1)より短くする。
+# 超えたら一時的なエラーとして返し、止まったままの実行を残さない。
+llm_timeout_seconds = 45
+# Agent Card に載せる、agents サービスの公開 URL(web もこの URL で agents を呼ぶ。ID トークンの audience にもなる)。
+# Cloud Run の決定的な URL(https://<サービス名>-<プロジェクト番号>.<リージョン>.run.app。research/deploy-runbook.md)。
+# ローカルの開発用サーバ・デモ・試験は、自前の base URL(http://agents.test)を渡すので、この値を使わない。
+public_base_url = "https://agents-341888860511.asia-northeast1.run.app"
+
+[agents.cost_targets]
+# DV-15(design.md §12.2)の判定の基準。scripts/run_demo.py --judge が使う。設計書の数値は暫定で、正本はここ。
+# 費用の上限(ドル/交渉)。設計書 v14 の暫定 0.15 を、ユーザーの指示(品質を優先。台帳 I-18)で 0.25 にした
+max_cost_usd_per_negotiation = 0.25
+# 200 応答の呼び出しの上限: 手の数(無効手と有効な途中確認を含む)× この値、かつ max_successful_calls 以下(§4.1)
+max_calls_per_move = 2
+max_successful_calls = 28
+# 思考トークン数の基準値(② の実測。台帳 I-15: 思考 $0.63 ÷ 単価 $9/100 万 ÷ 約 85 回)と、1 呼び出しの平均に許す比率。
+# 設計書 v14 の暫定は 0.5(半分以下)。品質を優先する指示で 1.0(基準値を超えないこと)にした
+thinking_tokens_baseline = 820
+max_avg_thinking_ratio = 1.0
+# 単価(ドル/100 万トークン。Vertex AI、global。調査 R-9、確認日 2026-10-02)。変えたら price_version も変える
+price_version = "2026-10-02"
+input_usd_per_million = 1.50
+cached_input_usd_per_million = 0.15
+output_usd_per_million = 9.00
+
+# --- vault が使う暫定値(design.md §3)。1b-1 の実装範囲でだけ使う ---
+# 上限・期限・寿命・TTL・T_high・1 日の予算はすべて未決事項(U-03・U-04・U-06)の暫定値。
+
+[vault.limits]
+# 評価回数の上限(自分の手で起きた評価だけ。側ごと。§3.5)。v14 で 16 から 17 にした(手数 6 ＋ 確かめ 10 ＋ 途中確認 1。台帳 X-59)
+evaluation_budget_per_side = 17
+# 手数の上限(有効な check・有効な ask_principal を除く。無効手を含む。側ごと。§3.5・台帳 C-38)
+moves_budget_per_side = 6
+# 途中確認の上限(側ごと。合計 2。§3.5・U-04)
+principal_checks_per_side = 1
+# 連続無効手の上限(側ごと。§3.5)
+consecutive_invalid_limit = 3
+# 本物の依頼者ごとの 24 時間の評価予算(交渉ごとに予約で引く。固定の窓。§3.5)。v14 で 160 から 170(評価 17 × 10 件)
+daily_evaluation_budget_per_principal = 170
+
+[vault.deadlines]
+# 交渉の絶対の寿命(作成時刻から。秒。§3.4)
+negotiation_lifetime_seconds = 259200
+# 手番の期限(秒。§3.4)
+move_deadline_seconds = 300
+# 途中確認の期限(秒。§3.4)
+principal_check_deadline_seconds = 86400
+# 最長の停止時間(秒。これを超えたら見回りの expire で timeout にする。§3.4)
+max_pause_seconds = 86400
+
+[vault.judgment]
+# 広さの閾値。これ以上なら「高」、未満なら「中」(§3.6・U-06)
+t_high = 10
+
+[vault.retention]
+# デモ・攻撃モードの交渉に付ける TTL(秒。§3.8)
+fictional_negotiation_ttl_seconds = 345600
+
+# --- web が使う暫定値(design.md §4.1)。1d-1 の実装範囲(レフェリー・見回り)でだけ使う ---
+# 60 秒・3 回・60 秒ごとは設計書(§4.1)の暫定値。再試行の待ち時間と、待つときの読み直しの間隔は
+# 設計書に値がなく、実装時に置いた暫定値(決まったらここを差し替える)。
+
+[web.referee]
+# エージェントの 1 回の呼び出しの上限(秒)。再試行の待ち時間を含む(§4.1: 「この 60 秒の中で」)
+agent_call_timeout_seconds = 60
+# 一時的なエラー(ConnectionError)と時間切れ(TimeoutError)の再試行の最大回数(初回は数えない)
+agent_max_retries = 3
+# 再試行の待ち時間(秒)。n 回目の再試行の前に n 番目の値だけ待つ(足りなければ最後の値)
+agent_retry_backoff_seconds = [1.0, 2.0, 4.0]
+# 一時停止中・途中確認の回答待ち・409・金庫の一時的な失敗(503・500 など)の後に、金庫の状態を読み直す間隔(秒)
+# (金庫が、送り直しても直らないエラー(404・409 以外の 4xx)を返した後は、この間隔ではなく、[web.sweeper] の
+# interval_seconds(見回りの間隔)だけ待つ。台帳 L10-1: 2 秒ごとに LLM を呼び直さないため)
+wait_poll_interval_seconds = 2.0
+
+[web.sweeper]
+# 交渉の見回りの間隔(秒。起動時にも 1 回行う)
+interval_seconds = 60
+
+[web.llm_budget]
+# LLM に実際に送る回数の上限(design.md §4.1・§8.2。台帳 X-46・X-47・X-50・X-56)。送る前に数え、429・5xx でも戻さない。
+# 1 日は日本時間の 0 時区切り。発表の日は設定で上げる(大きく上げるときは分散カウンタにする。台帳 L14-7)
+daily_limit = 1500
+# 交渉ごとの上限(正常な上限 28 ＋ 429・再試行・409・再起動の余裕 16)。達したら control{stop_cost_limit} で「なし」
+per_negotiation_limit = 44
+# 1 日のカウンタの文書の TTL(秒。7 日)
+daily_counter_ttl_seconds = 604800
+# 計画 1 回で確かめる数の上限(§2.7。negotiation_core.MAX_PLANNED_CHECKS と同じ)
+max_checks_per_plan = 3
+
+# --- web が使う暫定値(design.md §6.3・§4.1・§3.8、台帳 I-6)。1d-2 の実装範囲(依頼者のセッション・利用記録・削除)で使う ---
+# 29 日・1 時間・30 日・10 分ごと・96 時間は、設計書の暫定値(未決事項 U-03 ほか)。決まったらここを差し替える。
+
+[web.session]
+# クッキーの寿命(Max-Age。署名の中の期限にも同じ値を使う。秒。§6.3)。29 日。
+# データの自動削除(retention_seconds)より 1 日早く切れるようにする(読み込み時に確かめる)。
+cookie_max_age_seconds = 2505600
+
+[web.principals]
+# 利用記録 principals_meta の last_active_at を書き直す間隔(秒。§6.3)。1 時間。
+touch_interval_seconds = 3600
+# 最後に使ってからデータを自動で消すまで(秒。delete_after = 最終利用 + この値。§6.3・P-6)。30 日。
+retention_seconds = 2592000
+
+[web.principal_sweeper]
+# 依頼者の見回りの間隔(秒。起動時にも 1 回行う。§4.1)。10 分。
+interval_seconds = 600
+
+[web.retention]
+# デモ・攻撃の stages/{nid} に付ける TTL(秒。台帳 I-6)。金庫の fictional_negotiation_ttl_seconds と同じ 96 時間。
+# Firestore の TTL ポリシー自体の設定はデプロイの段で行う。本物の利用者の段の状態には付けない。
+fictional_stage_ttl_seconds = 345600
+
+[web.stages]
+# 段階開示(design.md §6.2・台帳 C-35)。web.stages が読む。
+# 段 1 の匿名職務要約(候補者本人が「会う」のときに書く)の最大の文字数(前後の空白を除いて数える)。暫定(§6.2: 400 文字まで)。
+job_summary_max_chars = 400
+# 段階開示の API が受け付けるリクエスト本文の上限(バイト。32 KB。本文の上限は、面談の LLM 入力・生メッセージと同じ。§8.2・C-49)。
+# 超えたら、本文を読み切らずに 413 で断る。
+max_request_body_bytes = 32768
+
+[web.vault_client]
+# web から金庫を呼ぶ HTTP の時間切れ(秒)。本番の AsyncClient を作るときだけ使う(設計書に値がなく、実装時に置いた暫定値)。
+timeout_seconds = 30
+
+[web.limits]
+# 画面 API の入力の大きさの上限(設計書に値がなく、実装時に置いた暫定値。矛盾検査の計算量と保存量を抑えるため)。
+# 面談の送信 1 回に含められる、受けるアンカー・受けないアンカーのそれぞれの数
+max_anchors_per_kind = 100
+# ブロック先の企業 ID の数と、1 件の長さ
+max_blocklist_entries = 200
+max_company_id_length = 100
+# --- 入口ごとのレート制限(design.md §8.2「レート制限」。台帳 L4-2・C-3・X-10・X-30)。暫定値 ---
+# LLM を呼ぶか交渉を作るすべての入口に、クライアントごと・入口ごとの回数の上限を掛け、全入口の合計にも上限を掛ける(web.limits)。
+# 回数は Firestore の時間窓カウンタに、トランザクションで数える(再起動や新しいリビジョンでも消えない)。窓は固定の区切り
+# (UNIX 時刻を窓の長さで割った商が同じ間)。クライアントは、Cloud Run が X-Forwarded-For に追記した IP(web.client_ip。調査事項 R-7)。
+# 超えたら 429(Retry-After は窓の終わりまでの秒数)。拒否した要求は、どの枠にも数えない。
+# 【発表の日の運用】発表者だけの別枠は作らない(秘密の URL が漏れたときに、全体の歯止めを迂回されるため。台帳 X-30)。
+# 代わりに、このファイルで下の値(per_client の各値と rate_overall_limit)を上げる。聴衆が全体の上限を使い切って
+# ライブ実演が 429 になったら、リプレイ(§8.4)に切り替える。上げたら元に戻す。LLM の呼び出し数の上限([web.llm_budget])は別の
+# 歯止めで、こちらを上げても外れない。
+rate_window_seconds = 600
+# 全体の枠(LLM を呼ぶか交渉を作る入口の合計。窓あたり)。クライアント IP の取り方が崩れても効く。LLM を呼ばず読むだけの入口
+# (meter・session_start・interview_begin)は、数えず、この枠が埋まっていても断らない(web.limits の CLIENT_ONLY_ENTRANCES。台帳 L19-7)
+rate_overall_limit = 300
+# カウンタの文書の TTL(窓の終わりから。秒)。Firestore の TTL ポリシー(コレクション rate_limits のフィールド ttl_at)はデプロイの段で設定する
+rate_counter_ttl_seconds = 3600
+
+# --- SSE の同時本数の上限(design.md §4.1・§8.2。台帳 C-65。web.limits の SseConnectionLimiter。web.ui_api の /v1/stream/ に掛ける) ---
+# web は min・max とも 1 インスタンスで、SSE は 1 本が最長 30 秒つながり続ける(デモ・攻撃の画面は 1 交渉につき 2 本)。上限がないと、匿名の 1 クライアントが
+# 同時リクエストの枠(Cloud Run の既定は 80)を SSE で埋めて、面談・画面・リプレイまで止められる。いまつないである本数を、メモリの中で数える
+# (時間窓の回数ではないので、Firestore には触れず、全体の枠 rate_overall_limit にも数えない)。超えたら 429(入口 sse。Retry-After 2 秒)で、画面は
+# 通常の GET の再取得(2 秒ごと)に切り替える。全体は、同時実行数の半分以下にして、静的ファイル・リプレイ・面談の分を残す。
+# 【発表の日の運用】会場の同じ Wi-Fi は同じクライアント IP になる(デモの 2 パネルで 2 本)。聴衆が同時に見るなら、per_client を上げる(全体と合わせて)。
+sse_max_connections = 20
+sse_max_connections_per_client = 2
+
+# --- 面談(design.md §5・§8.2。src/web/interview/)の暫定値 ---
+# モデル名と temperature は [agents] の値を使う(キーを持たない)。LLM の一時的なエラーの再試行の回数・待ち時間・1 呼び出しの上限は
+# [web.referee] と同じ(§4.1)。面談の文面は fixtures/interview_templates.toml(U-01)。
+
+[web.interview]
+# 面談の LLM に向かう入力(自由記述の 3 問・自由コメント・辞めた理由)を含む、リクエスト本文の上限(バイト。§5・台帳 C-49)
+max_request_body_bytes = 32768
+# 面談エージェントの 1 回の呼び出しの出力＋思考の上限(§5・台帳 C-49)。許す範囲は [agents] max_output_tokens と同じ(256〜4,096)
+max_output_tokens = 2048
+# 面談エージェントの思考の量(MINIMAL / LOW / MEDIUM / HIGH)。決まった形に読み替えるだけなので低くする
+thinking_level = "LOW"
+# 面談の LLM 呼び出しの回数の枠(§8.2「面談の LLM 呼び出し 30 回／10 分」)は、ここではなく [web.limits.per_client] の interview_llm
+# (クライアント IP ごと。web.limits)。1 日の物理の数の上限は [web.llm_budget] が別に受け持つ
+# 面談の途中の状態(サーバのメモリ)。最後に使ってからこの秒数でメモリから消す。同時に持てる面談の数の上限
+state_idle_ttl_seconds = 3600
+max_active_interviews = 500
+# パッケージ二択(§5 の 4。5〜8 組): 出す組の数と、確認画面に進むために答え終えるべき組の最小数
+choice_pairs = 6
+min_answered_pairs = 5
+# 自由コメント・辞めた理由の 1 回から受け付ける発言の数の上限
+max_statements_per_extraction = 10
+# 手取りを額面に直すときの、手取りが額面に占める割合(前提の文に出す。§5 の 2)
+net_to_gross_ratio = 0.8
+# 経験年数の帯の境目(年。この値未満が前の帯。§2.6)。[attribute_bands.experience_band] のグリッドの数より 1 つ少ない
+experience_band_upper_bounds = [3, 5, 10]
+
+# クライアントごとの上限(窓あたり)。入口ごとに別の枠(台帳 L4-2): ある入口の枠を使い切っても、別の入口は使える。
+# 名前は web.limits.ENTRANCES と同じ(足りない・余る名前は、読み込みで拒否する)。
+[web.limits.per_client]
+# 面談の LLM 呼び出し(面談の実装が web.limits の guard を使う)
+interview_llm = 30
+# デモの実行(POST /v1/demo/negotiations)
+demo_run = 10
+# ライブ交渉の作成(POST /v1/principals/{pid}/negotiations)
+live_negotiation_create = 10
+# 攻撃モードの交渉の作成(POST /v1/demo/attack/negotiations。設計書の表にない行。1 件で LLM を 28 回ほど呼ぶので、デモの実行と同じにした)
+attack_create = 10
+# 攻撃モードの指示(攻撃の手。POST /v1/demo/attack/negotiations/{nid}/instruction)
+attack_instruction = 30
+# 壁 1 の生メッセージ(POST /v1/demo/attack/walls/1)
+raw_message = 20
+# 推定区間メーター(POST /v1/demo/meter。1 回で金庫と Firestore を最大 20 件ずつ読むので、1 要求の重みが大きい。GET .../meter/simulation は
+# 純粋な計算なので掛けない)。LLM を呼ばず金庫を読むだけなので、全体の枠には数えない(台帳 L19-7)
+meter = 60
+# 開始ページの GET(GET /start。クッキーのない訪問者に新しい依頼者 ID を発行する。台帳 C-66)。LLM は呼ばない。全体の枠には数えない(台帳 L19-7)
+session_start = 20
+# 面談を始める口(POST .../interview/begin。面談の状態をサーバのメモリに作る。同時 500 件の上限を、匿名の 1 クライアントに埋められないようにする。台帳 C-66)。
+# LLM は呼ばない。全体の枠には数えない(台帳 L19-7)。会場の同じ Wi-Fi では同じ IP になるので、10 分に面談 10 人ほどが上限(発表の日は上げる)
+interview_begin = 10
+
+# --- 攻撃モード(design.md §8.2・§3.7。台帳 P-17) ---
+[web.attack]
+# 攻撃モードの交渉の相手(架空人物のテンプレートの ID。金庫の templates/{id})。攻撃画面から相手を選ばせない
+# (架空人物以外には攻撃できない。AC-13)。fixtures/case3.toml(攻撃用: 架空の候補者と「何でも受ける」求人)ができたら、
+# ここの 2 つの名前はそのファイルのテンプレート ID(攻撃用の求人は「何でも受ける」)。
+candidate_template_id = "demo-candidate-1"
+employer_template_id = "case3-employer"
+# 攻撃の指示を web のメモリに持つ時間(秒)。金庫のデモ・攻撃の交渉の TTL(96 時間)と同じ。永続化しない(台帳 P-17)
+context_ttl_seconds = 345600
+# 壁 2 のために、直近の LLM の入力を覚えておく交渉の数の上限(メモリ)。古いものから捨てる
+llm_context_max_negotiations = 100
+# 攻撃の API の本文の上限(バイト。壁 1 の生メッセージ・指示とも。§4.3 の受信本文の上限と同じ 32 KB)
+max_body_bytes = 32768
+
+# --- TEE(Confidential Space)版の金庫だけが使う(design.md §9、research/tee-spike.md、research/tee-spike-contract.md) ---
+# Cloud Run 版は読まない。プロジェクト ID・番号・ゾーンは書かない(金庫は実行時にメタデータサーバから取る)。
+[vault.tee]
+# 受信ポート(Dockerfile.vault の EXPOSE と、VPC のファイアウォールと同じ値)
+port = 8443
+# 金庫が launcher に求める attestation トークンの audience(web とスクリプトは、この値を aud として確かめる)
+attestation_audience = "https://vault.anon-nego.internal/attestation"
+# web が金庫を呼ぶときの Google ID トークンの audience(金庫は、この値を aud として確かめる。手順の VAULT_AUDIENCE と同じ)
+caller_audience = "https://vault.anon-nego.internal"
+# 呼び出しを許す web のサービスアカウントの名前(メールは <名前>@<プロジェクト ID>.iam.gserviceaccount.com)
+caller_service_account = "web-run"
+# Workload Identity Pool・プロバイダ・KMS の名前(手順 A で作る名前と同じ)
+workload_identity_pool = "vault-tee-pool"
+workload_identity_provider = "attestation-verifier"
+kms_key_ring = "vault-tee"
+kms_key = "vault-kek"
+# launcher のソケットと、既定の attestation トークン(STS 交換用)のファイル(Confidential Space の固定の場所)
+launcher_socket = "/run/container_launcher/teeserver.sock"
+claims_token_file = "/run/container_launcher/attestation_verifier_claims_token"
+# /v1/attestation が launcher を呼ぶ最短の間隔(秒。Google Cloud Attestation は 1 プロジェクト・1 リージョンで毎秒 5 件まで)
+min_attestation_interval_seconds = 1.0
+# 自己署名の TLS 証明書の有効期間(日。起動のたびに作り直す。審査期間の連続稼働より長くする)
+tls_certificate_days = 90
+# TLS の鍵と証明書を書く場所(メモリ上。uvicorn がファイルのパスを要求するため)
+tls_dir = "/dev/shm/vault-tls"
+# 受け入れるハードウェア(トークンの hwmodel。web とスクリプトの検証ポリシーの既定)
+allowed_hwmodels = ["GCP_AMD_SEV", "GCP_INTEL_TDX"]
+# attestation トークンの発行者と、署名鍵の置き場(x509 形式。kid → PEM)
+attestation_issuer = "https://confidentialcomputing.googleapis.com"
+attestation_signer_certs_url = "https://www.googleapis.com/service_accounts/v1/metadata/x509/signer@confidentialspace-sign.iam.gserviceaccount.com"
+# Google の OAuth2 の署名鍵(呼び出し元の ID トークンの検証用。kid → PEM)
+caller_certs_url = "https://www.googleapis.com/oauth2/v1/certs"

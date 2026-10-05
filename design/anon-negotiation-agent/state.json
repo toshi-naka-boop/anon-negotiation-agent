@@ -1,23 +1,29 @@
 {
   "currentNode": "実装",
   "status": "in_progress",
-  "designVersion": "v10",
-  "approvedDesignVersion": "v10",
-  "approvedDesignSha256": "27b1a4d9d6fbab87901b1c2c0b3c81801df300b5e785f454975e4309b06379d2",
-  "approvedAt": "2026-09-28T22:38:09+09:00",
-  "approvalEvidence": "v10:27b1a4d9d6fb を承認します。前提は P-1 案1（＋利用規約でブロック先は現職企業のみ）、P-2 案1、P-3 案1、P-4 案1、P-5 案1、P-6 案2 で確定します。",
-  "requiredApprovalFingerprint": "v10:27b1a4d9d6fb",
-  "baseline": null,
-  "criticRound": 8,
-  "openIssueIds": [],
+  "designVersion": "v22",
+  "approvedDesignVersion": "v22",
+  "approvedDesignSha256": "e5e58b48264f4c1feb756a6f37c0b0e9b5a2b8214a6e07d312901c6d3f54da88",
+  "approvedAt": "2026-10-04T23:10:31Z",
+  "approvalEvidence": "v22:e5e58b48264f 承認します",
+  "requiredApprovalFingerprint": "v22:e5e58b48264f",
+  "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
+  "criticRound": 18,
+  "openIssueIds": [
+    "I-37",
+    "I-38"
+  ],
   "requiredReads": [
-    "design.md"
+    "design.md",
+    "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v10 はユーザー本人がこのセッションで承認した（前提 P-1〜P-6 も同じ返信で確定。sha256 は記録時に design.md と照合済み）。委譲先は sonnet サブエージェント。git init と .gitignore は済み（初回コミットはユーザーの承認待ち。承認後に baseline を記録し、実装は feat/phase1-core ブランチで進める）。① を 4 段に分けた: 1a negotiation_core（実行中）→ 1b vault（Firestore エミュレータと Java が必要。未導入）→ 1c agents の受信口と検証 → 1d web（レフェリー骨格・見回り・依頼者セッション・利用記録・削除）。各段の後に呼び出し側が pytest を実行し、条件タグ（# AC-xx 等）で網羅を確かめる。① の後に反証（3 レンズ）。1d の前に itsdangerous（最終リリース 2024-04）を使うかをユーザーに確かめる。",
-  "lastUpdated": "2026-09-28",
+  "nextAction": "v22 承認済み。本番デプロイ済み・公開（web-00002-fqc〔点 6 の画面つき〕、agents-00001-zlw）。GitHub: toshi-naka-boop/anon-negotiation-agent（非公開。main はユーザーが push）、作業ブランチを push し PR #1（main へ。CI なし）。ユーザー待ち: PR #1 のマージ（マージコミットで。ca5791a を main から辿れるように）、公開への切り替え（Momonga・GEMStartup の記述の扱いを決めてから）→ GITHUB_REPO_URL を web に（了承を取る）。その後: I-34 の小さな積み残し、反証、デモ動画、信頼境界図・説明文・Zenn。次の設計書の改訂で I-37・I-38 を写す。VM は稼働中（DA カウンタ 10/32 の見込み）。",
+  "lastUpdated": "2026-10-05",
   "delegation": {
-    "批評": "claude/design-critic(opus) + codex exec (gpt-5.6-sol, xhigh)",
-    "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）"
+    "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
+    "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）",
+    "反証": "claude/design-critic(opus)（正しさ）+ codex exec xhigh（安全性。実際のモデルはログで確かめて記録する）。ユーザーの指示で 2 レンズ（2026-09-30）",
+    "TEE スパイクの実装": "claude/general-purpose (model: sonnet) ×3 worktree（A 金庫の TEE 版・B web と共有の検証部品・C イメージと手順）2026-10-03"
   }
 }

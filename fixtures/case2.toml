@@ -1,0 +1,94 @@
+# ケース 2 のフィクスチャ(design.md §8.4・§12.1 AC-10)。
+# 「両者が受けられる組み合わせがない」デモのケース。交渉は上限まで続き、双方に「なし」だけが返る。
+#
+# 【暫定(未決事項 U-09)】
+# - 人物の条件(下の [[...raw_conditions]])は、ケース 1 と同じ形(表)で、受けられる集合が交わらないように作ってある。
+#   候補者が受ける最低の年収(750 万)が、求人が受ける最高の年収(700 万)を上回る。年収以外の軸(リモート・当直・昇給見直し)を
+#   どう動かしても、この差は埋まらない。いちばん近い組み合わせでも、年収で 50 万(グリッド 1 マス)足りない。
+# - 企業名・求人の文面・職務要約・連絡先・属性帯の値は仮の文面で、U-09 が決まったら差し替える。
+#   連絡先は架空のもの(example.com は文書用に予約されたドメイン)。
+#
+# 形式はケース 1(fixtures/case1.toml)と同じ。丸め済みポリシーはこのファイルには書かず、読み込むとき(src/vault/fixtures.py)に、
+# 生の条件から §2.5 の丸めで作る。
+#
+# 生の条件の読み方(表)
+# - 1 行 = 「リモート日数・当直回数・昇給見直し月数」の組の集まりと、その年収の境目(万円)。書かない軸は「どの値でも同じ」。
+# - 候補者の min_salary: その年収以上なら受ける、未満なら受けない。求人の max_salary: その年収以下なら受ける、超えるなら受けない。
+# - どの行にも当てはまらない組は、年収がいくらでも受けない(候補者の当直月 4 回以上、求人のリモート週 4 日以上)。
+# - 区分軸(研修・副業・入職時期)は、どちらの人物も「どちらでも」(表に書かない)。
+
+case = 2
+
+[candidate]
+template_id = "case2-candidate"
+# 暫定(U-09): 属性帯(§2.6)の値
+attribute_bands = { experience_band = "5_to_10y", region_block = "kanto", job_category = "it_web" }
+# 暫定(U-09): 段 1 で求人側に見せる匿名の職務要約(§6.2。個人が特定できることは書かない)
+job_summary = "Web アプリケーションの開発に約 6 年従事。リモート中心のチームで、設計から運用までを担当した。"
+
+# 暫定(U-09): 段 2 で開示する連絡先(架空)
+[candidate.contact]
+name = "架空 次郎"
+email = "jiro.kako@example.com"
+
+# 候補者の生の条件: リモート 0 日なら 850 万以上、1 日なら 800 万以上、2 日以上なら 750 万以上。
+# 当直は月 2 回まで(4 回以上の行はない)。昇給見直しは気にしない。
+[[candidate.raw_conditions]]
+remote_days = [0]
+night_duty = [0, 2]
+min_salary = 850
+
+[[candidate.raw_conditions]]
+remote_days = [1]
+night_duty = [0, 2]
+min_salary = 800
+
+[[candidate.raw_conditions]]
+remote_days = [2, 3, 4, 5]
+night_duty = [0, 2]
+min_salary = 750
+
+[employer]
+template_id = "case2-employer"
+company_id = "case2-company"
+job_id = "case2-job"
+# 暫定(U-09): 企業名・公開求人の文面
+company_name = "株式会社サンプルソリューションズ(架空)"
+
+[employer.public_job]
+title = "アプリケーションエンジニア(自社サービス開発)"
+summary = "自社サービスの設計・開発・運用。チームで開発し、出社が中心。"
+confidential = false
+job_category = "it_web"
+
+# 架空の求人は、「会う」と「承認」を自動で押す(§6.2・P-2)。
+[employer.auto_response]
+meet = true
+approve = true
+
+# 求人の生の裁量(§8.4)。規則は上から順に見て、最初に属性帯の条件(when)が合ったものを使う(§2.2)。
+# ケース 2 は、どの属性帯にも同じ裁量(when が空)。
+# リモート 2 日までなら年収の上限 650 万、3 日なら 600 万、4 日以上は不可。
+# 当直が月 2 回以上なら、上限を 50 万上げる(最高でも 700 万)。昇給見直しは気にしない。
+[[employer.rules]]
+when = {}
+
+[[employer.rules.raw_conditions]]
+remote_days = [0, 1, 2]
+night_duty = [0]
+max_salary = 650
+
+[[employer.rules.raw_conditions]]
+remote_days = [0, 1, 2]
+night_duty = [2, 4, 6, 8]
+max_salary = 700
+
+[[employer.rules.raw_conditions]]
+remote_days = [3]
+night_duty = [0]
+max_salary = 600
+
+[[employer.rules.raw_conditions]]
+remote_days = [3]
+night_duty = [2, 4, 6, 8]
+max_salary = 650

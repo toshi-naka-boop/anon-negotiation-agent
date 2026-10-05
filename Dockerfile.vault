@@ -1,0 +1,43 @@
+# 金庫(vault)専用のイメージ。Confidential Space の VM で動かす(design.md §9、research/tee-spike.md 1-1、research/tee-spike-contract.md §13)。
+# 設計書 §1.1 の「3 サービス 1 イメージ」の例外: web・agents の変更で digest が動かないよう、金庫と negotiation_core だけを入れる。
+# ビルドは Cloud Build(cloudbuild.vault.yaml)で行う。
+#
+# 起動コマンドは、イメージに焼き込む(固定・引数なし)。launch policy で tee-cmd・tee-env-* の上書きを許さないため、
+# 設定は、イメージの中(config/params.toml)と、メタデータサーバの値から作る。
+# 非 root のユーザーは作らない(root のまま)。launcher のソケット(/run/container_launcher/teeserver.sock)に届かなくなるため(research R18)。
+
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.17 /uv /uvx /bin/
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_PREFERENCE=only-system \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    PYTHONPATH=/app/src \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# 依存の層。pyproject.toml・uv.lock・.python-version だけに依存するので、コードを変えても作り直さない。
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --frozen --no-dev
+
+# 金庫のコードと設定。イメージに入れるのは、この 4 つだけ。
+# fixtures/ は、架空人物のテンプレート(case*.toml)。金庫が起動のたびに vault-db へ冪等に書く(src/vault/seed.py。台帳 P-15)。
+# replays/ と interview_templates.toml も入るが、金庫は読まない。digest は、fixtures/ の中身まで覆う(変えれば digest が動く)。
+COPY src/vault ./src/vault
+COPY src/negotiation_core ./src/negotiation_core
+COPY config/params.toml ./config/params.toml
+COPY fixtures ./fixtures
+
+# 受信ポート([vault.tee] の port と同じ値)。Confidential Space の VM は、ここに書いたポートだけを開ける。変えると digest が変わる。
+EXPOSE 8443/tcp
+
+# launch policy: ログの転送は常に許し、メモリ使用量の監視は許さない。ほかのラベルは付けない(上書きは、すべて不可)。
+LABEL "tee.launch_policy.log_redirect"="always" \
+      "tee.launch_policy.monitoring_memory_allow"="never"
+
+ENTRYPOINT ["/opt/venv/bin/python", "-m", "vault.tee.main"]
+CMD []

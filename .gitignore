@@ -41,3 +41,6 @@ logs/
 
 # Claude のスケジュール実行のロック
 .claude/scheduled_tasks.lock
+
+# Claude のサブエージェント用の作業コピー（git worktree）
+.claude/worktrees/

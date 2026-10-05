@@ -1,0 +1,33 @@
+# 金庫(vault)のイメージを Cloud Build で作り、Artifact Registry に置く(research/tee-spike.md の手順 B、契約 §13)。
+# この Mac には Docker が無いので、ビルドは Cloud Build で行う。
+#
+# 置換変数は 2 つとも必須(既定値は置かない。渡し忘れは Cloud Build がエラーにする)。
+#   _IMAGE   イメージの名前(例: ${REPO}/vault:spike)
+#   _COMMIT  ビルドの元のコミット(小文字の 16 進 40 桁。git rev-parse HEAD)。ラベル org.opencontainers.image.revision に入る
+#
+# 実行(リポジトリの直下で):
+#   gcloud builds submit --region="$REGION" --config=cloudbuild.vault.yaml --substitutions=_IMAGE="${REPO}/vault:spike",_COMMIT="$(git rev-parse HEAD)" .
+#
+# 作業ツリーに未コミットの変更があると、_COMMIT と実際のビルドの中身が食い違う。ビルドの前に git status が空であることを確かめる。
+# 上げるソースは .gcloudignore で絞られる(設計書・テスト・秘密は上がらない)。
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - "build"
+      - "-f"
+      - "Dockerfile.vault"
+      - "-t"
+      - "${_IMAGE}"
+      - "--label"
+      - "org.opencontainers.image.revision=${_COMMIT}"
+      - "."
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - "push"
+      - "${_IMAGE}"
+images:
+  - "${_IMAGE}"
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,10 @@
+{
+  "releases": [
+    {
+      "digest": "sha256:1fc217043c8a1c06aac8829038f11197a7df2513c9408a3bf52af4a23a6c7d01",
+      "commit": "ca5791a0243c6d8d301a908dcc21827fd730a820",
+      "built_at": "2026-10-04T08:23:14Z",
+      "status": "active"
+    }
+  ]
+}

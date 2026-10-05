@@ -1,0 +1,30 @@
+# docker build が読む .dockerignore と、gcloud builds submit が読む .gcloudignore は、同じ中身にする(契約 §13)。
+# tests/test_tee_image_files.py が、2 つの一致と、残るもの・除くものを確かめる。
+# 書き方は、どちらの道具でも同じ意味になる形にしてある(先頭だけの名前と、どの深さにも効く `**/` つきの形)。
+# .gcloudignore があると、gcloud は .gitignore を読まない。秘密を含みうるものは、ここで必ず除く。
+# 後ろの行ほど優先される。「残す」行(!)は、除く行の後ろに置き、秘密とキャッシュの行は、その後ろに置く(残す行で戻されないように)。
+
+# 版管理・作業用
+.git
+.venv
+tmp
+temp
+.pytest_cache
+.claude
+
+# 設計書・テスト(イメージには入れない)
+design
+tests
+
+# 文書(イメージには入れない)。ただし deploy/ の中身と、実行時に読む指示文(src/agents/instructions/*.md)は残す
+**/*.md
+!deploy/**
+!src/**/*.md
+
+# 秘密とキャッシュ(deploy/ や src/ の中にあっても除く)
+**/.env*
+**/*credentials*.json
+**/*service-account*.json
+**/__pycache__
+**/*.pyc
+**/.DS_Store
