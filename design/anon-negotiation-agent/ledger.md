@@ -38,6 +38,12 @@ high は 3 レンズとも無し。medium は重なりを除いて 8 件（呼�
 - **方針（2026-10-05、ユーザーの了承「書いて良い」）**: medium 8 件と low の L20-1・L20-3・L20-8・L20-10 を v23 に写して直す。残りの low（L20-2・L20-4・L20-5・L20-7・L20-9・L20-11）は持ち越し。L20-6 は却下。v23 の承認の後、実装（sonnet・worktree）→ 反証 21 巡目 → web の再デプロイ（了承）。
 - low（件数に数えない）: L20-1 開示台帳の画面が `result` を内部の語のまま出す。L20-2 二分探索の続きの再送で 1 件に枠を 2 回数える。L20-3 二分探索で 503・504 のとき画面が request_id を捨てる。L20-4 二分探索の途中の再起動で本物の LLM を最大 2 回呼ぶ。L20-5 デモの FR-39 の文と §7 の食い違い。L20-6（L-a）editor のプール権限: 実測で editor は読み取りの権限だけ（作成・更新・削除なし）→ 却下（ただし調べる過程で I-39 が見つかった）。L20-7（L-b）(b) が鍵の IAM を書き換えられる主体（setIamPolicy）を列挙しない。L20-8（L-c）手順書の `gcloud run deploy web` に `VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE` が無く、deploy_check も見ない。L20-9（L-d）healthz-vault が動いているダイジェストを (e) と突き合わせない。L20-10（L-f）`tee.js` の「言えないこと」が 2 つだけ。L20-11（L-g）agents-url の照合が手元の設定を読む。
 
+### I-40（実装時の気づき / 実測 / low。次の設計書の改訂で §10 に写す）agents を呼べる主体に、Google 管理のサービスエージェントが 2 つ出る
+
+- v23 の X-86 の照合を本番で流すと、Policy Analyzer は `run.routes.invoke` を持つ主体として、web の SA とオーナーのほかに、このプロジェクトの Vertex AI のサービスエージェント（`service-<番号>@gcp-sa-aiplatform`）と Cloud Run のサービスエージェント（`service-<番号>@serverless-robot-prod`）を返した（役割の `roles/aiplatform.serviceAgent`・`roles/run.serviceAgent` に含まれる）。
+- どちらも Google がサービスを動かすための主体で、プロジェクトの利用者はなりすませず、外すと Vertex AI・Cloud Run が動かない。`deploy_check` はこの 2 つだけを名前（プロジェクト番号つき）で許し、ほかのサービスエージェントは想定外として不合格にする（試験あり）。本番で合格（主体 4 件）。
+- 資源名 `//run.googleapis.com/projects/<ID>/locations/<リージョン>/services/agents` と権限名 `run.routes.invoke` は、本番で結果を返した（実装役が確かめられなかった点の確認）。v23 §10 の「web の SA と承認済みのオーナーだけ」は、次の改訂で「と、このプロジェクトの Vertex AI・Cloud Run のサービスエージェント」に直す。
+
 ## 解決済み（一行索引）
 
 | ID | タイトル | 結論 |
