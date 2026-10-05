@@ -8,7 +8,7 @@
   "approvalEvidence": "v22:e5e58b48264f 承認します",
   "requiredApprovalFingerprint": "v22:e5e58b48264f",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
-  "criticRound": 18,
+  "criticRound": 20,
   "openIssueIds": [
     "I-37",
     "I-38"
@@ -18,12 +18,12 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "反証 20 巡目（2026-10-05 決定）。対象: 19 巡目の批評（1a1b6d9）以降のコードの変更（src・static・scripts・tests・config・Dockerfile・Dockerfile.vault。39 コミット）と本番の構成（research/deploy-runbook.md の実施記録）。レンズ 2 つ: 正しさ = design-critic（opus）→ reviews/round-20-correctness.md、安全性 = codex exec xhigh → reviews/round-20-security-codex.md（公開中の web の入口・レート制限・SSE・面談・攻撃モード・CSP、TEE の経路〔attestation の検証とピン留め・呼び出し元の検証・鍵の解放と封印〕、deploy_check の照合、static/tee.js を重点）。本番 https://web-341888860511.asia-northeast1.run.app には読み取りだけ（負荷・攻撃の要求は送らない、gcloud で設定を変えない）。実装の不具合は修正して再反証、設計の欠陥は改訂へ。上限 3 巡。反証の後: I-34 の積み残しを反証の指摘と合わせて優先順位を付けて提案（着手前にユーザー確認）。Linux 向けの試験の手直し（tests/conftest.py の JDK・エミュレータの jar のパス）は保留（クラウドのセッションか CI を使うときに）。その後: デモ動画、信頼境界図・説明文・Zenn。設計書の次の改訂で I-37・I-38 を写す。作業ブランチの変更は PR で main へ。VM は稼働中。",
+  "nextAction": "反証 20 巡目を実行中（2026-10-05）: 正しさ = design-critic → reviews/round-20-correctness.md、安全性 = design-critic（codex の代替）→ reviews/round-20-security.md。対象: 1a1b6d9..HEAD のコード（コードに触れたコミット 12 件: 7ecca7c 9c08049 580b036 ab8ad86 cb6ea2a 6bdf551 3528371 519190d 1d320ab 44af9f6 f6387f0 fbdb7b8）と本番の構成。次の ID は C-67・X-85・L20-1。指摘を台帳に記録 → 実装の不具合は修正して再反証、設計の欠陥は改訂へ（上限 3 巡）。codex: ユーザーが ~/.codex/config.toml のモデルを直したら安全性のレンズを上乗せ。その後: I-34 の積み残しを指摘と合わせて優先順位を付けて提案（着手前にユーザー確認）、デモ動画、信頼境界図・説明文・Zenn。Linux 向けの試験の手直しは保留。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
     "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）",
-    "反証": "claude/design-critic(opus)（正しさ）+ codex exec xhigh（安全性。実際のモデルはログで確かめて記録する）。ユーザーの指示で 2 レンズ（2026-09-30）",
+    "反証": "claude/design-critic(opus)（正しさ）+ codex exec xhigh（安全性）。ユーザーの指示で 2 レンズ（2026-09-30）。20 巡目（2026-10-05）: codex は設定のモデル gpt-6.1-sol が ChatGPT アカウントで使えず失敗（ログ reviews/round-20-security-codex.log）。安全性も design-critic(opus) で代替（reviews/round-20-security.md）。codex の設定が直れば、別ベンダーの安全性のレンズを上乗せする",
     "TEE スパイクの実装": "claude/general-purpose (model: sonnet) ×3 worktree（A 金庫の TEE 版・B web と共有の検証部品・C イメージと手順）2026-10-03"
   }
 }
