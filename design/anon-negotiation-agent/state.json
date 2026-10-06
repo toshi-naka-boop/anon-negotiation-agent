@@ -1,11 +1,11 @@
 {
-  "currentNode": "承認CP",
-  "status": "awaiting_user",
+  "currentNode": "実装",
+  "status": "in_progress",
   "designVersion": "v24",
-  "approvedDesignVersion": null,
-  "approvedDesignSha256": null,
-  "approvedAt": null,
-  "approvalEvidence": null,
+  "approvedDesignVersion": "v24",
+  "approvedDesignSha256": "cce1cd45a3ac004a8600519a966aad01ae2d83fe999ebfbac9095492188a4e20",
+  "approvedAt": "2026-10-06T12:18:43Z",
+  "approvalEvidence": "v24:cce1cd45a3ac　承認します。",
   "requiredApprovalFingerprint": "v24:cce1cd45a3ac",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 21,
@@ -24,7 +24,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "承認 CP: v24 の指紋 v24:cce1cd45a3ac（v23 承認済み＋反証 21 巡目の修正方針と I-40）。あわせてユーザーに確かめること: v23 の修正（3fbf707・53d468f・96ff4d1。21 巡目で直ったと確認）を先に本番へ出すか。承認後: 実装（sonnet・worktree）→ 全体の試験 → 反証 22 巡目（上限 3 巡の最後）→ 再デプロイ。",
+  "nextAction": "v24 承認済み（2026-10-06）。実装: D = web と画面（読み取りの枠を GET 全体と SSE の開始へ〔C-72・X-89・C-73〕、本文は読み切ってから渡し期限つき〔X-90〕、段の決着の待ち〔L21-1・L21-2〕、面談の同時数の 429 の文面〔L21-6〕、運用メモ〔L21-4〕。sonnet・worktree）、呼び出し側 = deploy_check の祖先の確認を不合格に（X-88）。→ 全体の試験 → 反証 22 巡目（上限の 3 巡目）→ 再デプロイ（了承）。本番はまだ v22（web-00003-j6l）。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
