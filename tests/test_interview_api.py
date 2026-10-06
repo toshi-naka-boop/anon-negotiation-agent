@@ -27,6 +27,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from negotiation_core import AXES, AXIS_KEYS
+from web.config import DEFAULT_WEB_CONFIG
 from web.interview.config import DEFAULT_INTERVIEW_CONFIG
 from web.interview.state import InterviewClientLimitReached, InterviewStateStore, InterviewStoreFull
 from web.llm_budget import LlmBudgetUnavailable, jst_date
@@ -1164,10 +1165,16 @@ async def test_text_bodies_over_32_kb_are_refused_before_the_model_is_called(env
 
 
 @pytest.mark.anyio
-async def test_a_body_without_content_length_is_counted_while_it_is_read(env, flow, llm):
-    # チャンク送信(Content-Length がない)でも、受け取ったバイト数が上限を超えた時点で断る。
+@pytest.mark.parametrize("over", ["the_route_limit", "the_overall_limit"])
+async def test_a_body_without_content_length_is_counted_while_it_is_read(env, flow, llm, over):
+    # チャンク送信(Content-Length がない)でも、受け取ったバイト数が上限を超えた時点で断る。ルートごとの上限(32 KB)を超えたときは、ルートが payload_too_large で断る。
+    # 全体の上限(64 KB。台帳 X-85)を超えたときは、外側のミドルウェアが、本文を内側(セッション・ルート)に渡す前に、すべて読む途中で request_body_too_large で断る(台帳 X-90。
+    # v23 では、ルートが 32 KB で先に断っていた)。どちらも、LLM は呼ばない。
     await flow.until_choices(pairs=0)
     limit = env.services.interview.max_body_bytes
+    overall = DEFAULT_WEB_CONFIG.limits.max_request_body_bytes
+    total, detail = (limit + 8 * 1024, "payload_too_large") if over == "the_route_limit" else (overall + 1024, "request_body_too_large")
+    assert limit < total - 12 and (total < overall) == (over == "the_route_limit")  # 2 つの上限の間と、外に、それぞれ収まっている
     calls = len(llm.stub.requests)
 
     async def chunks(total: int):
@@ -1177,10 +1184,10 @@ async def test_a_body_without_content_length_is_counted_while_it_is_read(env, fl
         yield b'"}'
 
     response = await flow.browser.client.post(
-        f"{flow.base}/comment", content=chunks(limit * 2), headers={**REQUESTED_WITH, "Content-Type": "application/json"}
+        f"{flow.base}/comment", content=chunks(total), headers={**REQUESTED_WITH, "Content-Type": "application/json"}
     )
 
-    assert (response.status_code, response.json()["detail"]) == (413, "payload_too_large")
+    assert (response.status_code, response.json()["detail"]) == (413, detail)
     assert len(llm.stub.requests) == calls
 
 

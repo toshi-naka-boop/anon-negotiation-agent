@@ -17,6 +17,9 @@
   node があれば、区画の描画を偽の DOM で動かして確かめる(サンプルのデータは、実際の API のモデルから作る)。段階開示の決着の待ち(判定の後 settled でない間の
   読み直し。仮のタイマー。台帳 C-67)・開示台帳の「見込みと組み合わせ」(L20-1)・攻撃の画面の二分探索の実演の request_id の持ち方(503・504 でも保つ。L20-3)も、
   同じ偽の DOM で動かして確かめる。
+- 読み取りの枠(1 分 120 回。台帳 C-72・C-73)に、画面が収まること(v24): /me・/demo・/attack の画面のコード(me.js・demo.js・attack.js)を、node で、そのまま、偽の DOM・偽のサーバー・
+  仮の時計で動かし、読み込みと、2 秒ごとの再取得(SSE がつながらないとき)と、SSE の開始・つなぎ直しと、決着の待ちで、実際に出す GET を数える(L21-7 の改善。数える・数えないは、本番の分類
+  READ_LIMIT_EXEMPT_GET_ROUTES で決める)。SSE の開始が 1 回と数えられること(つながっている間の poll は数えない)は、SSE の試験で確かめる。
 - 入口の「金庫の確認(TEE)」(static/tee.js。設計書 §9 の表の 6 行目): 区画の id・nonce なしの呼び出し・応答のトークン(JWT)を画面のコードが参照しないこと・
   説明文の言葉(鍵の排他性の限定 X-78・C-62・I-37 と、「言えないこと」。C-70・L20-10)。node があれば、応答(検証済みでリンクなし・あり、検証できていない、
   TEE でない環境の 404)の描画を偽の DOM で確かめる。
@@ -27,7 +30,9 @@ import asyncio
 import contextlib
 import datetime as dt
 import functools
+import itertools
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -44,7 +49,7 @@ from negotiation_core.attestation import summarize_claims
 from negotiation_core.estimate_interval import Interval
 from sse_starlette import ServerSentEvent
 from test_web_tee_api import CERT_HASH, CLAIM_KEYS, CONTRACT_KEYS, REPO as TEE_REPO
-from vault.api_models import EventViewItem, MoveRequest, PolicyView
+from vault.api_models import EventViewItem, MoveRequest, PolicyView, PrincipalNegotiationSummary
 from vault.fixtures import FIXTURES_DIRECTORY, load_case_fixture
 from vault.models import EmployerRule, NegotiationResult
 from vault.seed import seed_templates
@@ -52,11 +57,11 @@ from vault_helpers import needs_confirmation_policy, sample_package
 from web import activity_api, meter_api, ui_api
 from web.activity_api import ActivityEntry, ActivityLog
 from web.api import TeeAttestationConfig
-from web.app import create_app, create_app_from_env
+from web.app import READ_LIMIT_EXEMPT_GET_ROUTES, create_app, create_app_from_env
 from web.attack.scripted import probe_package
 from web.config import DEFAULT_WEB_CONFIG
 from web.ledger import LedgerEntry, LedgerOperator, LedgerRecipient
-from web.limits import SseConnectionLimiter, SseLimitConfig
+from web.limits import DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG, AnonymousReadLimitMiddleware, SseConnectionLimiter, SseLimitConfig
 from web.panels_api import build_panels
 from web.stages import DEFAULT_STAGES_CONFIG, UNAGREED_DISCLOSURE_ITEMS, CompanyView, EmployerDisclosure, Item, SideFlagsView, StageView
 from web.session import SESSION_COOKIE_NAME, SESSION_KEY_ENV
@@ -662,7 +667,7 @@ def test_every_rate_limit_entrance_the_server_can_return_has_a_label_on_the_scre
     block = source[source.index("const ENTRANCE_LABELS = {") : source.index("};", source.index("const ENTRANCE_LABELS = {"))]
     labelled = set(re.findall(r"^\s+([a-z_]+):", block, re.M))
     assert set(ENTRANCES) | {INTERVIEW_CONCURRENT_ENTRANCE, ANONYMOUS_READ_ENTRANCE, "sse"} <= labelled
-    assert '"件" : "本"' in source  # 面談の同時数は「件」、接続は「本」
+    assert "同時に ${detail.limit} 件)" in source and "同時に ${detail.limit} 本)" in source  # 面談の同時数は「件」、接続は「本」(文は、node の試験で確かめる)
 
 
 def test_the_tee_section_is_on_the_top_page_calls_the_route_without_a_nonce_and_never_refers_to_the_token():
@@ -716,10 +721,12 @@ def test_the_constants_the_screens_copy_are_the_servers_values():
     assert f"export const JOB_SUMMARY_MAX_CHARS = {DEFAULT_STAGES_CONFIG.job_summary_max_chars};" in (STATIC / "stages.js").read_text(encoding="utf-8")
     # 段階開示で見せるものの種類 と、見込み「なし」で終わった交渉の段 0 の台帳の行の項目(result。画面は「見込みと組み合わせ」と呼ぶ。L20-1)。台帳の行が持ちうる項目の全種類
     assert js_keys("stages.js", "ITEM_LABELS") == set(get_args(Item)) | set(UNAGREED_DISCLOSURE_ITEMS)
-    # 決着の待ち(C-67): 1 秒から、間隔を伸ばして、合計が見回りの間隔(見回りが決着させる上限)まで
+    # 決着の待ち(C-67・L21-1): 1 秒から、倍に伸ばして 32 秒で頭打ち。合計は、見回りの間隔の 2 回分以上(約 125 秒)。期限切れで終わった交渉は、期限切れにした次の見回りで
+    # 決着するので、1 回分(60 秒)では、決着の直前に止まることがある
     delays = js_list("stages.js", "SETTLE_RETRY_DELAYS_MS")
-    assert delays[0] == 1000 and delays == sorted(set(delays))
-    assert sum(delays) >= DEFAULT_WEB_CONFIG.sweeper.interval_seconds * 1000
+    interval_ms = DEFAULT_WEB_CONFIG.sweeper.interval_seconds * 1000
+    assert delays[:6] == [1000, 2000, 4000, 8000, 16000, 32000] and max(delays) == 32000
+    assert 2 * interval_ms <= sum(delays) <= 2 * interval_ms + 10_000
     assert js_keys("ledger.js", "OPERATOR_LABELS") == set(get_args(LedgerOperator))  # 台帳の、操作した主体
     assert js_keys("ledger.js", "RECIPIENT_LABELS") == set(get_args(LedgerRecipient))  # 台帳の、見せた相手
 
@@ -1504,6 +1511,37 @@ async def test_the_stream_limit_is_counted_in_memory_and_leaves_the_rate_limit_c
     assert counters == []
 
 
+@pytest.mark.anyio
+async def test_a_stream_is_counted_once_in_the_read_limit_when_it_opens_and_a_reconnect_counts_again(fast_stream, web_app, monkeypatch):
+    # 台帳 C-72・X-89(v24): SSE の開始は、読み取りの枠(クライアントごとに 1 分 120 回。メモリの中)に 1 回と数える。つながっている間の poll は、数えない。
+    # 切れて再接続すれば、新しい GET なので、また 1 回(同時本数の上限は別。開き直しの繰り返しは、この枠が止める)。
+    nid = await demo_negotiation_to_watch(web_app)
+    admitted, polled = [], []
+    limiter, stages = web_app.services.read_limiter, web_app.services.stages
+    real_admit, real_check = limiter.admit, stages.is_fictional_negotiation
+
+    def admit(client):
+        admitted.append(client)
+        real_admit(client)
+
+    async def check(negotiation_id):  # 開いたときの確認と、poll ごとの読み出しの、どちらも通る
+        polled.append(negotiation_id)
+        return await real_check(negotiation_id)
+
+    monkeypatch.setattr(limiter, "admit", admit)
+    monkeypatch.setattr(stages, "is_fictional_negotiation", check)
+
+    async with Sse(web_app.app, demo_stream_path(nid)) as sse:
+        while len(polled) < 6:  # 周期 0.02 秒で、読み続ける
+            await asyncio.sleep(0.02)
+        assert sse.status == 200
+    assert admitted == ["127.0.0.1"]  # 開いた 1 回だけ(poll ごとには数えない)
+
+    async with Sse(web_app.app, demo_stream_path(nid)) as again:  # 再接続
+        assert again.status == 200
+    assert admitted == ["127.0.0.1"] * 2
+
+
 # ----------------------------------------------------------------------
 # 画面の確認手順(AC-19)
 # ----------------------------------------------------------------------
@@ -1808,7 +1846,7 @@ def screen_fixtures() -> dict:
 
 SCREENS_SCRIPT = r"""
 import assert from "node:assert/strict";
-import { ApiError } from "__API__";
+import { ApiError, describeError } from "__API__";
 import { SETTLE_RETRY_DELAYS_MS, mountStages } from "__STAGES__";
 import { groupRecords, mountLedger } from "__LEDGER__";
 import { cellText, mountPanels } from "__PANELS__";
@@ -2006,7 +2044,7 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
     includesAll(text(body), ["氏名: 架空 花子", "hanako.kako@example.com"]); // 決着済みの状態が、操作なしで描かれる
     assert.deepEqual([loads.length, delays(), changes], [3, [], [1, 2, 3]]); // 決着したので、これ以上読まない
 
-    // (2) ずっと未決着(完了のフックが失敗して、見回りもまだ): 待ちは、1 秒から始めて伸び、合計 60 秒で諦める(それ以上は読まない)。選んだとき(show)でも同じ
+    // (2) ずっと未決着(完了のフックが失敗して、見回りもまだ): 待ちは、1 秒から始めて倍に伸び(32 秒で頭打ち)、合計 125 秒(見回り 2 回分。L21-1)で諦める(それ以上は読まない)。選んだとき(show)でも同じ
     resetListeners();
     ({ body, error } = mounted());
     let reads = 0;
@@ -2016,8 +2054,9 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
     const waited = [];
     while (timers.length) { waited.push(timers[0].delay); await fireNext(); }
     assert.deepEqual(waited, SETTLE_RETRY_DELAYS_MS);
-    assert.ok(waited[0] === 1000 && waited.every((delay, index) => index === 0 || delay > waited[index - 1])); // 1 秒から、間隔を伸ばす
-    assert.equal(waited.reduce((sum, delay) => sum + delay, 0), 60000); // 合計 60 秒で諦める
+    assert.ok(waited[0] === 1000 && waited.slice(1, 6).every((delay, index) => delay === 2 * waited[index])); // 1 秒から、倍に伸ばす
+    assert.ok(waited.every((delay) => delay <= 32000)); // 32 秒で頭打ち(決着してから、画面が変わるまでの遅れの上限)
+    assert.equal(waited.reduce((sum, delay) => sum + delay, 0), 125000); // 合計 125 秒で諦める
     assert.equal(reads, 1 + waited.length);
     assert.ok(text(body).includes("段 0: 見込みと組み合わせ") && text(error) === ""); // 諦めても、表示はそのまま(エラーにしない)
 
@@ -2088,10 +2127,83 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
     assert.equal(rebuilt.value, "書きかけの要約");
     assert.equal(buttonOf(body, "会う").disabled, false);
     assert.deepEqual(delays(), []);
+
+    // (6) 交渉が終わったとき(negotiation:ended)の最初の読み込みが、429 などで失敗しても、止めない(L21-2): 判定の後かどうかも分からないまま、エラーで終わらせずに、
+    // 決着の待ちと同じ間隔で読み直す。失敗の間は、エラーを出したまま。読めたら、エラーを消して描き、未決着ならそのまま待ちを続ける
+    resetListeners();
+    ({ body, error } = mounted());
+    const limited = new ApiError(429, { code: "rate_limited", entrance: "anonymous_read", scope: "client", limit: 120, window_seconds: 60, retry_after_seconds: 30 }, null);
+    const plan6 = [DATA.views.running, limited, limited, DATA.views.unsettled, DATA.views.stage2_demo];
+    let step6 = 0;
+    const changed6 = [];
+    mountStages({ body, error }, { mode: "demo", emptyText: "-", onChange: () => changed6.push(step6),
+      loadStage: async () => { const next = plan6[step6]; step6 += 1; if (next instanceof Error) throw next; return next; } });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    assert.deepEqual(delays(), []); // 進行中は、決着を待たない
+    fire("negotiation:ended", { nid: "n1" });
+    await settleAsync(); // 最初の読み込みが 429 で失敗
+    assert.ok(text(error).includes("画面の読み込みの回数が") && text(body) === "");
+    assert.deepEqual(delays(), [1000]); // 失敗しても、止まらずに、読み直しの待ちに入る
+    await fireNext(); // 1 秒後の読み直しも失敗
+    assert.ok(text(error).includes("画面の読み込みの回数が") && text(body) === "");
+    assert.deepEqual(delays(), [2000]); // 次の待ちは、同じ間隔の続き
+    await fireNext(); // 3 秒後に読めた(未決着)
+    assert.ok(text(error) === "" && text(body).includes("段 0: 見込みと組み合わせ") && !text(body).includes("氏名: 架空 花子")); // エラーは消えて、描かれる
+    assert.deepEqual(delays(), [4000]); // 未決着なので、待ちは続く
+    await fireNext();
+    includesAll(text(body), ["氏名: 架空 花子"]); // 決着した状態が描かれて、止まる
+    assert.deepEqual([delays(), step6], [[], 5]);
+    assert.ok(changed6.length >= 3);
+
+    // (7) 選んだとき(show)の最初の読み込みの失敗は、読み直さない(いままでどおり。権限の拒否などを、繰り返さない)
+    resetListeners();
+    ({ body, error } = mounted());
+    mountStages({ body, error }, { mode: "own", emptyText: "-", loadStage: async () => { throw new ApiError(403, "forbidden", null); } });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    assert.ok(text(error).includes("許可されていません") && text(body) === "");
+    assert.deepEqual(delays(), []);
+
+    // (8) ずっと失敗するなら、待ちを使い切って諦める(合計 125 秒)。エラーは出たまま。古い交渉(選び直した後)は読み直さない
+    resetListeners();
+    ({ body, error } = mounted());
+    let attempts = 0;
+    mountStages({ body, error }, { mode: "own", emptyText: "-", loadStage: async () => { attempts += 1; if (attempts === 1) return DATA.views.running; throw limited; } });
+    fire("negotiation:selected", { nid: "n1" });
+    await settleAsync();
+    fire("negotiation:ended", { nid: "n1" });
+    await settleAsync();
+    const waited8 = [];
+    while (timers.length) { waited8.push(timers[0].delay); await fireNext(); }
+    assert.deepEqual(waited8, SETTLE_RETRY_DELAYS_MS);
+    assert.equal(attempts, 2 + SETTLE_RETRY_DELAYS_MS.length); // 選んだとき 1 回、終わったとき 1 回、待ちの分
+    assert.ok(text(error).includes("画面の読み込みの回数が") && text(body) === "");
+    fire("negotiation:selected", { nid: "n2" }); // 選び直した後は、前の交渉の読み直しの待ちは、何も読まない
+    await settleAsync();
+    fire("negotiation:ended", { nid: "n2" });
+    await settleAsync();
+    assert.deepEqual(delays(), [1000]);
+    fire("negotiation:selected", { nid: "n3" });
+    await settleAsync();
+    const readsBefore = attempts;
+    await fireNext(); // n2 の待ち: 古いので、何も読まない
+    assert.equal(attempts, readsBefore);
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
   console.log("ok stages-settle");
+}
+
+{ // 429 の文(L21-6): 面談の同時数は、席が空くまでの秒数(最長 3600 秒)を出さずに、次にできることを言う。ほかの 429 の文は、これまでどおり
+  const concurrent = new ApiError(429, { code: "rate_limited", entrance: "interview_concurrent", scope: "client", limit: 3, window_seconds: null, retry_after_seconds: 3600 }, null);
+  assert.equal(describeError(concurrent), "進めている面談が、あなたの上限(同時に 3 件)に達しました。進めている面談を終えるか、しばらくしてから、もう一度試してください。");
+  assert.ok(!/\d+ 秒/.test(describeError(concurrent)) && !describeError(concurrent).includes("3600")); // 秒数は出さない
+  const stream = new ApiError(429, { code: "rate_limited", entrance: "sse", scope: "overall", limit: 20, window_seconds: null, retry_after_seconds: 2 }, null);
+  assert.equal(describeError(stream), "画面への配信(同時接続)が、全体の上限(同時に 20 本)に達しました。2 秒ほど待ってから、もう一度試してください。");
+  const reads = new ApiError(429, { code: "rate_limited", entrance: "anonymous_read", scope: "client", limit: 120, window_seconds: 60, retry_after_seconds: 40 }, null);
+  assert.equal(describeError(reads), "画面の読み込みの回数が、あなたの上限(1 分あたり 120 回)に達しました。40 秒ほど待ってから、もう一度試してください。");
+  console.log("ok rate-limit-messages");
 }
 
 { // 開示台帳: 交渉ごと(始めた順)に、途中確認の回答(時刻なし)を台帳の行より先に。終わった交渉の回答は、読み直さない
@@ -2412,6 +2524,232 @@ def test_the_sections_render_the_apis_data_and_behave_as_designed():
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert result.stdout.split() == [
-        "ok", "stages-own", "ok", "stages-demo", "ok", "stages-states", "ok", "stages-settle", "ok", "ledger", "ok", "panels", "ok", "meter-cells", "ok", "meter",
+        "ok", "stages-own", "ok", "stages-demo", "ok", "stages-states", "ok", "stages-settle", "ok", "rate-limit-messages", "ok", "ledger", "ok", "panels", "ok", "meter-cells", "ok", "meter",
         "ok", "simulation", "ok", "tee", "ok", "bisection",
     ]  # fmt: skip
+
+
+# ----------------------------------------------------------------------
+# 読み取りの枠(1 分 120 回。台帳 C-72・C-73)に、画面が収まること: 画面のコードが実際に出す GET を数える(L21-7 の改善)
+# ----------------------------------------------------------------------
+
+# /me・/demo・/attack の画面のコードを、そのまま node で動かす。偽の DOM(どの id にも要素が 1 つ)・偽のサーバー(API の応答は、実際のモデルから作ったデータ)・
+# 仮の時計(setTimeout を、仮の時間で進める。本物の 60 秒は待たない)・偽の EventSource(つなげたとき〔sse〕か、つなげないとき〔polling。2 秒ごとの再取得に落ちる〕)。
+# 読み込みの後、交渉を選ぶ・ライブで実行する・攻撃の交渉を作る操作をして、60 秒進める。出した要求(メソッドと経路。SSE の開始は via が EventSource)を、段階ごとに返す。
+# scenario: running = 交渉が終わらない(再取得のたびに、新しい記録が 1 件届く)・ended = 最初の再取得で最終結果が届き、段の状態は決着していない(決着の待ち)。
+PAGE_LOAD_SCRIPT = r"""
+const DATA = __DATA__;
+const PAGE = "__PAGE__";
+const MODE = "__MODE__";
+const SCENARIO = "__SCENARIO__";
+
+const PID = "p0123456789abcdef";
+const realSetTimeout = globalThis.setTimeout;
+const log = [];
+let now = 0;
+let timerSeq = 0;
+const timers = new Map();
+globalThis.setTimeout = (callback, delay = 0) => { timerSeq += 1; timers.set(timerSeq, { at: now + delay, callback, id: timerSeq }); return timerSeq; };
+globalThis.clearTimeout = (id) => { timers.delete(id); };
+const flush = () => new Promise((resolve) => realSetTimeout(resolve, 0)); // 保留中の読み込み・描画の続きを、すべて進める
+async function advance(ms) {
+  const end = now + ms;
+  for (;;) {
+    await flush();
+    const due = [...timers.values()].filter((timer) => timer.at <= end).sort((a, b) => a.at - b.at || a.id - b.id)[0];
+    if (!due) break;
+    now = due.at;
+    timers.delete(due.id);
+    due.callback();
+  }
+  now = end;
+  await flush();
+}
+
+class FakeNode {}
+class FakeText extends FakeNode {
+  constructor(text) { super(); this.data = String(text); }
+  get textContent() { return this.data; }
+}
+class FakeElement extends FakeNode {
+  constructor(tag) {
+    super();
+    Object.assign(this, { tag, children: [], attributes: {}, className: "", listeners: {}, dataset: {}, value: "", disabled: false, hidden: false, scrollTop: 0, scrollHeight: 0, clientHeight: 0 });
+    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+  }
+  appendChild(child) { this.children.push(child); return child; }
+  replaceChildren() { this.children = []; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
+  removeAttribute(name) { delete this.attributes[name]; }
+  addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); }
+  after() {}
+  scrollIntoView() {}
+  focus() {}
+  click() { for (const listener of this.listeners.click ?? []) listener({ currentTarget: this }); }
+  get textContent() { return this.children.map((child) => child.textContent).join(""); }
+  set textContent(value) { this.children = [new FakeText(value)]; }
+}
+const documentListeners = {};
+const elements = new Map();
+globalThis.Node = FakeNode;
+globalThis.CustomEvent = class { constructor(type, init = {}) { this.type = type; this.detail = init.detail; } };
+globalThis.document = {
+  getElementById: (id) => { if (!elements.has(id)) elements.set(id, new FakeElement("div")); return elements.get(id); }, // ページの HTML の代わり: どの id にも、要素が 1 つある
+  createElement: (tag) => new FakeElement(tag),
+  createTextNode: (value) => new FakeText(value),
+  addEventListener: (type, listener) => (documentListeners[type] ??= []).push(listener),
+  dispatchEvent: (event) => (documentListeners[event.type] ?? []).forEach((listener) => listener(event)),
+};
+globalThis.window = { confirm: () => true };
+class FakeEventSource {
+  static CLOSED = 2;
+  constructor(url) { this.readyState = 1; log.push({ method: "GET", path: url.split("?")[0], via: "EventSource" }); } // EventSource の開始も、GET 1 回
+  addEventListener() {}
+  close() { this.readyState = 2; }
+}
+globalThis.EventSource = MODE === "sse" ? FakeEventSource : undefined; // 定義がなければ、画面は、最初から 2 秒ごとの再取得にする
+
+let seq = 0;
+const entry = (action, actor, result = null) => { seq += 1; return { seq, actor, action, package: null, own_evaluation: null, answer: null, reason: null, attempted_move: null, result }; };
+const activityLog = (side) => {
+  const made = SCENARIO === "ended" ? entry("final_result", "system", { likelihood: "none", package: null }) : entry("propose", "counterparty");
+  return { side, entries: [made], next_after_seq: made.seq };
+};
+const stage = () => (SCENARIO === "ended" ? DATA.stage_unsettled : DATA.stage_running);
+
+function respond(method, path) { // 偽のサーバー。画面が呼ぶ口だけ。知らない口は 404
+  const route = `${method} ${path}`;
+  const ok = (body) => ({ status: 200, body });
+  if (route === "GET /start") return ok({ status: "ok" });
+  if (route === "GET /v1/session") return ok({ principal_id: PID, registered: true });
+  if (route === "GET /v1/jobs") return ok({ jobs: DATA.jobs });
+  if (route === `GET /v1/principals/${PID}/negotiations`) return ok(DATA.negotiations);
+  if (route === `GET /v1/principals/${PID}/ledger`) return ok(DATA.ledger);
+  if (route === "GET /v1/principals/me/panels") return ok(DATA.panels);
+  if (/^GET \/v1\/negotiations\/[^/]+\/activity$/.test(route)) return ok(activityLog("candidate"));
+  if (/^GET \/v1\/negotiations\/[^/]+\/stage$/.test(route)) return ok(stage());
+  if (route === "GET /v1/demo/cases") return ok({ cases: DATA.cases });
+  if (route === "POST /v1/demo/negotiations") return ok({ nid: "demo-nid" });
+  if (/^GET \/v1\/demo\/negotiations\/[^/]+\/panels$/.test(route)) return ok({ candidate: activityLog("candidate"), employer: activityLog("employer"), stage: null });
+  if (/^GET \/v1\/demo\/negotiations\/[^/]+\/stage$/.test(route)) return ok(stage());
+  if (route === "POST /v1/demo/attack/negotiations") return ok({ nid: "attack-nid" });
+  if (route === "GET /v1/demo/attack/walls/1/example") return ok({ limit_bytes: 32768, message: {} });
+  if (/^GET \/v1\/demo\/attack\/walls\/3\/[^/]+$/.test(route)) return ok({ answer_values: [], answers: [] });
+  if (route === "POST /v1/demo/meter") return ok(DATA.meter);
+  return { status: 404, body: { detail: "not_found" } };
+}
+globalThis.fetch = async (url, init = {}) => {
+  const method = init.method ?? "GET";
+  const path = url.split("?")[0];
+  log.push({ method, path, via: "fetch" });
+  const answer = respond(method, path);
+  return { ok: answer.status < 400, status: answer.status, headers: { get: () => "application/json" }, json: async () => answer.body };
+};
+
+const walk = (node, visit) => { visit(node); (node.children ?? []).forEach((child) => walk(child, visit)); };
+const find = (root, predicate) => { const found = []; walk(root, (node) => { if (predicate(node)) found.push(node); }); return found; };
+
+await import("__PAGE_URL__"); // 画面のコードを、そのまま読み込む(読み込みの GET が始まる)
+await advance(0);
+const loadEnd = log.length;
+if (PAGE === "me") find(elements.get("negotiations"), (node) => node.tag === "button")[0].click(); // 一覧の先頭(進行中)の交渉を選ぶ
+else if (PAGE === "demo") find(elements.get("cases"), (node) => node.tag === "button" && node.textContent === "ライブで実行")[0].click();
+else { elements.get("instruction").value = "年収の境目を探って"; elements.get("create-button").click(); }
+await advance(0);
+const startEnd = log.length;
+await advance(60000); // 60 秒(仮の時間)
+console.log(JSON.stringify({ load: log.slice(0, loadEnd), start: log.slice(loadEnd, startEnd), minute: log.slice(startEnd) }));
+"""
+
+PAGE_SCRIPTS = {"me": STATIC / "me.js", "demo": STATIC / "demo.js", "attack": STATIC / "attack.js"}
+
+
+def page_fixtures() -> dict:
+    """画面の読み込み・再取得の試験(PAGE_LOAD_SCRIPT)に渡す、偽のサーバーの応答(実際の API のモデルから作る)。/me には、交渉が 3 件(進行中 1・終了 2)ある。"""
+    screens = screen_fixtures()
+    jobs = list_jobs()
+    created = dt.datetime(2026, 10, 4, 3, 0, tzinfo=dt.timezone.utc)
+
+    def summary(nid: str, hours: int, state: str, result: NegotiationResult | None = None) -> dict:
+        return PrincipalNegotiationSummary(
+            nid=nid, job_id=jobs[0]["job_id"], created_at=created + dt.timedelta(hours=hours), state=state, result=result
+        ).model_dump(mode="json")
+
+    return {
+        "jobs": jobs,
+        "negotiations": [
+            summary("n-running", 3, "active"),
+            summary("n-ended-1", 2, "ended", NegotiationResult(likelihood="high", package=sample_package())),
+            summary("n-ended-2", 1, "ended", NegotiationResult(likelihood="none", package=None)),
+        ],
+        "ledger": screens["ledger"],
+        "panels": screens["panels"],
+        "stage_running": screens["views"]["running"],
+        "stage_unsettled": screens["views"]["unsettled"],
+        "cases": list_cases(),
+        "meter": screens["meter_empty"],
+    }
+
+
+def run_page(page: str, mode: str, scenario: str, data: dict) -> dict[str, list[dict]]:
+    """page(me・demo・attack)の画面のコードを動かして、読み込み(load)・操作の直後(start)・その後の 60 秒(minute)に出した要求を返す。data は page_fixtures()。"""
+    script = (
+        PAGE_LOAD_SCRIPT.replace("__DATA__", json.dumps(data, ensure_ascii=False))
+        .replace("__PAGE__", page)
+        .replace("__MODE__", mode)
+        .replace("__SCENARIO__", scenario)
+        .replace("__PAGE_URL__", PAGE_SCRIPTS[page].as_uri())
+    )
+    result = subprocess.run([NODE, "--input-type=module", "-e", script], capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, f"{page} {mode} {scenario}: {result.stderr}{result.stdout}"
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def counted_requests(requests: list[dict]) -> list[str]:
+    """requests のうち、読み取りの枠に数えられるもの(経路)。本番の分類(READ_LIMIT_EXEMPT_GET_ROUTES)で決める。POST は数えない(それぞれの入口の枠がある)。"""
+    classifier = AnonymousReadLimitMiddleware(None, limiter=None, exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES))
+    return [request["path"] for request in requests if request["method"] == "GET" and classifier.counts(request["path"])]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_the_pages_stay_well_inside_the_default_read_limit_by_the_requests_their_scripts_really_make():
+    # 台帳 C-72・C-73(v24)・L21-7 の改善: SSE の開始・セッションのある GET も数えるので、画面が実際に出す GET を、画面のコードを動かして数える(計算だけではなく)。
+    # /me・/demo・/attack の、読み込み・2 秒ごとの再取得(SSE がつながらないとき)・SSE の開始とつなぎ直し・決着の待ち。1 つの画面の最も忙しい 1 分が、枠(1 分 120 回)の半分ほどまでで、
+    # デモと攻撃を両方開いて、どちらも再取得に落ちても、枠に収まる(10 回の余裕を残す)。
+    limit = DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG.per_minute
+    poll_interval_ms = int(re.search(r"pollInterval = (\d+)", (STATIC / "ui.js").read_text(encoding="utf-8")).group(1))
+    polls_per_minute = 60_000 // poll_interval_ms  # 画面のコードの、再取得の間隔(2 秒)から
+    stream = ui_api.DEFAULT_STREAM_CONFIG
+    reconnects_per_minute = 60 / (stream.max_duration_seconds + stream.retry_milliseconds / 1000)  # サーバーは 30 秒で閉じ、2 秒後に EventSource がつなぎ直す
+    settle_reads_in_a_minute = sum(1 for total in itertools.accumulate(js_list("stages.js", "SETTLE_RETRY_DELAYS_MS")) if total <= 60_000)
+    data = page_fixtures()
+    negotiations = len(data["negotiations"])
+
+    busiest: dict[str, int] = {}
+    for page in PAGE_SCRIPTS:
+        found = {(mode, scenario): run_page(page, mode, scenario, data) for mode in ("polling", "sse") for scenario in ("running", "ended")}
+        streams = len([request for request in found["sse", "running"]["start"] if request["via"] == "EventSource"])
+        assert streams == (1 if page == "me" else 2)  # /me は自分の側の 1 本、デモ・攻撃は両側の 2 本(読み取りの枠に、それぞれ 1 回)
+        totals: dict[tuple[str, str], int] = {}
+        for (mode, scenario), phases in found.items():
+            total = len(counted_requests([*phases["load"], *phases["start"], *phases["minute"]]))
+            if mode == "polling":
+                total += streams  # つなごうとした SSE の開始(断られて、再取得に落ちた)
+            elif scenario == "running":
+                total += math.ceil(streams * reconnects_per_minute)  # つながっている間の、つなぎ直し
+            totals[mode, scenario] = total
+
+        # 試験の足場: 再取得のときは、画面のコードの間隔で、毎分その回数だけ読んでいる(画面を動かせている)。決着の待ちは、待ちの表のとおり
+        polled = counted_requests(found["polling", "running"]["minute"])
+        assert abs(len(polled) - polls_per_minute * (2 if page == "attack" else 1)) <= 1, (page, len(polled))  # 攻撃画面は、記録が届くたびに壁 3 も読み直す
+        if page != "attack":
+            settle_reads = [path for path in counted_requests(found["polling", "ended"]["minute"]) if path.endswith("/stage")]
+            assert len(settle_reads) == settle_reads_in_a_minute, (page, settle_reads)
+        # 読み込みで出す、数えられる GET: /me は、セッション・求人・交渉の一覧・台帳・2 パネルと、交渉ごとの途中確認の回答(終わっていない・まだ覚えていない交渉)。デモ・攻撃は、ごく少ない
+        load = counted_requests(found["polling", "running"]["load"])
+        assert len(load) <= {"me": 5 + negotiations, "demo": 1, "attack": 2}[page], (page, load)
+        busiest[page] = max(totals.values())
+
+    assert all(count <= limit * 3 // 5 for count in busiest.values()), busiest  # どの画面も、最も忙しい 1 分が、枠の 6 割まで
+    assert busiest["demo"] + busiest["attack"] <= limit - 10, busiest

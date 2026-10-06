@@ -36,12 +36,14 @@ SSE の同時本数(SseConnectionLimiter。台帳 C-65): SSE(/v1/stream/。web.u
 時間窓の回数ではなく、メモリの中の同時本数なので、Firestore には触れず、全体の枠にも数えない(ENTRANCES には入れない)。接続が終われば、
 必ず戻す(SseSlot.release。web.ui_api の応答が、終わり方によらず呼ぶ)。
 
-ログインなしの読み取りの枠(AnonymousReadLimiter・AnonymousReadLimitMiddleware。台帳 C-68): セッションなしで金庫(と Firestore)を読む GET(デモの活動・2 パネル・
-イベント・段、攻撃のイベント・壁 2・壁 3。web.api の ANONYMOUS_READ_PATH_PREFIXES)に、クライアントごとの 1 分あたりの回数の枠([web.limits] の
-anonymous_read_per_minute。暫定 120 回)を掛ける。1 回の GET が金庫を 1〜2 回・Firestore を数十件読むので、匿名の 1 クライアントが、金庫への接続(web の全員で共有)と
-読み出しの課金を増やせないように。web は 1 インスタンスなので、メモリの中だけで数える(Firestore に書くと、読み取りのたびに書き込みの課金が増える)。
-全体の枠(rate_overall_limit)には数えず、Firestore には触れない。超えたら 429(入口は anonymous_read、Retry-After は窓の終わりまでの秒数。本文は同じ形)。
-SSE(自前の同時本数の上限)・TEE の attestation(自前の転送の間隔)・静的ファイル・/health・面談の注記は、対象にしない。
+読み取りの枠(AnonymousReadLimiter・AnonymousReadLimitMiddleware。台帳 C-68・C-72・C-73。名前は、最初にログインなしの GET だけに掛けたときのまま): 金庫か Firestore を読む GET
+には、セッションの有無によらず、クライアントごとの 1 分あたりの回数の枠([web.limits] の anonymous_read_per_minute。暫定 120 回)を掛ける。1 回の GET が金庫を 1〜2 回・
+Firestore を数十件読むので、1 クライアントが、金庫への接続(web の全員で共有)と読み出しの課金を増やせないように。匿名のセッションは GET /start で誰でも作れるので、
+セッションのある GET も同じ増幅に使える(線引きを、セッションの有無でしない)。SSE の開始(再接続を含む)も、最初の読み出しより前に、同じ枠で 1 回と数える(終わった交渉の配信は
+すぐ閉じて席を返すので、同時本数の上限だけでは、開き直しの繰り返しを止められない)。web は 1 インスタンスなので、メモリの中だけで数える(Firestore に書くと、読み取りのたびに
+書き込みの課金が増える)。全体の枠(rate_overall_limit)には数えず、Firestore には触れない。超えたら 429(入口は anonymous_read、Retry-After は窓の終わりまでの秒数。本文は同じ形)。
+数えない GET は、web.app の READ_LIMIT_EXEMPT_GET_ROUTES に名前を挙げた経路だけ(静的ファイル・/health・面談の注記・ケースとリプレイの一覧・TEE の attestation〔自前の転送の間隔〕・
+GET /start〔自前の枠 session_start〕)。表にない GET は、経路があってもなくても数える(経路の足し忘れで、枠から漏れない)。
 
 Firestore(同期クライアント)の呼び出しは別スレッドで行う(web.llm_budget と同じ)。
 """
@@ -55,7 +57,7 @@ import math
 import random
 import time
 import tomllib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, get_args
@@ -64,6 +66,7 @@ from fastapi import HTTPException, Request
 from google.api_core.exceptions import Aborted
 from google.cloud import firestore
 from starlette.responses import JSONResponse
+from starlette.routing import compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from vault.clock import Clock
@@ -196,7 +199,7 @@ DEFAULT_SSE_LIMIT_CONFIG: SseLimitConfig = load_sse_limit_config()
 
 @dataclass(frozen=True)
 class AnonymousReadLimitConfig:
-    """ログインなしの読み取りの枠の上限([web.limits] の anonymous_read_per_minute。台帳 C-68)。
+    """読み取りの枠の上限([web.limits] の anonymous_read_per_minute。台帳 C-68・C-72)。
 
     per_minute は、クライアント 1 つあたりの、1 分(ANONYMOUS_READ_WINDOW_SECONDS)あたりの回数。
     """
@@ -208,7 +211,7 @@ class AnonymousReadLimitConfig:
 
 
 def load_anonymous_read_limit_config(path: Path = _CONFIG_PATH) -> AnonymousReadLimitConfig:
-    """config/params.toml からログインなしの読み取りの枠の上限([web.limits] の anonymous_read_per_minute)を読み込む。"""
+    """config/params.toml から読み取りの枠の上限([web.limits] の anonymous_read_per_minute)を読み込む。"""
     with path.open("rb") as f:
         raw = tomllib.load(f)
     try:
@@ -492,7 +495,7 @@ class SseConnectionLimiter:
 
 
 # ----------------------------------------------------------------------
-# ログインなしの読み取りの枠(台帳 C-68)
+# 読み取りの枠(台帳 C-68・C-72・C-73)
 # ----------------------------------------------------------------------
 
 # 429 の本文の入口の名前。ENTRANCES には入れない(Firestore の時間窓カウンタではなく、メモリの中の窓。全体の枠にも数えない)。
@@ -502,7 +505,7 @@ ANONYMOUS_READ_WINDOW_SECONDS = 60
 
 
 class AnonymousReadLimitReached(Exception):
-    """ログインなしの読み取りの枠に達している。limit は、その上限の回数(窓あたり)。retry_after_seconds は、窓の終わりまでの秒数(1 以上)。"""
+    """読み取りの枠に達している。limit は、その上限の回数(窓あたり)。retry_after_seconds は、窓の終わりまでの秒数(1 以上)。"""
 
     def __init__(self, *, limit: int, retry_after_seconds: int) -> None:
         super().__init__("anonymous read limit reached")
@@ -511,7 +514,7 @@ class AnonymousReadLimitReached(Exception):
 
 
 class AnonymousReadLimiter:
-    """ログインなしで金庫を読む GET の、クライアントごとの回数の枠(固定の 1 分の窓。メモリの中だけ。台帳 C-68)。
+    """金庫か Firestore を読む GET(SSE の開始を含む)の、クライアントごとの回数の枠(固定の 1 分の窓。メモリの中だけ。台帳 C-68・C-72)。
 
     web は 1 インスタンスなので、メモリで足りる(Firestore に書くと、読み取りのたびに書き込みの課金が増える)。窓は UNIX 時刻を窓の長さで割った商が同じ間
     (境目の前後で短い間に最大 2 倍通ることは、固定の窓の性質として受け入れる。Firestore の時間窓カウンタと同じ)。断った要求は数えない。
@@ -545,21 +548,26 @@ class AnonymousReadLimiter:
 
 
 class AnonymousReadLimitMiddleware:
-    """ログインなしで金庫を読む GET に、クライアントごとの枠(AnonymousReadLimiter)を掛ける、純粋な ASGI ミドルウェア(台帳 C-68)。
+    """金庫か Firestore を読む GET に、クライアントごとの枠(AnonymousReadLimiter)を掛ける、純粋な ASGI ミドルウェア(台帳 C-68・C-72・C-73)。
 
-    prefixes のどれかで始まる経路への GET だけを、クライアント(web.client_ip.client_key。IPv6 は /64 にまとめる。台帳 C-71)ごとに数える。
-    超えたら、ルートに渡さずに 429(本文は {"detail": {"code": "rate_limited", "entrance": "anonymous_read", "scope": "client", "limit",
-    "window_seconds": 60, "retry_after_seconds"}}、Retry-After つき)。ほかの要求は、そのまま通す。
-    経路の前置きで選ぶので、ルートごとの依存を付け忘れない(同じルーターに、セッションの要る経路と要らない経路が混ざっていても、前置きで分けられる)。
+    GET は、exempt_routes(数えない GET の経路の型。"/v1/demo/replays/{case}" や "/static/{path:path}" のような、Starlette の経路の書き方)のどれにも当たらなければ、すべて数える
+    (経路があるかどうかによらない。足し忘れた経路は、数える側に入る)。SSE の開始・再接続も GET なので、ここで数える(ルートが動く前なので、最初の読み出しより前になる)。
+    クライアントは web.client_ip.client_key(IPv6 は /64 にまとめる。台帳 C-71)。超えたら、ルートにもセッションのミドルウェアにも渡さずに 429(本文は {"detail": {"code": "rate_limited",
+    "entrance": "anonymous_read", "scope": "client", "limit", "window_seconds": 60, "retry_after_seconds"}}、Retry-After つき)。GET 以外は、そのまま通す。
+    経路の型の突き合わせは、Starlette のルーターと同じ正規表現(compile_path)を、ルーターと同じ復号済みの経路(scope["path"])に当てる(エンコードで、見かけを変えて抜けることはできない)。
     """
 
-    def __init__(self, app: ASGIApp, *, limiter: AnonymousReadLimiter, prefixes: tuple[str, ...]) -> None:
+    def __init__(self, app: ASGIApp, *, limiter: AnonymousReadLimiter, exempt_routes: Iterable[str]) -> None:
         self.app = app
         self._limiter = limiter
-        self._prefixes = prefixes
+        self._exempt = tuple(compile_path(route)[0] for route in exempt_routes)
+
+    def counts(self, path: str) -> bool:
+        """path への GET を数えるか(数えない経路の型のどれにも当たらなければ、数える)。"""
+        return not any(pattern.match(path) for pattern in self._exempt)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"].startswith(self._prefixes):
+        if scope["type"] == "http" and scope["method"] == "GET" and self.counts(scope["path"]):
             try:
                 self._limiter.admit(client_key(Request(scope)))
             except AnonymousReadLimitReached as reached:

@@ -62,6 +62,11 @@ class PrincipalSessionMiddleware:
             return
 
         request = Request(scope)
+        # 0. web の口は GET と POST だけ。ほかのメソッド(HEAD・PUT・DELETE など)は、セッションの確認(Firestore の利用記録の読み書き)より前に 405 で断る
+        #    (有効なクッキーつきの 405 の要求で、枠に数えられない読み出しを増やせないように。v24 の読み取りの枠の抜け道。C-73)。
+        if scope["method"] not in ("GET", "POST"):
+            await self._reject(scope, receive, send, 405, "method_not_allowed")
+            return
         # 1. 状態を変えるリクエスト(POST)は、独自ヘッダを必須にする。
         if scope["method"] == "POST" and not request.headers.get(REQUESTED_WITH_HEADER):
             await self._reject(scope, receive, send, 403, "missing_requested_with_header")

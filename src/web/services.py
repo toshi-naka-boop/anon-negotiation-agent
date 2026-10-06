@@ -100,7 +100,7 @@ def build_services(
     # rate_limits の文書 ID の HMAC の鍵は、署名の鍵から派生させる(鍵なしのハッシュだと、IPv4 の全数を試して IP を戻せる。台帳 L19-12)
     limiter = RateLimiter(default_db, clock, rate_limits, key=derive_limiter_key(session_key))
     stream_limiter = SseConnectionLimiter()  # SSE の同時本数の上限(全体・クライアント IP ごと。メモリの中だけ。台帳 C-65)
-    read_limiter = AnonymousReadLimiter(clock)  # ログインなしで金庫を読む GET の、クライアントごとの 1 分あたりの枠(メモリの中だけ。台帳 C-68)
+    read_limiter = AnonymousReadLimiter(clock)  # 金庫か Firestore を読む GET(SSE の開始を含む)の、クライアントごとの 1 分あたりの枠(メモリの中だけ。台帳 C-68・C-72)
     attack = build_attack_services(clock=clock, send_raw=send_raw)
     interview = build_interview_service(
         vault=vault, meta=meta, llm_budget=llm_budget, clock=clock, sleep=sleep, web_config=config

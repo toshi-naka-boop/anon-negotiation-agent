@@ -176,7 +176,7 @@ const ENTRANCE_LABELS = {
   session_start: "面談の開始",
   interview_begin: "面談の開始(途中の状態の作成)",
   sse: "画面への配信(同時接続)",
-  interview_concurrent: "同時に進められる面談",
+  interview_concurrent: "進めている面談",
   anonymous_read: "画面の読み込み",
 };
 
@@ -219,8 +219,11 @@ function describeRateLimit(error, overrides) {
     const entrance = ENTRANCE_LABELS[detail.entrance] ?? "この操作";
     const scope = detail.scope === "overall" ? "全体の上限" : "あなたの上限";
     if (detail.window_seconds == null) {
-      const unit = detail.entrance === "interview_concurrent" ? "件" : "本"; // 面談は件、接続は本
-      return `${entrance}が、${scope}(同時に ${detail.limit} ${unit})に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;
+      // 面談の同時数は、席が空くまでの秒数が最長 3600 秒(アイドルの寿命)になり、「3600 秒ほど待って」と出ても使えない。秒数は出さずに、次にできることを言う(L21-6)。
+      if (detail.entrance === "interview_concurrent") {
+        return `${entrance}が、${scope}(同時に ${detail.limit} 件)に達しました。進めている面談を終えるか、しばらくしてから、もう一度試してください。`;
+      }
+      return `${entrance}が、${scope}(同時に ${detail.limit} 本)に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;
     }
     const minutes = Math.max(1, Math.round(Number(detail.window_seconds) / 60));
     return `${entrance}の回数が、${scope}(${minutes} 分あたり ${detail.limit} 回)に達しました。${detail.retry_after_seconds} 秒ほど待ってから、もう一度試してください。`;

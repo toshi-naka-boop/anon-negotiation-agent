@@ -104,18 +104,6 @@ _log = logging.getLogger(__name__)
 # デモ用のエンドポイントのパス。ミドルウェアは、ここでは依頼者のセッションを見ない(§6.3)。
 DEMO_PATH_PREFIX = "/v1/demo/"
 
-# セッションなしで金庫(と Firestore)を読む GET の経路の前置き(台帳 C-68): デモの活動・2 パネル・イベント・段(/v1/demo/negotiations/{nid}/...)・攻撃のイベント
-# (/v1/demo/attack/negotiations/{nid}/events)・壁 2・壁 3。web.limits の AnonymousReadLimitMiddleware が、クライアントごとに 1 分あたりの回数の枠を掛ける
-# (全体の枠にも Firestore にも数えない)。前置きで選ぶので、この下に GET を足せば、自動で枠に入る。数えないもの: SSE(/v1/stream/。自前の同時本数の上限)・
-# /api/tee/attestation(自前の転送の間隔)・静的ファイル・/health・面談の注記・デモのケース一覧とリプレイ・壁 1 の初期値・メーターのシミュレーション(どれも金庫を読まない)・
-# POST(それぞれの入口の枠を持つ)。
-ANONYMOUS_READ_PATH_PREFIXES = (
-    f"{DEMO_PATH_PREFIX}negotiations/",
-    f"{DEMO_PATH_PREFIX}attack/negotiations/",
-    f"{DEMO_PATH_PREFIX}attack/walls/2/",
-    f"{DEMO_PATH_PREFIX}attack/walls/3/",
-)
-
 # TEE モードの attestation の口(契約 §8)。公開情報だけなので、ミドルウェアは、ここでも依頼者のセッションを見ない。
 TEE_PATH_PREFIX = "/api/tee/"
 TEE_ATTESTATION_PATH = "/api/tee/attestation"

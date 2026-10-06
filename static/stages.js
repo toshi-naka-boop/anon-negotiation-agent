@@ -9,8 +9,9 @@
  *   届いた。段の状態を読み直す)、negotiation:cleared = 表示していた交渉がなくなった(データの削除・デモの実行の切り替え)。
  * - 決着の待ち(design.md §6.2。v23・C-67): GET は読み出しだけで、判定の後の決着処理(架空の求人の自動応答・台帳)は、サーバがレフェリーの完了のフックか
  *   見回りで行うので、判定の直後に読むと、段 0 のまま(StageView の settled が false)返ることがある。読んだ結果が judged で settled でない間は、間隔を
- *   伸ばしながら(SETTLE_RETRY_DELAYS_MS)操作なしで読み直し、settled になったら止める。合計 60 秒(見回りが決着させる上限)で諦める。選び直した・
- *   消した・操作した後は、古い交渉の読み直しをしない(札 token)。
+ *   伸ばしながら(SETTLE_RETRY_DELAYS_MS)操作なしで読み直し、settled になったら止める。合計 約 125 秒(見回り 2 回分。期限切れで終わった交渉は、期限切れにした
+ *   次の見回りで決着するので、最大で見回りの間隔の 2 倍近く待つ。v24・L21-1)で諦める。negotiation:ended から来た最初の読み込みが失敗(429 など)しても、止めずに、
+ *   同じ間隔で読み直す(v24・L21-2)。選び直した・消した・操作した後は、古い交渉の読み直しをしない(札 token)。
  */
 
 import { LIKELIHOOD_LABELS, clear, counterFor, h, message, packageChips, replace, resultView, showError, showMessage, waiting, withBusy } from "./ui.js";
@@ -18,9 +19,10 @@ import { LIKELIHOOD_LABELS, clear, counterFor, h, message, packageChips, replace
 // 段階開示で見せるものの種類(web.stages の Item)。開示台帳(ledger.js)も同じ言葉で書く。result は、見込み「なし」で終わった交渉の、段 0 の台帳の行の項目(web.stages の UNAGREED_DISCLOSURE_ITEMS。L19-14)で、段 0 と同じ「見込みと組み合わせ」と呼ぶ(L20-1)。
 export const ITEM_LABELS = { likelihood: "見込み", package: "組み合わせ", result: "見込みと組み合わせ", job_summary: "匿名職務要約", name: "氏名", email: "連絡先(メール)" };
 
-// 判定の後、決着(settled)するまで、段の状態を読み直す前の待ち(ミリ秒)。1 秒から始めて倍にし、合計 60 秒([web.sweeper] の見回りの間隔。見回りが拾う上限)で諦める。
-// tests/test_ui_static.py が、合計が見回りの間隔以上であることを確かめる。
-export const SETTLE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 29000];
+// 判定の後、決着(settled)するまで、段の状態を読み直す前の待ち(ミリ秒)。1 秒から始めて倍にし、32 秒で頭打ちにして、合計 125 秒で諦める([web.sweeper] の見回りの間隔 60 秒の
+// 2 回分と、少しの余裕。期限切れで終わった交渉は、期限切れにした次の見回りで決着するので、見回り 2 回分を待つ。v24・L21-1)。
+// tests/test_ui_static.py が、合計が見回りの間隔の 2 倍以上であることを確かめる。
+export const SETTLE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 32000, 32000, 30000];
 
 // 匿名職務要約の上限(文字数)。サーバの [web.stages] job_summary_max_chars と同じ(暫定。tests/test_ui_static.py が一致を確かめる)。
 export const JOB_SUMMARY_MAX_CHARS = 400;
@@ -229,7 +231,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
 
   // ---- 読み込みと操作 ----
 
-  async function load(nid, token) {
+  async function load(nid, token, { retryAfterFailure = false } = {}) {
     try {
       const view = await loadStage(nid);
       if (token !== shown.token) return;
@@ -240,6 +242,9 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
       clear(body);
       shown.json = null;
       showError(error, failure);
+      // 交渉が終わった(negotiation:ended)ときの最初の読み込みが 429 などで失敗しても、止めない: 判定の後かどうかも分からないまま、エラーで終わらせずに、
+      // 決着の待ちと同じ間隔で読み直す(L21-2)。読めたら、エラーを消して描く。
+      if (retryAfterFailure) waitForSettlement(nid, token, 0);
     }
     changed();
   }
@@ -247,7 +252,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
   /**
    * 判定の後で決着していない(judged で settled でない)間、間隔を伸ばしながら段の状態を読み直す(C-67)。待ちは SETTLE_RETRY_DELAYS_MS の順で、使い切ったら諦める。
    * 読み直すたびに、表示と台帳を更新する。読み直しの失敗は、すでに出ている表示を変えずに、次の待ちへ進む。待っている間に札が変わった(選び直した・消した・操作した)
-   * ときは、古い交渉を読まずに、やめる。
+   * ときは、古い交渉を読まずに、やめる。最初の読み込みが失敗して、エラーだけが出ているとき(shown.json が null)に読めたら、そのエラーを消して描く。
    */
   function waitForSettlement(nid, token, attempt) {
     if (attempt >= SETTLE_RETRY_DELAYS_MS.length) return;
@@ -256,7 +261,10 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
       try {
         const view = await loadStage(nid);
         if (token !== shown.token) return;
-        if (JSON.stringify(view) !== shown.json) render(view); // 変わっていなければ描き直さない(入力中のフォームのフォーカスを、奪わない)
+        if (JSON.stringify(view) !== shown.json) {
+          if (shown.json === null) showMessage(error, null);
+          render(view); // 変わっていなければ描き直さない(入力中のフォームのフォーカスを、奪わない)
+        }
         changed();
         if (view.judged && !view.settled) waitForSettlement(nid, token, attempt + 1);
       } catch {
@@ -275,10 +283,10 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
     await load(nid, shown.token);
   }
 
-  async function reload(nid) {
+  async function reload(nid, { retryAfterFailure = false } = {}) {
     if (nid !== shown.nid) return;
     shown.token += 1;
-    await load(nid, shown.token);
+    await load(nid, shown.token, { retryAfterFailure });
   }
 
   /** 「会う」「承認」の操作。成功したら、返ってきた状態を表示する。失敗したら理由を出し、状態が変わっていたときのために読み直す。 */
@@ -302,7 +310,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
   }
 
   document.addEventListener("negotiation:selected", (event) => show(event.detail.nid));
-  document.addEventListener("negotiation:ended", (event) => reload(event.detail.nid));
+  document.addEventListener("negotiation:ended", (event) => reload(event.detail.nid, { retryAfterFailure: true }));
   document.addEventListener("negotiation:cleared", () => {
     shown.nid = null;
     shown.token += 1;

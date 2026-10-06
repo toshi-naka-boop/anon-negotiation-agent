@@ -15,10 +15,11 @@
   (WeakSessionKeyError。台帳 X-39)。デコードした鍵の異なるバイト値が 16 種類未満(全部ゼロ・短い繰り返しなど、明らかに
   乱数でない鍵)でも拒否する。create_app_from_env・create_app のどちらでも同じ。
 - GET /health(死活確認。AC-22): 認証なしで 200 {"status":"ok"}。ミドルウェアはセッションを見ない(利用記録の Firestore にも触れない)。
-- セッションのミドルウェアより外に、ASGI のミドルウェアを 2 つ置く(外 → 内: 本文の上限 → ログインなしの読み取りの枠 → セッション)。
-  本文の全体の上限(web.body_limit。[web.limits] max_request_body_bytes。台帳 X-85): FastAPI は依存(枠・認証)より先に本文を読むので、ルートの前で数えて 413。
-  ログインなしの読み取りの枠(web.limits。[web.limits] anonymous_read_per_minute。台帳 C-68): セッションなしで金庫を読む GET(web.api の ANONYMOUS_READ_PATH_PREFIXES)に、
-  クライアントごと(IPv6 は /64 単位。台帳 C-71)・1 分あたりの回数の枠を、メモリで掛ける(超えたら 429)。
+- セッションのミドルウェアより外に、ASGI のミドルウェアを 2 つ置く(外 → 内: 本文の上限 → 読み取りの枠 → セッション)。
+  本文の全体の上限と読み取りの期限(web.body_limit。[web.limits] max_request_body_bytes・request_body_timeout_seconds。台帳 X-85・X-90): FastAPI は依存(枠・認証)より先に本文を読むので、
+  ルートの前で数えて 413。本文は、ここで上限まで読み切ってから、内側(セッションのミドルウェアとルート)に渡す。読み切れなければ 408。
+  読み取りの枠(web.limits。[web.limits] anonymous_read_per_minute。台帳 C-68・C-72・C-73): 金庫か Firestore を読む GET(セッションの有無によらない。SSE の開始・再接続も)に、
+  クライアントごと(IPv6 は /64 単位。台帳 C-71)・1 分あたりの回数の枠を、メモリで掛ける(超えたら 429)。数えない GET は READ_LIMIT_EXEMPT_GET_ROUTES の経路だけで、表にない GET は、すべて数える。
 - FastAPI の既定の /docs・/redoc・/openapi.json は、本番の起動口(create_app_from_env)では出さない(台帳 L19-10)。/docs は CDN の Swagger UI の JS を読み込み、
   ページに付けている CSP が掛からないので、セッションのクッキーと同じ配信元で第三者の JS が動いてしまうため。開発用(scripts/serve_local.py や試験)だけ、
   create_app(docs=True) で出せる(既定は出さない。金庫の app が /docs・/openapi.json を出さないのと同じ)。
@@ -56,7 +57,7 @@ from negotiation_core.log_privacy import mask_ids_in_logs
 from negotiation_core.tee_settings import load_tee_settings
 from vault.clock import Clock
 
-from web.api import ANONYMOUS_READ_PATH_PREFIXES, DEMO_PATH_PREFIX, TEE_PATH_PREFIX, TeeAttestationConfig, build_router
+from web.api import DEMO_PATH_PREFIX, TEE_ATTESTATION_PATH, TEE_PATH_PREFIX, TeeAttestationConfig, build_router
 from web.attack import RawMessageSender, bind_raw_sender
 from web.attested_transport import AttestedVaultTransport
 from web.body_limit import RequestBodyLimitMiddleware
@@ -99,6 +100,20 @@ PAGE_FILES = {
     "/me": "me.html",
     "/demo": "demo.html",
     "/attack": "attack.html",
+}
+# 読み取りの枠に数えない GET(経路の型 → 数えない理由。Starlette の経路の書き方。design.md §8.2「読み取りの枠」。台帳 C-72・C-73)。
+# ここに名前を挙げた経路だけが、枠に数えられない。表にない GET は、経路があってもなくても、すべて数える(web.limits の AnonymousReadLimitMiddleware。
+# 経路の足し忘れで、枠から漏れない)。SSE(/v1/stream/...)・セッションのある GET・攻撃モードの GET も、数える側にある。
+# 画面のページ(/・/me など)も数える(設計書の「数えない GET」に入っていない。有効なクッキーがあるとセッションの確認〔Firestore〕が走るので、数えないと読み出しの増幅に使える)。
+# tests/test_limits.py が、本番の app(TEE ありとなし)の GET の経路の全体を、この表か、「数える」と決めた一覧のどちらかに分類させる(分類のない GET があれば落ちる)。
+READ_LIMIT_EXEMPT_GET_ROUTES: dict[str, str] = {
+    f"{STATIC_PATH_PREFIX}{{path:path}}": "静的ファイル",
+    HEALTH_PATH: "死活確認(金庫にも Firestore にも触れない)",
+    "/start": "開始ページ(独自の枠 session_start)",
+    "/v1/interview/notice": "面談の入口の注記(固定の文)",
+    "/v1/demo/cases": "デモのケースの一覧(フィクスチャ)",
+    "/v1/demo/replays/{case}": "リプレイの記録(フィクスチャのファイル)",
+    TEE_ATTESTATION_PATH: "金庫の attestation(独自の転送の間隔。契約 §19)",
 }
 # ページに付けるヘッダ。画面は同じ配信元の静的な JS・CSS だけを使う(外部の読み込みも、インラインのスクリプトも許さない)。
 PAGE_HEADERS = {
@@ -225,13 +240,15 @@ def create_app(
         clock=services.clock,
         session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTH_PATH, STATIC_PATH_PREFIX, STREAM_PATH_PREFIX),
     )
-    # 後から足したものほど外側になる(外 → 内: 本文の上限 → ログインなしの読み取りの枠 → セッション → ルート)。どちらも、セッションの前で断る。
+    # 後から足したものほど外側になる(外 → 内: 本文の上限 → 読み取りの枠 → セッション → ルート)。どちらも、セッションの前で断る。
     app.add_middleware(
-        AnonymousReadLimitMiddleware, limiter=services.read_limiter, prefixes=ANONYMOUS_READ_PATH_PREFIXES
-    )  # セッションなしで金庫を読む GET の、クライアントごとの枠(メモリ。台帳 C-68)
+        AnonymousReadLimitMiddleware, limiter=services.read_limiter, exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES)
+    )  # 金庫か Firestore を読む GET(SSE の開始を含む)の、クライアントごとの枠(メモリ。台帳 C-68・C-72・C-73)
     app.add_middleware(
-        RequestBodyLimitMiddleware, max_bytes=config.limits.max_request_body_bytes
-    )  # 本文の全体の上限。ルートの前(FastAPI は依存より先に本文を読むため。台帳 X-85)
+        RequestBodyLimitMiddleware,
+        max_bytes=config.limits.max_request_body_bytes,
+        timeout_seconds=config.limits.request_body_timeout_seconds,
+    )  # 本文の全体の上限と読み取りの期限。本文を読み切ってから内側に渡す。ルートの前(FastAPI は依存より先に本文を読むため。台帳 X-85・X-90)
 
     @app.exception_handler(RequestValidationError)
     async def _invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
