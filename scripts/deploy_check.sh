@@ -799,13 +799,24 @@ def analysis_scope():
     organization = ENV.get("ORG_ID", "")
     if organization:
         return "組織 %s" % organization
+    # 組織が無いと確かめられないまま --project の範囲で進めると、組織・フォルダから継承した主体を見落として合格させる。確かめられなければ不合格(v24。X-88)
     if read("ancestors", "rc", "none") != "0":
-        return "プロジェクトのみ(祖先を確かめられなかった。組織の配下なら ORG_ID を設定する)"
+        ng(
+            "プロジェクトの祖先を確かめられない(gcloud projects get-ancestors: %s)。組織の配下でないと確かめられないので、Policy Analyzer の照合を --project の範囲で合格にしない(X-88)"
+            % (read("ancestors", "err") or "失敗"),
+            "組織の配下なら ORG_ID を設定して再実行する。そうでなければ、祖先を読める権限(resourcemanager.projects.get)で再実行する",
+        )
     try:
         with open("%s/ancestors.out" % WORK, encoding="utf-8", errors="replace") as handle:
-            found = [item.get("id") for item in json.load(handle) if item.get("type") == "organization"]
-    except (OSError, ValueError, AttributeError):
-        return "プロジェクトのみ(祖先の出力を読めなかった。組織の配下なら ORG_ID を設定する)"
+            ancestors = json.load(handle)
+        found = [item.get("id") for item in ancestors if item.get("type") == "organization"]
+        if not any(item.get("type") == "project" for item in ancestors):
+            raise ValueError("no project entry")
+    except (OSError, ValueError, AttributeError, TypeError):
+        ng(
+            "プロジェクトの祖先の出力を読めない。組織の配下でないと確かめられないので、Policy Analyzer の照合を --project の範囲で合格にしない(X-88)",
+            "組織の配下なら ORG_ID を設定して再実行する",
+        )
     if found:
         ng(
             "プロジェクトは組織 %s の配下だが、ORG_ID が未設定(--project の範囲では、組織・フォルダに付いた IAM が解析に入らず、全階層の列挙にならない)" % found[0],

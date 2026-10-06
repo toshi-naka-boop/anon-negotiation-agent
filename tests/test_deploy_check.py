@@ -1082,9 +1082,35 @@ def test_the_organization_scope_is_what_lets_a_project_in_an_organization_pass(r
     without_ancestors = run_script(repo, unknown_ancestors, "--only", "tee-b,iam-agents")
 
     assert [with_org.status(item) for item in ("tee-b", "tee-b-pool", "tee-c", "iam-agents")] == ["OK", "OK", "OK", "OK"]
-    # 祖先を取れなかったときは、止めずに、弱い範囲であることを書く
-    assert without_ancestors.status("tee-b") == "OK" and "祖先を確かめられなかった" in without_ancestors.items["tee-b"][1]
-    assert without_ancestors.status("iam-agents") == "OK" and "祖先を確かめられなかった" in without_ancestors.items["iam-agents"][1]
+    # 祖先を取れなかったときは、組織が無いと確かめられないので不合格(--project の範囲で合格にしない。v24。X-88)
+    for item in ("tee-b", "iam-agents"):
+        assert without_ancestors.status(item) == "NG", without_ancestors.stdout
+        assert "祖先を確かめられない" in without_ancestors.text(item) and "X-88" in without_ancestors.text(item)
+
+
+@pytest.mark.parametrize(
+    "ancestors",
+    [
+        [],  # 空(プロジェクトの行もない)
+        {"id": "x"},  # 配列でない
+        ["not-an-object"],  # 要素がオブジェクトでない
+    ],
+)
+def test_unreadable_ancestors_fail_the_policy_analyzer_checks(repo, ancestors):
+    # 祖先の出力が読めない・形が違うときも、組織が無いと確かめられないので不合格(v24。X-88)
+    result = run_script(repo, mutated("tee", lambda w: w.update(ancestors=ancestors)), "--only", "tee-b,tee-b-pool,tee-c,iam-agents")
+
+    for item in ("tee-b", "tee-b-pool", "tee-c", "iam-agents"):
+        assert result.status(item) == "NG", result.stdout
+        assert "X-88" in result.text(item)
+
+
+def test_org_id_skips_the_ancestor_check_entirely(repo):
+    # ORG_ID があれば祖先を読まずに組織の範囲で解析するので、祖先の取得の失敗は関係ない
+    world = mutated("tee", lambda w: (w.update(ancestors=IN_ORGANIZATION), w["fail"].update(ancestors=(1, "ERROR: denied"))))
+    result = run_script(repo, world, "--only", "tee-b,iam-agents", env_extra={"ORG_ID": "987654321"})
+
+    assert [result.status(item) for item in ("tee-b", "iam-agents")] == ["OK", "OK"], result.stdout
 
 
 # ---- agents を呼べる主体(iam-agents。X-86) ----
