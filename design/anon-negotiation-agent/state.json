@@ -1,6 +1,6 @@
 {
-  "currentNode": "反証",
-  "status": "in_progress",
+  "currentNode": "承認CP",
+  "status": "awaiting_user",
   "designVersion": "v24",
   "approvedDesignVersion": "v24",
   "approvedDesignSha256": "cce1cd45a3ac004a8600519a966aad01ae2d83fe999ebfbac9095492188a4e20",
@@ -10,13 +10,7 @@
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 22,
   "openIssueIds": [
-    "C-72",
-    "C-73",
-    "X-88",
-    "X-89",
-    "X-90",
-    "C-68",
-    "I-40",
+    "C-74",
     "I-34"
   ],
   "requiredReads": [
@@ -24,7 +18,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "反証 22 巡目（上限の 3 巡目。2026-10-06）: v24 の修正（7c64978・789ccd8。32854bf..789ccd8）を、正しさ = design-critic → reviews/round-22-correctness.md、安全性 = codex gpt-6.1-sol xhigh → reviews/round-22-security-codex.md で確かめる。全体の試験 3,761 件通過。実装での判断: 画面のページは数える側（設計書の数えない一覧にない）、GET・POST 以外はセッションの確認より前に 405。/start と入口の注記の touch は枠の外（設計どおり。是非を 22 巡目で判断）。合格（または残りをユーザーが受け入れ）したら: v23 と v24 をまとめて web に再デプロイ（了承）→ deploy_check 全項目と画面の確認。I-40 などの細部は次の設計書の改訂で。",
+  "nextAction": "反証 22 巡目（上限の 3 巡目）完了: v24 の対象はすべて直った。収束しなかった残りは C-74（touch が枠の外で走る道。POST と数えない GET）の 1 束＋low 5（L22-1〜5）＋持ち越しの low。ユーザー待ち: (1) v23・v24 をまとめて web に再デプロイする了承、(2) C-74 をいま直す（v25 → 実装 → 軽い確認 → 再デプロイ）か、受け入れて提出物を先にするか。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
