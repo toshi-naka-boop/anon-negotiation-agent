@@ -18,8 +18,9 @@
   読み直し。仮のタイマー。台帳 C-67)・開示台帳の「見込みと組み合わせ」(L20-1)・攻撃の画面の二分探索の実演の request_id の持ち方(503・504 でも保つ。L20-3)も、
   同じ偽の DOM で動かして確かめる。
 - 読み取りの枠(1 分 120 回。台帳 C-72・C-73)に、画面が収まること(v24): /me・/demo・/attack の画面のコード(me.js・demo.js・attack.js)を、node で、そのまま、偽の DOM・偽のサーバー・
-  仮の時計で動かし、読み込みと、2 秒ごとの再取得(SSE がつながらないとき)と、SSE の開始・つなぎ直しと、決着の待ちで、実際に出す GET を数える(L21-7 の改善。数える・数えないは、本番の分類
-  READ_LIMIT_EXEMPT_GET_ROUTES で決める)。SSE の開始が 1 回と数えられること(つながっている間の poll は数えない)は、SSE の試験で確かめる。
+  仮の時計で動かし、読み込みと、2 秒ごとの再取得(SSE がつながらないとき)と、SSE の開始・つなぎ直しと、決着の待ちで、実際に出す要求を数える(L21-7 の改善。数える・数えないは、本番のミドルウェアの
+  判定 counts_request で、セッションのクッキーを持っている前提〔最悪の場合〕で決める。v25。C-74: 数えない GET の表は、クッキーのない GET にしか効かず、POST もセッションを見ない経路でなければ数える)。
+  SSE の開始が 1 回と数えられること(つながっている間の poll は数えない)は、SSE の試験で確かめる。
 - 入口の「金庫の確認(TEE)」(static/tee.js。設計書 §9 の表の 6 行目): 区画の id・nonce なしの呼び出し・応答のトークン(JWT)を画面のコードが参照しないこと・
   説明文の言葉(鍵の排他性の限定 X-78・C-62・I-37 と、「言えないこと」。C-70・L20-10)。node があれば、応答(検証済みでリンクなし・あり、検証できていない、
   TEE でない環境の 404)の描画を偽の DOM で確かめる。
@@ -57,7 +58,7 @@ from vault_helpers import needs_confirmation_policy, sample_package
 from web import activity_api, meter_api, ui_api
 from web.activity_api import ActivityEntry, ActivityLog
 from web.api import TeeAttestationConfig
-from web.app import READ_LIMIT_EXEMPT_GET_ROUTES, create_app, create_app_from_env
+from web.app import READ_LIMIT_EXEMPT_GET_ROUTES, SESSION_FREE_PREFIXES, create_app, create_app_from_env
 from web.attack.scripted import probe_package
 from web.config import DEFAULT_WEB_CONFIG
 from web.ledger import LedgerEntry, LedgerOperator, LedgerRecipient
@@ -2530,7 +2531,7 @@ def test_the_sections_render_the_apis_data_and_behave_as_designed():
 
 
 # ----------------------------------------------------------------------
-# 読み取りの枠(1 分 120 回。台帳 C-72・C-73)に、画面が収まること: 画面のコードが実際に出す GET を数える(L21-7 の改善)
+# 読み取りの枠(1 分 120 回。台帳 C-72・C-73・C-74)に、画面が収まること: 画面のコードが実際に出す要求を数える(L21-7 の改善)
 # ----------------------------------------------------------------------
 
 # /me・/demo・/attack の画面のコードを、そのまま node で動かす。偽の DOM(どの id にも要素が 1 つ)・偽のサーバー(API の応答は、実際のモデルから作ったデータ)・
@@ -2707,14 +2708,52 @@ def run_page(page: str, mode: str, scenario: str, data: dict) -> dict[str, list[
 
 
 def counted_requests(requests: list[dict]) -> list[str]:
-    """requests のうち、読み取りの枠に数えられるもの(経路)。本番の分類(READ_LIMIT_EXEMPT_GET_ROUTES)で決める。POST は数えない(それぞれの入口の枠がある)。"""
-    classifier = AnonymousReadLimitMiddleware(None, limiter=None, exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES))
-    return [request["path"] for request in requests if request["method"] == "GET" and classifier.counts(request["path"])]
+    """requests のうち、読み取りの枠に数えられるもの(経路)。本番のミドルウェアの判定(counts_request)で決める。
+    セッションのクッキーを持っている前提(最悪の場合。v25。台帳 C-74)で数える: 数えない GET の表(READ_LIMIT_EXEMPT_GET_ROUTES)は、クッキーのない GET にしか効かず、
+    クッキーがあれば、POST もセッションを見ない経路(SESSION_FREE_PREFIXES)でなければ数える(`/start` も数える)。
+    """
+    classifier = AnonymousReadLimitMiddleware(
+        None, limiter=None, exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES), session_free_prefixes=SESSION_FREE_PREFIXES
+    )
+    return [
+        request["path"]
+        for request in requests
+        if classifier.counts_request(request["method"], request["path"], has_session_cookie=True)
+    ]
+
+
+def test_counted_requests_counts_as_a_browser_with_a_session_cookie_would_be_counted_in_the_worst_case():
+    # 足場の確認(node は要らない): クッキーを持つ前提で、`/start` と、セッションの確認が走る経路への POST は数える。セッションを見ない経路(デモ・攻撃・メーター・静的ファイル・SSE の POST)は数えない
+    # (本番のミドルウェアの判定 counts_request のとおり)。GET の規則で数える GET は、クッキーがあっても 1 回。
+    requests = [
+        {"method": "GET", "path": "/start", "via": "fetch"},
+        {"method": "GET", "path": "/v1/interview/notice", "via": "fetch"},
+        {"method": "POST", "path": "/v1/negotiations/n1/stage/meet", "via": "fetch"},
+        {"method": "POST", "path": "/v1/principals/p1/interview/begin", "via": "fetch"},
+        {"method": "GET", "path": "/v1/principals/p1/negotiations", "via": "fetch"},
+        {"method": "GET", "path": "/v1/stream/negotiations/n1/activity", "via": "EventSource"},
+        {"method": "POST", "path": "/v1/demo/negotiations", "via": "fetch"},
+        {"method": "POST", "path": "/v1/demo/attack/negotiations", "via": "fetch"},
+        {"method": "POST", "path": "/v1/demo/meter", "via": "fetch"},
+        {"method": "GET", "path": "/v1/demo/cases", "via": "fetch"},
+        {"method": "GET", "path": "/static/ui.js", "via": "fetch"},
+    ]
+
+    assert counted_requests(requests) == [
+        "/start",
+        "/v1/interview/notice",
+        "/v1/negotiations/n1/stage/meet",
+        "/v1/principals/p1/interview/begin",
+        "/v1/principals/p1/negotiations",
+        "/v1/stream/negotiations/n1/activity",
+    ]
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_the_pages_stay_well_inside_the_default_read_limit_by_the_requests_their_scripts_really_make():
     # 台帳 C-72・C-73(v24)・L21-7 の改善: SSE の開始・セッションのある GET も数えるので、画面が実際に出す GET を、画面のコードを動かして数える(計算だけではなく)。
+    # v25(C-74)からは、セッションのクッキーを持つ POST・`/start` も数える(counted_requests は、クッキーを持っている前提で数える)。3 画面の POST は、すべてデモ・攻撃・メーター(セッションを見ない経路)なので数えず、
+    # 3 画面は `/start` を呼ばない(呼ぶのは面談のページの ensureSession だけ。static/interview.js)ので、画面ごとの件数は v24 と変わらない。
     # /me・/demo・/attack の、読み込み・2 秒ごとの再取得(SSE がつながらないとき)・SSE の開始とつなぎ直し・決着の待ち。1 つの画面の最も忙しい 1 分が、枠(1 分 120 回)の半分ほどまでで、
     # デモと攻撃を両方開いて、どちらも再取得に落ちても、枠に収まる(10 回の余裕を残す)。
     limit = DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG.per_minute

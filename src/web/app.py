@@ -18,8 +18,10 @@
 - セッションのミドルウェアより外に、ASGI のミドルウェアを 2 つ置く(外 → 内: 本文の上限 → 読み取りの枠 → セッション)。
   本文の全体の上限と読み取りの期限(web.body_limit。[web.limits] max_request_body_bytes・request_body_timeout_seconds。台帳 X-85・X-90): FastAPI は依存(枠・認証)より先に本文を読むので、
   ルートの前で数えて 413。本文は、ここで上限まで読み切ってから、内側(セッションのミドルウェアとルート)に渡す。読み切れなければ 408。
-  読み取りの枠(web.limits。[web.limits] anonymous_read_per_minute。台帳 C-68・C-72・C-73): 金庫か Firestore を読む GET(セッションの有無によらない。SSE の開始・再接続も)に、
-  クライアントごと(IPv6 は /64 単位。台帳 C-71)・1 分あたりの回数の枠を、メモリで掛ける(超えたら 429)。数えない GET は READ_LIMIT_EXEMPT_GET_ROUTES の経路だけで、表にない GET は、すべて数える。
+  読み取りの枠(web.limits。[web.limits] anonymous_read_per_minute。台帳 C-68・C-72・C-73・C-74): 金庫か Firestore を読む GET(セッションの有無によらない。SSE の開始・再接続も)と、
+  セッションのクッキーを持つ要求(v25。メソッドと経路によらず、セッションを見ない経路 SESSION_FREE_PREFIXES を除く。セッションの確認より前に数える)に、
+  クライアントごと(IPv6 は /64 単位。台帳 C-71)・1 分あたりの回数の枠を、メモリで掛ける(超えたら 429。画面のページの GET には、JSON ではなく短い HTML。台帳 L22-2)。
+  クッキーを持たない GET のうち、数えないのは READ_LIMIT_EXEMPT_GET_ROUTES の経路だけで、表にない GET は、すべて数える。
 - FastAPI の既定の /docs・/redoc・/openapi.json は、本番の起動口(create_app_from_env)では出さない(台帳 L19-10)。/docs は CDN の Swagger UI の JS を読み込み、
   ページに付けている CSP が掛からないので、セッションのクッキーと同じ配信元で第三者の JS が動いてしまうため。開発用(scripts/serve_local.py や試験)だけ、
   create_app(docs=True) で出せる(既定は出さない。金庫の app が /docs・/openapi.json を出さないのと同じ)。
@@ -101,9 +103,14 @@ PAGE_FILES = {
     "/demo": "demo.html",
     "/attack": "attack.html",
 }
-# 読み取りの枠に数えない GET(経路の型 → 数えない理由。Starlette の経路の書き方。design.md §8.2「読み取りの枠」。台帳 C-72・C-73)。
-# ここに名前を挙げた経路だけが、枠に数えられない。表にない GET は、経路があってもなくても、すべて数える(web.limits の AnonymousReadLimitMiddleware。
-# 経路の足し忘れで、枠から漏れない)。SSE(/v1/stream/...)・セッションのある GET・攻撃モードの GET も、数える側にある。
+# セッションを見ない経路の接頭辞(デモ〔攻撃も含む〕・TEE・死活確認・静的ファイル・SSE)。セッションのミドルウェア(PrincipalSessionMiddleware)と読み取りの枠のミドルウェア
+# (AnonymousReadLimitMiddleware)に、同じ値を渡す(2 か所でずれないように。v25。台帳 C-74)。前者は、この接頭辞で始まる経路ではセッションの確認(Firestore の利用記録の読み出し)をしない。
+# 後者は、セッションのクッキーを持つ要求を数えるとき、この接頭辞で始まる経路を除く(確認をしない経路は、確認の読み出しの増幅に使えない)。
+SESSION_FREE_PREFIXES = (DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTH_PATH, STATIC_PATH_PREFIX, STREAM_PATH_PREFIX)
+# 読み取りの枠に数えない GET(経路の型 → 数えない理由。Starlette の経路の書き方。design.md §8.2「読み取りの枠」。台帳 C-72・C-73・C-74)。
+# 表にない GET は、経路があってもなくても、すべて数える(web.limits の AnonymousReadLimitMiddleware。経路の足し忘れで、枠から漏れない)。SSE(/v1/stream/...)・セッションのある GET・
+# 攻撃モードの GET も、数える側にある。ここに名前を挙げた経路は、セッションのクッキーを持たない GET のときだけ、枠に数えられない(v25。クッキーを持つ要求は、メソッドによらず、
+# SESSION_FREE_PREFIXES で始まる経路を除いて数える。`/start`・面談の注記も、クッキーがあれば数える。クッキーの値が空でなければ、中身は確かめない)。
 # 画面のページ(/・/me など)も数える(設計書の「数えない GET」に入っていない。有効なクッキーがあるとセッションの確認〔Firestore〕が走るので、数えないと読み出しの増幅に使える)。
 # tests/test_limits.py が、本番の app(TEE ありとなし)の GET の経路の全体を、この表か、「数える」と決めた一覧のどちらかに分類させる(分類のない GET があれば落ちる)。
 READ_LIMIT_EXEMPT_GET_ROUTES: dict[str, str] = {
@@ -238,12 +245,16 @@ def create_app(
         meta=services.meta,
         locks=services.locks,
         clock=services.clock,
-        session_free_prefixes=(DEMO_PATH_PREFIX, TEE_PATH_PREFIX, HEALTH_PATH, STATIC_PATH_PREFIX, STREAM_PATH_PREFIX),
+        session_free_prefixes=SESSION_FREE_PREFIXES,
     )
     # 後から足したものほど外側になる(外 → 内: 本文の上限 → 読み取りの枠 → セッション → ルート)。どちらも、セッションの前で断る。
     app.add_middleware(
-        AnonymousReadLimitMiddleware, limiter=services.read_limiter, exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES)
-    )  # 金庫か Firestore を読む GET(SSE の開始を含む)の、クライアントごとの枠(メモリ。台帳 C-68・C-72・C-73)
+        AnonymousReadLimitMiddleware,
+        limiter=services.read_limiter,
+        exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES),
+        session_free_prefixes=SESSION_FREE_PREFIXES,
+        page_routes=tuple(PAGE_FILES),
+    )  # 金庫か Firestore を読む GET(SSE の開始を含む)と、セッションのクッキーを持つ要求の、クライアントごとの枠(メモリ。台帳 C-68・C-72・C-73・C-74)。画面のページの GET は HTML の 429(L22-2)
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_bytes=config.limits.max_request_body_bytes,

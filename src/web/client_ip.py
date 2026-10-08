@@ -5,7 +5,7 @@ web は Cloud Run のフロントエンドの後ろで動くので、接続元�
 そのため、IP は X-Forwarded-For のカンマ区切りの最後の要素にする。ヘッダがないとき(ローカル・テスト)は、接続元のアドレス。
 
 クライアントごとのレート制限・同時数の枠のキーは、client_key(IPv6 は /64 の接頭辞にまとめる。台帳 C-71)で作る: GET /api/tee/attestation の nonce つきの
-転送・Firestore の時間窓カウンタ・SSE の同時本数・面談の同時数・読み取りの枠(金庫か Firestore を読む GET)、のすべて。
+転送・Firestore の時間窓カウンタ・SSE の同時本数・面談の同時数・読み取りの枠(金庫か Firestore を読む GET と、セッションのクッキーを持つ要求。v25)、のすべて。
 """
 
 import ipaddress

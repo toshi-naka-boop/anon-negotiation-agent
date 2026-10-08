@@ -62,10 +62,11 @@ class PrincipalSessionMiddleware:
             return
 
         request = Request(scope)
-        # 0. web の口は GET と POST だけ。ほかのメソッド(HEAD・PUT・DELETE など)は、セッションの確認(Firestore の利用記録の読み書き)より前に 405 で断る
-        #    (有効なクッキーつきの 405 の要求で、枠に数えられない読み出しを増やせないように。v24 の読み取りの枠の抜け道。C-73)。
+        # 0. web の口は GET と POST だけ。ほかのメソッド(HEAD・PUT・DELETE など)は、セッションの確認(Firestore の利用記録の読み書き)より前に 405 で断り、Allow: GET, POST を付ける
+        #    (有効なクッキーつきの要求で、確認の読み出しを増やせないように。v24 の読み取りの枠の抜け道。C-73。Allow は v25。L22-1)。
+        #    セッションのクッキーを持つ要求は、メソッドによらず、これより外の読み取りの枠のミドルウェアが先に数えている(セッションを見ない経路を除く。v25。C-74)ので、ここに届く 405 も枠の中。
         if scope["method"] not in ("GET", "POST"):
-            await self._reject(scope, receive, send, 405, "method_not_allowed")
+            await self._reject(scope, receive, send, 405, "method_not_allowed", headers={"Allow": "GET, POST"})
             return
         # 1. 状態を変えるリクエスト(POST)は、独自ヘッダを必須にする。
         if scope["method"] == "POST" and not request.headers.get(REQUESTED_WITH_HEADER):
@@ -118,8 +119,10 @@ class PrincipalSessionMiddleware:
         return wrapped
 
     @staticmethod
-    async def _reject(scope: Scope, receive: Receive, send: Send, status_code: int, detail: str) -> None:
-        await JSONResponse({"detail": detail}, status_code=status_code)(scope, receive, send)
+    async def _reject(
+        scope: Scope, receive: Receive, send: Send, status_code: int, detail: str, headers: dict[str, str] | None = None
+    ) -> None:
+        await JSONResponse({"detail": detail}, status_code=status_code, headers=headers)(scope, receive, send)
 
 
 def _sets_session_cookie(name: bytes, value: bytes) -> bool:
