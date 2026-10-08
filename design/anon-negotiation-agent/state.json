@@ -17,8 +17,8 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v25 は本番へ反映済み（2026-10-08、web-00005-m9k）。設計の残り: low（L22-3・X-93・持ち越しの L20-x・L21-x）と I-34 は次の改訂で扱う。ほかの作業: 提出物（デモ動画・信頼境界図・説明文・Zenn 記事・提出物のチェックリスト）。古い worktree 6 つの片付けはユーザーの判断待ち。",
-  "lastUpdated": "2026-10-08",
+  "nextAction": "v25 は本番へ反映済み（2026-10-08、web-00005-m9k）。コードは提出まで止める（2026-10-09、ユーザーの判断。残りの low と I-34 は直さず、説明文に既知の限界として書く）。main への取り込み（PR #2、ユーザーの了承でマージまで）。次: 提出物（動画の台本の骨組み → 信頼境界図 → 説明文 → 記事。どれも構成の合意から）。",
+  "lastUpdated": "2026-10-09",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
     "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）。v25（2026-10-08）: sonnet の worktree 1 本。1 本目は古い main（abada3c）から作られて ff できずに止まり、2 本目で `git checkout --detach 238d2ef` してから実装",
