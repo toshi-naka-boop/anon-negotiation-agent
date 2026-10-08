@@ -1,6 +1,6 @@
 {
-  "currentNode": "反証",
-  "status": "awaiting_user",
+  "currentNode": "完了",
+  "status": "done",
   "designVersion": "v25",
   "approvedDesignVersion": "v25",
   "approvedDesignSha256": "f09d805e6a4e417da8861d16282e4c21ff45159135b739307b5858621d6e044d",
@@ -17,7 +17,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "v25 の実装は 24f6e16（全体の試験 3861 件が合格。23 巡目の軽い確認〔codex〕は low の X-93 だけ）。web の本番への再反映の了承待ち。了承の後: イメージを作って web を更新 → deploy_check → 画面の確認（ページの 429 の HTML を含む）。",
+  "nextAction": "v25 は本番へ反映済み（2026-10-08、web-00005-m9k）。設計の残り: low（L22-3・X-93・持ち越しの L20-x・L21-x）と I-34 は次の改訂で扱う。ほかの作業: 提出物（デモ動画・信頼境界図・説明文・Zenn 記事・提出物のチェックリスト）。古い worktree 6 つの片付けはユーザーの判断待ち。",
   "lastUpdated": "2026-10-08",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
