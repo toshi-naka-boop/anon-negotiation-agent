@@ -194,3 +194,4 @@ uv run python scripts/verify_attestation.py --web "$WEB_URL"
 - GitHub: `toshi-naka-boop/anon-negotiation-agent`。PR #1 をユーザーがマージコミットでマージ（abada3c。ca5791a は main から辿れる）。
 - `GITHUB_REPO_URL` を反映（ユーザーの指示「反映して」。`web-00003-j6l`）。`/api/tee/attestation` の `release.url` が `…/commit/ca5791a…` になった。反映の時点でリポジトリはまだ非公開（ログインなしで 404）。公開に切り替わればリンクがそのまま使える。
 - リポジトリを公開（ユーザー、2026-10-05）。ログインなしでリポジトリと ca5791a のコミットのページが 200。web の画面のコミットのリンクが誰にでも開けるようになった。
+- v23・v24 の反映（2026-10-08、ユーザーの了承「反映する」）: イメージ `app:4781469` を `gcloud run services update web --image` で `web-00004-fcm` に（ほかの設定は保持）。死活 200、attestation verified、70 KB の送信は 413、HEAD は 405。公開 URL でデモのケース 1 をライブ実行（17 手で合意「見込み 高」、読み取りの枠には当たらず、段階開示は操作なしで段 0→2）。deploy_check 全項目: OK 26・NG 1（healthz-agents。なりすましの権限は外したまま。agents への到達はデモで確認）・SKIP 8（tee-i は組織なしで SKIP）。金庫の VM は 10/5 から連続稼働。

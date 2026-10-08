@@ -1,12 +1,12 @@
 {
   "currentNode": "承認CP",
   "status": "awaiting_user",
-  "designVersion": "v24",
-  "approvedDesignVersion": "v24",
-  "approvedDesignSha256": "cce1cd45a3ac004a8600519a966aad01ae2d83fe999ebfbac9095492188a4e20",
-  "approvedAt": "2026-10-06T12:18:43Z",
-  "approvalEvidence": "v24:cce1cd45a3ac　承認します。",
-  "requiredApprovalFingerprint": "v24:cce1cd45a3ac",
+  "designVersion": "v25",
+  "approvedDesignVersion": null,
+  "approvedDesignSha256": null,
+  "approvedAt": null,
+  "approvalEvidence": null,
+  "requiredApprovalFingerprint": "v25:f09d805e6a4e",
   "baseline": "main@efc6079（設計書・台帳の初回コミット。実装は feat/phase1-core ブランチ）",
   "criticRound": 22,
   "openIssueIds": [
@@ -18,7 +18,7 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "反証 22 巡目（上限の 3 巡目）完了: v24 の対象はすべて直った。収束しなかった残りは C-74（touch が枠の外で走る道。POST と数えない GET）の 1 束＋low 5（L22-1〜5）＋持ち越しの low。ユーザー待ち: (1) v23・v24 をまとめて web に再デプロイする了承、(2) C-74 をいま直す（v25 → 実装 → 軽い確認 → 再デプロイ）か、受け入れて提出物を先にするか。",
+  "nextAction": "v23・v24 は本番へ反映済み（2026-10-08、web-00004-fcm）。承認 CP: v25 の指紋 v25:f09d805e6a4e（C-74 と L22-1・2・4・5）。承認後: 実装（sonnet・worktree）→ 全体の試験 → 1 つのレンズで軽い確認 → 再反映（了承）。並行してユーザーはデモ動画の準備。",
   "lastUpdated": "2026-10-05",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
