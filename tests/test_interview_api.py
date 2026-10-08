@@ -11,6 +11,8 @@
 - LLM を呼ぶ 3 つの API(年収の 3 問・自由コメント・辞めた理由)の入口の枠(web.limits の interview_llm。§8.2。クライアント IP ごと)。
   超えると 429 で LLM に送らない。LLM を呼ばない手順は、掛からず、数えない
 - 面談を始める口(/begin)の入口の枠(web.limits の interview_begin。台帳 C-66)と、アイドルの面談の状態を見回りがメモリから消すこと(台帳 L19-6)
+- 面談の同時数と寿命(v23。台帳 C-69・X-87): 送信元(IPv6 は /64 単位)ごとに同時 3 件(4 件目の新規 begin は 429。続きの読み込み・やり直しは数えない)・
+  アイドルの時計は書き込みでだけ進め直し(読み取りでは延びない)・作ってから 3 時間で消える(見回りがメモリからも消す)
 - 送信のあと、生の値がどこにも残らない(AC-18: カナリアを Firestore の全文書とログに探す)・辞めた理由の原文を持たない(AC-17)
 """
 
@@ -25,7 +27,9 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from negotiation_core import AXES, AXIS_KEYS
-from web.interview.state import InterviewStateStore
+from web.config import DEFAULT_WEB_CONFIG
+from web.interview.config import DEFAULT_INTERVIEW_CONFIG
+from web.interview.state import InterviewClientLimitReached, InterviewStateStore, InterviewStoreFull
 from web.llm_budget import LlmBudgetUnavailable, jst_date
 from web.vault_client import VaultUnavailableError
 from web_app_helpers import REQUESTED_WITH, documents_mentioning, dump_documents, interview_body
@@ -859,18 +863,277 @@ async def test_a_different_client_ip_has_its_own_begin_allowance_and_the_window_
 @pytest.mark.anyio
 async def test_one_client_cannot_fill_the_interview_memory_by_collecting_new_identities(env):
     # 台帳 C-66 の破綻シナリオ: クッキーを持たないクライアントが、GET /start(毎回、新しい依頼者 ID)→ そのクッキーで POST .../begin を繰り返して、
-    # 同時 500 件の上限を埋める。開始ページ(session_start 20 回)と面談の開始(interview_begin 10 回)の枠で、1 つのクライアントが 10 分に作れる
-    # 面談の状態は 10 件まで。
+    # 同時 500 件の上限を埋める。回数の窓(開始ページ session_start 20 回・面談の開始 interview_begin 10 回/10 分)だけでは、1 つのクライアントが 10 分に
+    # 面談の状態を 10 件作れた。v23(台帳 C-69・X-87)は、送信元ごとの同時数の上限(3 件)を足した: 4 件目の新規 begin から 429(interview_concurrent)。
+    # 回数の窓(10 回)は、その手前の 11 回目から効く(こちらは interview_begin)。
     store = env.services.interview.store
-    results = []
+    results, refused = [], []
     for _ in range(12):
         browser = env.browser()  # 毎回、クッキーのない新しいブラウザ
         started = await browser.get("/start")
         began = await browser.post(f"/v1/principals/{browser.pid}/interview/begin", {})
         results.append((started.status_code, began.status_code))
+        if began.status_code == 429:
+            refused.append(began.json()["detail"]["entrance"])
 
-    assert results == [(200, 200)] * 10 + [(200, 429)] * 2
-    assert len(store) == 10
+    assert results == [(200, 200)] * 3 + [(200, 429)] * 9
+    assert refused == ["interview_concurrent"] * 7 + ["interview_begin"] * 2
+    assert len(store) == 3
+
+
+# --- 面談の同時数と寿命(v23。台帳 C-69・X-87): 送信元ごとに同時 3 件・読み取りでは延びない・作ってから 3 時間 ---
+
+
+@pytest.fixture
+async def capacity_env(make_env, llm):
+    """回数の窓(開始ページ・面談の開始)を大きくした web(同時数と寿命だけを確かめるため)。面談の LLM はスタブ。"""
+    web = make_env(rate_limits=small_limits(interview_begin=100, session_start=100))
+    web.services.interview.agent.use_model(llm.stub)
+    return web
+
+
+async def open_flows(env, count: int) -> list[Flow]:
+    """クッキーのない新しいブラウザを count 個作り、それぞれ開始ページを開いて、依頼者を作る(どれも同じクライアント)。"""
+    flows = []
+    for _ in range(count):
+        browser = env.browser()
+        flows.append(Flow(env, browser, await browser.open_start_page()))
+    return flows
+
+
+def test_the_interview_capacity_settings_hold_the_design_values():
+    # §5・§8.2(v23): アイドルの寿命 1 時間・作ってから 3 時間・送信元ごとに同時 3 件・全体で同時 500 件
+    config = DEFAULT_INTERVIEW_CONFIG
+    assert (config.state_idle_ttl_seconds, config.max_lifetime_seconds) == (3600, 10800)
+    assert (config.max_concurrent_per_client, config.max_active_interviews) == (3, 500)
+
+
+@pytest.mark.anyio
+async def test_the_fourth_new_begin_from_one_client_is_refused_while_continuing_or_restarting_one_is_not(capacity_env):
+    # AC-13(v23): 送信元ごとに 4 件目の面談の新規 begin は 429。続きを読み込むだけの begin・自分の面談のやり直しは、数が増えないので断らない。
+    env = capacity_env
+    store = env.services.interview.store
+    first, second, third, fourth = await open_flows(env, 4)
+    for flow in (first, second, third):
+        assert (await flow.post("begin", {})).status_code == 200
+    assert len(store) == 3
+
+    refused = await fourth.post("begin", {})
+
+    assert refused.status_code == 429
+    assert refused.json()["detail"] == {
+        "code": "rate_limited",
+        "entrance": "interview_concurrent",
+        "scope": "client",
+        "limit": 3,
+        "window_seconds": None,  # 時間窓ではなく、同時数(SSE の同時本数と同じ形)
+        "retry_after_seconds": 3600,  # 3 件とも作ったばかり: 一番早く席が空くのは、アイドルの寿命(1 時間)のあと
+    }
+    assert refused.headers["Retry-After"] == "3600"
+    assert len(store) == 3 and store.get(fourth.pid) is None  # 断った begin は、状態を作らない
+    assert (await fourth.get("state")).status_code == 409
+
+    # 続きを読み込むだけの begin と、自分の面談のやり直し(置き換え)は、3 件ちょうどのまま通る
+    assert (await first.begin())["state"]["stage"] == "profile"
+    assert (await second.begin(restart=True))["state"]["stage"] == "profile"
+    assert len(store) == 3
+    env.clock.advance(dt.timedelta(seconds=100))
+    assert (await fourth.post("begin", {})).json()["detail"]["retry_after_seconds"] == 3500  # 席が空くまでの残り
+
+    # 席が空けば(破棄)、同じ送信元の 4 人目も始められる
+    assert (await third.ok("POST", "discard")) == {"status": "discarded"}
+    assert (await fourth.begin())["state"]["stage"] == "profile"
+    assert len(store) == 3
+
+
+@pytest.mark.anyio
+async def test_a_refused_restart_keeps_the_state_that_it_would_have_replaced(capacity_env):
+    # 3 件持っている送信元が、別の送信元が作った面談(pid)をやり直そうとして断られても、その面談の状態は残る(断った begin は、いまの状態に触れない)。
+    env = capacity_env
+    store = env.services.interview.store
+    first, second, third, fourth = await open_flows(env, 4)
+    for flow in (first, second, third):
+        await flow.begin()
+    assert (await post_from(fourth, "begin", {}, "198.51.100.8")).status_code == 200  # 別の送信元が作った
+    await fourth.profile()
+    state = await fourth.ok("GET", "state")
+    assert len(store) == 4
+
+    refused = await fourth.post("begin", {"restart": True})  # 3 件持っている送信元(既定のクライアント)から
+
+    assert (refused.status_code, refused.json()["detail"]["entrance"]) == (429, "interview_concurrent")
+    assert await fourth.ok("GET", "state") == state  # プロフィールの帯が残っている
+    assert len(store) == 4
+
+
+@pytest.mark.anyio
+async def test_the_concurrent_limit_is_per_client_and_an_ipv6_client_is_one_per_64_prefix(capacity_env):
+    # 台帳 C-71: IPv6 は /64 単位。同じ /64 の中のアドレス(書き方が違っても)は 1 つの送信元で、別の /64・IPv4 は別の送信元。
+    # X-Forwarded-For の先頭側(利用者が書ける)を変えても、末尾が同じなら同じ送信元。
+    env = capacity_env
+    store = env.services.interview.store
+    flows = await open_flows(env, 8)
+    same_prefix = ["2001:db8:1:2::1", "2001:DB8:1:2:0:0:0:2", "2001:db8:1:2:abcd:ef01:2345:6789"]
+    for flow, address in zip(flows, same_prefix, strict=False):
+        assert (await post_from(flow, "begin", {}, address)).status_code == 200
+
+    over = await post_from(flows[3], "begin", {}, "2001:db8:1:2:ffff::9")  # 同じ /64 の 4 つ目のアドレス
+    assert (over.status_code, over.json()["detail"]["entrance"]) == (429, "interview_concurrent")
+    assert (await post_from(flows[3], "begin", {}, "2001:db8:1:3::1")).status_code == 200  # 別の /64
+    assert (await post_from(flows[4], "begin", {}, "198.51.100.8")).status_code == 200  # IPv4
+    assert (await post_from(flows[5], "begin", {}, "10.0.0.1, 198.51.100.8")).status_code == 200  # 先頭側は見ない(末尾の同じ送信元の 2 件目)
+    assert (await post_from(flows[6], "begin", {}, "192.0.2.77, 198.51.100.8")).status_code == 200  # 3 件目
+    forged = await post_from(flows[7], "begin", {}, "203.0.113.1, 198.51.100.8")  # 先頭側を変えても、4 件目
+    assert (forged.status_code, forged.json()["detail"]["entrance"]) == (429, "interview_concurrent")
+    assert len(store) == 7
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("suffix", ["state", "axes", "choices", "confirmation", "worst-case"])
+async def test_a_read_never_extends_the_idle_lifetime(env, flow, suffix):
+    # 台帳 C-69・X-87: 読み取り(GET)は、アイドルの時計を進め直さない。持ち主が 1 時間に 1 回読むだけでは、状態を持ち続けられない。
+    service = env.services.interview
+    await flow.until_ready()  # 5 つの GET が、どれも 200 を返す状態まで
+    env.clock.advance(service.store._idle_ttl - dt.timedelta(seconds=1))
+    assert (await flow.get(suffix)).status_code == 200  # まだ読める。この読み取りで、寿命は延びない
+
+    env.clock.advance(dt.timedelta(seconds=1))  # 最後の書き込みから、ちょうど寿命
+
+    gone = await flow.get("state")
+    assert (gone.status_code, gone.json()["detail"]) == (409, "interview_not_started") and len(service.store) == 0
+
+
+@pytest.mark.anyio
+async def test_a_write_extends_the_idle_lifetime_including_a_begin_that_only_continues(env, flow):
+    # 書き込み(開始・プロフィール・回答・確認など)は、アイドルの時計を進め直す。続きを読み込むだけの begin も、書き込み。
+    almost = env.services.interview.store._idle_ttl - dt.timedelta(seconds=1)
+    await flow.begin()
+    env.clock.advance(almost)
+    await flow.begin()  # 続きを読み込むだけ
+    env.clock.advance(almost)
+    await flow.profile()
+    env.clock.advance(almost)  # 作ってから 3 × 3599 秒(3 時間の手前)
+
+    assert (await flow.get("state")).status_code == 200  # 書き込みのたびに進め直したので、アイドルでは消えていない
+
+
+@pytest.mark.anyio
+async def test_a_state_disappears_three_hours_after_it_was_created_whatever_is_written_to_it(env, flow):
+    # AC-13(v23): 状態は、読み取りでは延びず、作ってから 3 時間で消える。30 分ごとに書き込み続けても(アイドルでは消えない)、3 時間で消える。
+    store = env.services.interview.store
+    await flow.begin()
+    for _ in range(5):
+        env.clock.advance(dt.timedelta(minutes=30))
+        await flow.profile()
+    env.clock.advance(dt.timedelta(minutes=29))  # 作ってから 2 時間 59 分
+    assert (await flow.post("profile", PROFILE)).status_code == 200
+
+    env.clock.advance(dt.timedelta(minutes=1))  # 作ってから、ちょうど 3 時間(直前の書き込みは 1 分前)
+
+    gone = await flow.post("profile", PROFILE)  # 書き込みでも、延びない
+    assert (gone.status_code, gone.json()["detail"]) == (409, "interview_not_started") and len(store) == 0
+    assert (await flow.begin())["state"]["stage"] == "profile"  # 新しく始めれば、また 3 時間
+
+
+@pytest.mark.anyio
+async def test_the_sweeper_removes_a_state_that_passed_the_three_hour_lifetime_while_it_was_still_in_use(env, flow):
+    # 読めなくなるだけでなく、見回りがメモリからも消す(使われ続けた状態は、アイドルの寿命では消えない。絶対の寿命だけが消す)。
+    service = env.services.interview
+    await flow.begin()
+    for _ in range(5):
+        env.clock.advance(dt.timedelta(minutes=30))
+        await flow.profile()
+    assert (await env.services.sweeper.sweep_once()).interview_states_evicted == 0  # 2 時間 30 分: まだ
+
+    env.clock.advance(dt.timedelta(minutes=30))  # 3 時間(最後の書き込みから 30 分)
+
+    assert len(service.store) == 1  # 読めなくなったが、見回りの前なので、メモリには残っている
+    report = await env.services.sweeper.sweep_once()
+    assert (report.interview_states_evicted, len(service.store)) == (1, 0)
+
+
+def _small_store(clock, **changes) -> InterviewStateStore:
+    settings = {"idle_ttl_seconds": 3600, "max_lifetime_seconds": 10800, "max_states": 10, "max_per_client": 3, **changes}
+    return InterviewStateStore(clock, **settings)
+
+
+def test_the_store_get_extends_the_idle_lifetime_only_when_asked_and_never_the_absolute_one(clock):
+    store = _small_store(clock)
+    store.create("a")
+    clock.advance(dt.timedelta(seconds=3599))
+    assert store.get("a") is not None  # 既定は読み取り: 延びない
+    clock.advance(dt.timedelta(seconds=1))
+    assert store.get("a") is None  # 作ってから(最後の書き込みから)3600 秒
+
+    store.create("b")
+    for _ in range(3):  # 3599 秒ごとに書き込み(touch)続ける: 10797 秒まで、アイドルでは消えない
+        clock.advance(dt.timedelta(seconds=3599))
+        assert store.get("b", touch=True) is not None
+    clock.advance(dt.timedelta(seconds=3))  # 作ってから 10800 秒: 直前の書き込みは 3 秒前でも、絶対の寿命を過ぎた
+    assert store.get("b", touch=True) is None and len(store) == 0
+
+
+def test_the_store_counts_the_states_of_one_client_and_a_refusal_changes_nothing(clock):
+    store = _small_store(clock)
+    for index in range(3):
+        store.create(f"p{index}", "client-a")
+    with pytest.raises(InterviewClientLimitReached) as raised:
+        store.create("p3", "client-a")
+    assert (raised.value.limit, raised.value.retry_after_seconds) == (3, 3600)
+    assert len(store) == 3 and store.get("p3") is None  # 断った分は、数えない・作らない
+
+    store.create("p4", "client-b")  # 別の送信元は、別に数える
+    store.create("p0", "client-a")  # 自分の状態の置き換えは、数えない(3 件のまま)
+    assert len(store) == 4
+    store.create("p5")  # 送信元が分からない要求は、共有の 1 つのキー(unknown)
+    with pytest.raises(InterviewClientLimitReached):
+        store.create("p3", "client-a")
+    store.discard("p1")
+    store.create("p3", "client-a")  # 席が空いた
+    assert {state.client for state in store._states.values()} == {"client-a", "client-b", "unknown"}
+
+
+def test_a_refused_create_keeps_the_state_it_would_have_replaced_and_the_client_limit_is_checked_before_the_overall_one(clock):
+    store = _small_store(clock, max_states=4)
+    for index in range(3):
+        store.create(f"p{index}", "client-a")
+    store.create("q", "client-b")  # 全体で 4 件(上限)
+    mine = store.get("q")
+    assert mine is not None
+    mine.revision = 7
+
+    with pytest.raises(InterviewClientLimitReached):  # client-a の 3 件がそろっている(q は別の送信元の状態): 置き換えるはずの q は残る
+        store.create("q", "client-a")
+    assert store.get("q") is mine and mine.revision == 7
+    with pytest.raises(InterviewClientLimitReached):  # 送信元の上限も全体の上限も当たるとき: 送信元の方を先に見る
+        store.create("z", "client-a")
+
+    store.create("q", "client-b")  # 全体が満杯でも、自分の状態の置き換えはできる
+    with pytest.raises(InterviewStoreFull):
+        store.create("r", "client-c")
+
+
+def test_expired_states_are_not_counted_for_the_client_and_the_retry_hint_is_the_nearest_expiry(clock):
+    store = _small_store(clock)
+    store.create("a", "client-a")
+    clock.advance(dt.timedelta(seconds=1000))
+    store.create("b", "client-a")
+    clock.advance(dt.timedelta(seconds=1000))
+    store.create("c", "client-a")
+    clock.advance(dt.timedelta(seconds=600))  # a は作ってから 2600 秒
+
+    with pytest.raises(InterviewClientLimitReached) as raised:
+        store.create("d", "client-a")
+    assert raised.value.retry_after_seconds == 1000  # 一番早く寿命を過ぎるのは a(作ってから 3600 秒)
+
+    assert store.get("a", touch=True) is not None  # a を書き込みで延ばすと、一番早いのは b(作ってから 3600 秒 = あと 2000 秒)
+    with pytest.raises(InterviewClientLimitReached) as moved:
+        store.create("d", "client-a")
+    assert moved.value.retry_after_seconds == 2000
+
+    clock.advance(dt.timedelta(seconds=2000))  # b が寿命を過ぎた(寿命を過ぎた状態は、数えない)
+    store.create("d", "client-a")
+    assert store.get("b") is None
 
 
 def _body_of_size(size: int, key: str = "text") -> bytes:
@@ -902,10 +1165,16 @@ async def test_text_bodies_over_32_kb_are_refused_before_the_model_is_called(env
 
 
 @pytest.mark.anyio
-async def test_a_body_without_content_length_is_counted_while_it_is_read(env, flow, llm):
-    # チャンク送信(Content-Length がない)でも、受け取ったバイト数が上限を超えた時点で断る。
+@pytest.mark.parametrize("over", ["the_route_limit", "the_overall_limit"])
+async def test_a_body_without_content_length_is_counted_while_it_is_read(env, flow, llm, over):
+    # チャンク送信(Content-Length がない)でも、受け取ったバイト数が上限を超えた時点で断る。ルートごとの上限(32 KB)を超えたときは、ルートが payload_too_large で断る。
+    # 全体の上限(64 KB。台帳 X-85)を超えたときは、外側のミドルウェアが、本文を内側(セッション・ルート)に渡す前に、すべて読む途中で request_body_too_large で断る(台帳 X-90。
+    # v23 では、ルートが 32 KB で先に断っていた)。どちらも、LLM は呼ばない。
     await flow.until_choices(pairs=0)
     limit = env.services.interview.max_body_bytes
+    overall = DEFAULT_WEB_CONFIG.limits.max_request_body_bytes
+    total, detail = (limit + 8 * 1024, "payload_too_large") if over == "the_route_limit" else (overall + 1024, "request_body_too_large")
+    assert limit < total - 12 and (total < overall) == (over == "the_route_limit")  # 2 つの上限の間と、外に、それぞれ収まっている
     calls = len(llm.stub.requests)
 
     async def chunks(total: int):
@@ -915,10 +1184,10 @@ async def test_a_body_without_content_length_is_counted_while_it_is_read(env, fl
         yield b'"}'
 
     response = await flow.browser.client.post(
-        f"{flow.base}/comment", content=chunks(limit * 2), headers={**REQUESTED_WITH, "Content-Type": "application/json"}
+        f"{flow.base}/comment", content=chunks(total), headers={**REQUESTED_WITH, "Content-Type": "application/json"}
     )
 
-    assert (response.status_code, response.json()["detail"]) == (413, "payload_too_large")
+    assert (response.status_code, response.json()["detail"]) == (413, detail)
     assert len(llm.stub.requests) == calls
 
 
@@ -997,11 +1266,11 @@ async def test_the_interview_state_is_removed_by_discard_restart_idle_expiry_and
     assert (await flow.begin())["state"]["bands"] is not None
     assert (await flow.begin(restart=True))["state"]["bands"] is None
 
-    # 放置された面談は、最後に使ってから寿命を過ぎるとメモリから消える
+    # 放置された面談は、最後に書き込んでからアイドルの寿命を過ぎるとメモリから消える。読み取り(GET)では寿命は延びない(台帳 C-69・X-87)
     await flow.profile()
     env.clock.advance(dt.timedelta(seconds=service.store._idle_ttl.total_seconds() - 1))
-    assert (await flow.get("state")).status_code == 200  # 使ったので、寿命は延びる
-    env.clock.advance(dt.timedelta(seconds=service.store._idle_ttl.total_seconds()))
+    assert (await flow.get("state")).status_code == 200  # まだ読める
+    env.clock.advance(dt.timedelta(seconds=1))  # 最後の書き込みから、ちょうど寿命。いまの読み取りでは、延びていない
     expired = await flow.get("state")
     assert (expired.status_code, expired.json()["detail"]) == (409, "interview_not_started") and len(service.store) == 0
 
@@ -1026,7 +1295,7 @@ async def test_the_interview_state_is_removed_by_discard_restart_idle_expiry_and
 
 
 def test_evict_idle_removes_exactly_the_states_idle_for_the_ttl_at_the_given_time_and_create_still_purges(clock):
-    store = InterviewStateStore(clock, idle_ttl_seconds=3600, max_states=10)
+    store = InterviewStateStore(clock, idle_ttl_seconds=3600, max_lifetime_seconds=10800, max_states=10, max_per_client=10)
     store.create("a")
     clock.advance(dt.timedelta(seconds=1800))
     store.create("b")

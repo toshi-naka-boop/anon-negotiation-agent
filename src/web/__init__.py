@@ -10,8 +10,8 @@
   sweeper(交渉の見回り)・stages(段階開示の状態と遷移)・ledger(開示台帳)・fictional_answerer(架空人物の自動応答。§4.4)。
 - 面談: interview/(§5。API・進行・面談エージェント・途中の状態)。
 - 攻撃モードと 3 枚の壁の実演: attack/(§8.1・§8.2)。
-- 費用と入口の歯止め: llm_budget(LLM の物理の呼び出し数の計上と、作成の入場の制限)・limits(入口ごとのレート制限)・
-  client_ip(クライアント IP の取り方)。
+- 費用と入口の歯止め: llm_budget(LLM の物理の呼び出し数の計上と、作成の入場の制限)・limits(入口ごとのレート制限・SSE の同時本数・
+  金庫か Firestore を読む GET の読み取りの枠)・client_ip(クライアント IP の取り方と、枠のキー。IPv6 は /64 単位)・body_limit(リクエスト本文の全体の上限と読み取りの期限)。
 - 金庫・agents との通信: service_auth(サービス間の認証。台帳 X-37)・attested_transport(TEE 版の金庫への、検証してからピン留めする transport。§9)。
 リプレイ(§8.4)の記録と再生は、このパッケージにはない(scripts/run_demo.py・scripts/replay_check.py)。
 

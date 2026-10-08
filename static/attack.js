@@ -48,8 +48,8 @@ const views = {
 
 // この画面で作った攻撃の交渉の ID(メモリだけ)。wall3Timer は、壁 3 の更新を間引く札。offerSeq は、交渉ごとに、候補者側に届いた
 // 提案のうち、メーターに知らせた最後の番号(選び直して、記録を読み直しても、新しい提案としては数えない)。scripted は、二分探索の実演で作った交渉
-// (台本は LLM を呼ばないので、壁 2 の記録がない)。bisectionRequestId は、枠が尽きて途中で止まった実演の request_id(次に押したときに、同じ
-// request_id で、できた交渉は作り直さずに、続きから進める)。
+// (台本は LLM を呼ばないので、壁 2 の記録がない)。bisectionRequestId は、終わっていない実演の request_id(枠が尽きて途中で止まった・503 や 504 で失敗した
+// とき。次に押したときに、同じ request_id で、できた交渉は作り直さずに、続きから進める。終わったら消す。ページを開き直すと、消えて、最初からやり直す)。
 const attack = { nids: [], selected: null, watchers: [], wall3Timer: null, offerSeq: new Map(), scripted: new Set(), bisectionRequestId: null };
 
 const DAILY_LIMIT_TEXT = "本日の上限に達しました。明日以降にもう一度お試しください。";
@@ -169,6 +169,13 @@ async function replaceInstruction() {
 
 // ---- 二分探索の実演(FR-45。台本の攻撃者。AI は呼ばない) ----
 
+// 続きから進められる失敗(503: 起動時の待ち・カウンタに書けない、504: 時間切れ)。サーバーは、同じ request_id なら、できた交渉を作り直さずに続きから進める(L20-3)。
+const RESUME_NOTE = "もう一度押すと、この続きから進みます(できた交渉は、作り直しません)。";
+
+function isResumable(error) {
+  return error instanceof ApiError && (error.status === 503 || error.status === 504);
+}
+
 /** 二分探索の実演の結果を、1 つの文にする。stopped_reason が rate_limited なら、回数の上限に達して、途中で止めたこと。 */
 function describeBisection(result) {
   const count = result.negotiation_ids.length;
@@ -188,7 +195,13 @@ async function runBisection() {
       showMessage(el("bisection-message"), null);
       replace(el("bisection-status"), waiting("台本の攻撃者が、交渉を作って、年収を二分探索しています(交渉 3 件まで。数秒〜数十秒かかります)…"));
       const requestId = attack.bisectionRequestId ?? newRequestId();
-      const result = await call("POST /v1/demo/attack/bisection", { body: { request_id: requestId } });
+      let result;
+      try {
+        result = await call("POST /v1/demo/attack/bisection", { body: { request_id: requestId } });
+      } catch (error) {
+        if (isResumable(error)) attack.bisectionRequestId = requestId; // 失敗しても request_id を保ち、次に押したとき、同じ実演を続きから進める
+        throw error;
+      }
       attack.bisectionRequestId = result.stopped_reason ? requestId : null;
       clear(el("bisection-status"));
       for (const nid of result.negotiation_ids) {
@@ -203,6 +216,7 @@ async function runBisection() {
     (error) => {
       clear(el("bisection-status"));
       showError(el("bisection-message"), error, { daily_limit_reached: DAILY_LIMIT_TEXT });
+      if (isResumable(error)) el("bisection-message").appendChild(h("div", { class: "small muted" }, RESUME_NOTE));
     },
   );
 }

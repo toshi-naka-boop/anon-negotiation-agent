@@ -35,6 +35,9 @@ LLM を呼ぶ 3 つ(/salary/answers・/comment・/reason)には、入口の枠 i
 
 面談を始める /begin には、入口の枠 interview_begin(web.limits。クライアント IP ごと。台帳 C-66)を掛ける。面談の状態はサーバのメモリに持ち、同時に持てる数に上限があるので、
 匿名のクライアント 1 つが /begin を繰り返して、上限を埋めてしまわないように。LLM は呼ばない。本人のセッションの確認のあとに数える(続きを読み込む /begin も数える)。
+これは回数の窓なので、別に、送信元(web.client_ip.client_key。IPv6 は /64 単位)ごとの同時数の上限を、状態を新しく作るときに掛ける(台帳 C-69・X-87。暫定 3 件)。超えたら 429
+(detail は {"code": "rate_limited", "entrance": "interview_concurrent", "scope": "client", "limit": 3, "window_seconds": null, ...}、Retry-After つき)。続きを読み込むだけの
+/begin・自分の面談のやり直し(restart)は、数が増えないので断らない。面談の状態の寿命は、書き込み(POST)でだけ延び、読み取り(GET)では延びない。作ってから 3 時間で消える(web.interview.state)。
 
 エラーの detail は理由の名前(入力の値は含めない)。検証エラー(422)は、場所・理由の種類だけを返す(web.app の既定と同じ)。
 """
@@ -45,6 +48,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ValidationError
 
+from web.client_ip import client_key
 from web.interview.bodies import (
     AxesBody,
     BeginBody,
@@ -122,8 +126,10 @@ def build_interview_router(services: "WebServices") -> APIRouter:
         return services.interview  # テストが差し替えられるよう、リクエストごとに取り出す
 
     @router.post("/begin")
-    async def begin(pid: str, body: BeginBody | None = None, _limit: None = Depends(begin_entrance)) -> dict[str, Any]:
-        return service().begin(pid, body.restart if body is not None else False)
+    async def begin(
+        pid: str, request: Request, body: BeginBody | None = None, _limit: None = Depends(begin_entrance)
+    ) -> dict[str, Any]:
+        return service().begin(pid, body.restart if body is not None else False, client_key(request))
 
     @router.get("/state")
     async def state(pid: str) -> dict[str, Any]:

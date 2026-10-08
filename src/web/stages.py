@@ -35,7 +35,8 @@ POST と独自ヘッダに限る。SameSite=Lax のクッキーは外部サイ�
 - (b) 見回り(web.sweeper。settled_at が空の段で、金庫の進行中の一覧にないものを拾う。フックが失敗しても、判定の直後に web が落ちても、ここで決着する)。
 - (c) 本人の「会う」「承認」(POST)。
 決着が済んだことは settled_at に残す(判定が出て、決着処理を済ませた時刻。見回りが拾う対象を絞る。作成のときは null で書く: 見回りは
-settled_at が null の文書を引く)。
+settled_at が null の文書を引く)。GET の応答(StageView)には、決着したかの印 settled(settled_at があるか)も出す。判定の直後の GET は段 0 のまま
+なので、画面は、judged で settled でない間だけ、間隔を伸ばしながら読み直す(台帳 C-67)。
 
 ログには、競合で書けなかったこと(StageBusy)だけを書く(依頼者 ID・交渉 ID・職務要約は書かない)。
 """
@@ -609,12 +610,15 @@ class StageView(BaseModel):
 
     judged が False の間は、見込みを出さない(FR-26: 見込みは終了時に 1 回だけ。result は null)。agreed が False で judged は、見込み「なし」
     (段 0 の表示だけで終わる)。employer_fictional・employer_auto_response は、画面が「架空の求人(自動応答)」と明示するための印。
+    settled は、決着処理(判定の検出・架空人物の自動応答・台帳)を済ませたか(stages/{nid} の settled_at。台帳 C-67)。GET は読み出しだけなので、
+    判定の直後で決着処理の前は、judged で settled でない。画面は、その間だけ、間隔を伸ばしながら読み直す。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     nid: str
     judged: bool
+    settled: bool
     agreed: bool
     stage: int
     result: NegotiationResult | None
@@ -837,6 +841,7 @@ class StageFlow:
         """候補者から見た段の状態。純粋な読み出し(台帳 X-84): 段の状態がなければ作る(冪等な作成。台帳 L9-4)だけで、判定の検出・自動応答・台帳は書かない。
 
         判定の直後で決着処理(settle)がまだの間は、段 0 のまま(求人側の自動応答も、まだ押していない)。決着処理は、レフェリーの完了のフックと見回りが行う。
+        その間は、応答の settled が false(決着処理を済ませると true。台帳 C-67): 画面が、判定の後 settled でない間だけ、読み直すための印。
         """
         return self._build_view(facts, await self._load(facts))
 
@@ -907,6 +912,7 @@ class StageFlow:
         return StageView(
             nid=facts.nid,
             judged=facts.judged,
+            settled=state.settled,
             agreed=agreed,
             stage=stage,
             result=result,

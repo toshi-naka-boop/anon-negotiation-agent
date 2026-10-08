@@ -30,6 +30,8 @@ class InterviewConfig:
     thinking_level: str
     state_idle_ttl_seconds: float
     max_active_interviews: int
+    max_lifetime_seconds: float
+    max_concurrent_per_client: int
     choice_pairs: int
     min_answered_pairs: int
     max_statements_per_extraction: int
@@ -49,6 +51,11 @@ class InterviewConfig:
             raise ValueError(f"[web.interview] thinking_level must be one of {THINKING_LEVELS}")
         if self.state_idle_ttl_seconds <= 0 or self.max_active_interviews < 1:
             raise ValueError("[web.interview] state_idle_ttl_seconds and max_active_interviews must be positive")
+        # 台帳 C-69・X-87: 作ってからの絶対の寿命は、アイドルの寿命より短くできない(短いと、アイドルの寿命が意味を失う)。送信元ごとの同時数は 1 以上
+        if self.max_lifetime_seconds < self.state_idle_ttl_seconds:
+            raise ValueError("[web.interview] max_lifetime_seconds must be at least state_idle_ttl_seconds")
+        if self.max_concurrent_per_client < 1:
+            raise ValueError("[web.interview] max_concurrent_per_client must be positive")
         if not (MIN_CHOICE_PAIRS <= self.min_answered_pairs <= self.choice_pairs <= MAX_CHOICE_PAIRS):
             raise ValueError(
                 f"[web.interview] need {MIN_CHOICE_PAIRS} <= min_answered_pairs <= choice_pairs <= {MAX_CHOICE_PAIRS} (§5 の 4)"
@@ -79,6 +86,8 @@ def load_interview_config(path: Path = _CONFIG_PATH) -> InterviewConfig:
             thinking_level=str(section["thinking_level"]),
             state_idle_ttl_seconds=float(section["state_idle_ttl_seconds"]),
             max_active_interviews=int(section["max_active_interviews"]),
+            max_lifetime_seconds=float(section["max_lifetime_seconds"]),
+            max_concurrent_per_client=int(section["max_concurrent_per_client"]),
             choice_pairs=int(section["choice_pairs"]),
             min_answered_pairs=int(section["min_answered_pairs"]),
             max_statements_per_extraction=int(section["max_statements_per_extraction"]),

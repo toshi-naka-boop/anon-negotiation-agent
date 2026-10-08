@@ -95,11 +95,12 @@ gcloud run services describe agents --region="$REGION" --format="value(status.ur
 ## 5. web をデプロイする（公開。Direct VPC egress で金庫へ）
 
 ```bash
-gcloud run deploy web --region="$REGION" --image="${REPO}/app:$(git rev-parse --short HEAD)" --service-account="$WEB_SA" --no-allow-unauthenticated --min-instances=1 --max-instances=1 --no-cpu-throttling --concurrency=200 --memory=1Gi --cpu=1 --timeout=300 --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --set-secrets="SESSION_SIGNING_KEY=session-signing-key:latest" --set-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_LOCATION=global,ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false,GITHUB_REPO_URL=<GitHub のリポジトリの URL>"
+gcloud run deploy web --region="$REGION" --image="${REPO}/app:$(git rev-parse --short HEAD)" --service-account="$WEB_SA" --no-allow-unauthenticated --min-instances=1 --max-instances=1 --no-cpu-throttling --concurrency=200 --memory=1Gi --cpu=1 --timeout=300 --network=vault-vpc --subnet=run-egress-subnet --vpc-egress=private-ranges-only --set-secrets="SESSION_SIGNING_KEY=session-signing-key:latest" --set-env-vars="VAULT_TEE=true,VAULT_BASE_URL=https://10.10.0.10:8443,VAULT_SERVICE_ACCOUNT=${VAULT_SA},VAULT_EXPECTED_ZONE=${ZONE},VAULT_EXPECTED_INSTANCE=vault-tee,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_LOCATION=global,ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false,GITHUB_REPO_URL=<GitHub のリポジトリの URL>"
 ```
 
 - 公開（`allUsers` への `roles/run.invoker`）は権限の付与で、Claude の自動実行では止まる。デプロイは `--no-allow-unauthenticated` で行い、確かめてからユーザーが公開する（`gcloud run services add-iam-policy-binding web --region=asia-northeast1 --member=allUsers --role=roles/run.invoker`）。
 - イメージの CMD（`uvicorn web.app:create_app_from_env --factory --workers 1`）をそのまま使う。
+- `VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE` は、web が attestation のゾーンとインスタンス名も照合するための値（v23 で必須。`deploy_check` の `web-vault-env` が金庫の VM と一致を確かめる。L20-8）。
 - `GITHUB_REPO_URL` は、画面の「コミットへのリンク」の土台（点 6）。公開リポジトリの URL を入れる。
 
 死活確認。
@@ -190,3 +191,8 @@ uv run python scripts/verify_attestation.py --web "$WEB_URL"
 - 残り: 点 6 の画面（設計 §9 の 6「スパイクでは JSON まで、画面は後」。未実装）、`GITHUB_REPO_URL`（GitHub のリポジトリが未作成）。
 - 点 6 の画面の反映（2026-10-05、ユーザーの了承「今だすで進めて」）: イメージ `app:cc3818f` をビルドし、`gcloud run services update web --image=…` で `web-00002-fqc` に入れ替え（ほかの設定は保持）。公開 URL の入口に「金庫の確認(TEE)」が出て、検証済み・本番条件の claims・コミット（リンクなし＝`GITHUB_REPO_URL` 未設定）・本番の URL 入りの検証コマンドを表示。JWT は出ない。deploy_check の web 関係 11 項目は OK 11・NG 0。
 - 次の反映: GitHub のリポジトリができたら `gcloud run services update web --region=asia-northeast1 --update-env-vars=GITHUB_REPO_URL=https://github.com/<owner>/<repo>`（イメージの作り直しは不要）。
+- GitHub: `toshi-naka-boop/anon-negotiation-agent`。PR #1 をユーザーがマージコミットでマージ（abada3c。ca5791a は main から辿れる）。
+- `GITHUB_REPO_URL` を反映（ユーザーの指示「反映して」。`web-00003-j6l`）。`/api/tee/attestation` の `release.url` が `…/commit/ca5791a…` になった。反映の時点でリポジトリはまだ非公開（ログインなしで 404）。公開に切り替わればリンクがそのまま使える。
+- リポジトリを公開（ユーザー、2026-10-05）。ログインなしでリポジトリと ca5791a のコミットのページが 200。web の画面のコミットのリンクが誰にでも開けるようになった。
+- v23・v24 の反映（2026-10-08、ユーザーの了承「反映する」）: イメージ `app:4781469` を `gcloud run services update web --image` で `web-00004-fcm` に（ほかの設定は保持）。死活 200、attestation verified、70 KB の送信は 413、HEAD は 405。公開 URL でデモのケース 1 をライブ実行（17 手で合意「見込み 高」、読み取りの枠には当たらず、段階開示は操作なしで段 0→2）。deploy_check 全項目: OK 26・NG 1（healthz-agents。なりすましの権限は外したまま。agents への到達はデモで確認）・SKIP 8（tee-i は組織なしで SKIP）。金庫の VM は 10/5 から連続稼働。
+- v25 の反映（2026-10-08、ユーザーの了承「進めてください」）: イメージ `app:58d888e`（コードは 24f6e16）をビルドし、web を `web-00005-m9k` に入れ替え（ほかの設定は保持）。`gcloud run services update` は auto mode の安全確認（Production Deploy）に止められたので、ユーザーが実行（ビルドは通った）。死活 200、attestation verified、70 KB の送信は 413、HEAD は 405・`allow: GET, POST`（L22-1）。公開 URL でデモのケース 1 をライブ実行（合意「見込み 高」、段階開示は操作なしで段 0→2）。`/` を続けて開くと、ちょうど 121 回目で 429・`text/html; charset=utf-8`・`Retry-After`・案内の HTML（L22-2）。deploy_check 全項目: OK 26・NG 1（healthz-agents。なりすましの権限は外したまま。agents への到達はデモで確認）・SKIP 8。

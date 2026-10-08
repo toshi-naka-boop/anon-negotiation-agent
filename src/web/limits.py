@@ -1,4 +1,4 @@
-"""入口ごとのレート制限(design.md §8.2「レート制限」。台帳 L4-2・C-3・X-10・X-30・C-65・C-66・L19-7・L19-12。調査事項 R-7)。
+"""入口ごとのレート制限(design.md §8.2「レート制限」。台帳 L4-2・C-3・X-10・X-30・C-65・C-66・C-68・C-71・L19-7・L19-12。調査事項 R-7)。
 
 LLM を呼ぶか交渉を作るか、1 回で金庫を何件も読むか、面談の状態をメモリに作るすべての入口に、クライアントごと・入口ごとの回数の上限を掛ける。
 入口は ENTRANCES の 9 つで、全体の枠(全入口の合計の上限)に数えるかどうかで 2 つに分かれる。
@@ -16,8 +16,8 @@ LLM を呼ぶか交渉を作るか、1 回で金庫を何件も読むか、面�
 - 1 回の要求で、(入口, クライアント, 窓)の文書と、(全体, 窓)の文書を、1 つのトランザクションで読み、どちらも上限に達していなければ
   両方を 1 進める。どちらかが上限に達していれば、何も進めずに断る(拒否した要求は、どの枠にも数えない。web.llm_budget と同じ)。
   断る理由は、クライアントの枠(scope=client)を先に見て、次に全体(scope=overall)。クライアントごとの枠だけの入口は、(入口, クライアント, 窓)の文書だけを読み・進める。
-- クライアントは、web.client_ip.client_ip(Cloud Run のフロントエンドが X-Forwarded-For に追記した、末尾の IP。先頭側の、利用者が
-  書ける値は使わない。台帳 C-3)。文書の ID には IP をそのまま入れず、鍵つきの HMAC-SHA256 の先頭 32 桁にする(文書 ID に使えない文字が入っても
+- クライアントは、web.client_ip.client_key(Cloud Run のフロントエンドが X-Forwarded-For に追記した、末尾の IP。先頭側の、利用者が
+  書ける値は使わない。台帳 C-3。IPv6 は /64 の接頭辞にまとめる。台帳 C-71)。文書の ID には IP をそのまま入れず、鍵つきの HMAC-SHA256 の先頭 32 桁にする(文書 ID に使えない文字が入っても
   壊れない)。鍵がない SHA-256 だと、IPv4 の全数(約 43 億)を試して IP を戻せて、`(default)` を読める者に、直近の窓で入口を使った IP の一覧が渡る
   (台帳 L19-12)。鍵は、セッションの署名の鍵(SESSION_SIGNING_KEY。web.session)から、用途を表す固定のラベルで派生させる(derive_limiter_key)。
   鍵を替えると文書の ID が変わる(その窓の数え直しになる)。文書には TTL 用の ttl_at を持たせる(Firestore の TTL ポリシーの設定はデプロイの段)。
@@ -36,6 +36,20 @@ SSE の同時本数(SseConnectionLimiter。台帳 C-65): SSE(/v1/stream/。web.u
 時間窓の回数ではなく、メモリの中の同時本数なので、Firestore には触れず、全体の枠にも数えない(ENTRANCES には入れない)。接続が終われば、
 必ず戻す(SseSlot.release。web.ui_api の応答が、終わり方によらず呼ぶ)。
 
+読み取りの枠(AnonymousReadLimiter・AnonymousReadLimitMiddleware。台帳 C-68・C-72・C-73・C-74。名前は、最初にログインなしの GET だけに掛けたときのまま): 次のどちらかに当たる要求に、
+クライアントごとの 1 分あたりの回数の枠([web.limits] の anonymous_read_per_minute。暫定 120 回)を掛ける(両方に当たっても 1 回)。
+- (a) 金庫か Firestore を読む GET(セッションの有無によらない)。1 回の GET が金庫を 1〜2 回・Firestore を数十件読むので、1 クライアントが、金庫への接続(web の全員で共有)と
+  読み出しの課金を増やせないように。匿名のセッションは GET /start で誰でも作れるので、セッションのある GET も同じ増幅に使える(線引きを、セッションの有無でしない)。
+  SSE の開始(再接続を含む)も GET なので、最初の読み出しより前に、同じ枠で 1 回と数える(終わった交渉の配信はすぐ閉じて席を返すので、同時本数の上限だけでは、開き直しの繰り返しを止められない)。
+  数えない GET は、web.app の READ_LIMIT_EXEMPT_GET_ROUTES に名前を挙げた経路だけ(静的ファイル・/health・面談の注記・ケースとリプレイの一覧・TEE の attestation〔自前の転送の間隔〕・
+  GET /start〔自前の枠 session_start〕)。表にない GET は、経路があってもなくても数える(経路の足し忘れで、枠から漏れない)。
+- (b) セッションのクッキー(web.session.SESSION_COOKIE_NAME)の値が空でない要求で、経路がセッションを見ない接頭辞(web.app の SESSION_FREE_PREFIXES。デモ〔攻撃も含む〕・TEE・/health・静的ファイル・SSE)で
+  始まらないもの(v25。台帳 C-74)。メソッドは問わない。有効なクッキーつきの要求は、どの口でも先にセッションの確認(Firestore の利用記録の読み出し 1 回)を行うので、入口の枠を持たない POST・
+  存在しない経路への POST・(a)で数えない GET(GET /start・面談の注記)でも、確認の読み出しを枠の外で繰り返せないように、確認より前に数える。クッキーの中身(署名・期限)は確かめず、持っているかどうかだけで数える。
+web は 1 インスタンスなので、メモリの中だけで数える(Firestore に書くと、読み取りのたびに書き込みの課金が増える)。全体の枠(rate_overall_limit)には数えず、Firestore には触れない。
+超えたら 429(入口は anonymous_read、Retry-After は窓の終わりまでの秒数。本文は同じ形)。ただし、画面のページ(web.app の PAGE_FILES の経路)への GET が当たったときは、JSON ではなく、
+待ってから開き直すよう書いた短い静的な HTML を、同じ 429 と Retry-After で返す(v25。台帳 L22-2)。
+
 Firestore(同期クライアント)の呼び出しは別スレッドで行う(web.llm_budget と同じ)。
 """
 
@@ -48,7 +62,7 @@ import math
 import random
 import time
 import tomllib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, get_args
@@ -56,11 +70,14 @@ from typing import Literal, get_args
 from fastapi import HTTPException, Request
 from google.api_core.exceptions import Aborted
 from google.cloud import firestore
+from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.routing import compile_path
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from vault.clock import Clock
 
-from web.client_ip import client_ip
-from web.session import validate_session_key
+from web.client_ip import client_key
+from web.session import SESSION_COOKIE_NAME, validate_session_key
 
 _log = logging.getLogger(__name__)
 
@@ -185,6 +202,32 @@ def load_sse_limit_config(path: Path = _CONFIG_PATH) -> SseLimitConfig:
 DEFAULT_SSE_LIMIT_CONFIG: SseLimitConfig = load_sse_limit_config()
 
 
+@dataclass(frozen=True)
+class AnonymousReadLimitConfig:
+    """読み取りの枠の上限([web.limits] の anonymous_read_per_minute。台帳 C-68・C-72)。
+
+    per_minute は、クライアント 1 つあたりの、1 分(ANONYMOUS_READ_WINDOW_SECONDS)あたりの回数。
+    """
+
+    per_minute: int
+
+    def __post_init__(self) -> None:
+        _positive_int(self.per_minute, "anonymous_read_per_minute")
+
+
+def load_anonymous_read_limit_config(path: Path = _CONFIG_PATH) -> AnonymousReadLimitConfig:
+    """config/params.toml から読み取りの枠の上限([web.limits] の anonymous_read_per_minute)を読み込む。"""
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    try:
+        return AnonymousReadLimitConfig(per_minute=raw["web"]["limits"]["anonymous_read_per_minute"])
+    except KeyError as exc:
+        raise ValueError(f"{path} is missing a required [web.limits] key: {exc}") from exc
+
+
+DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG: AnonymousReadLimitConfig = load_anonymous_read_limit_config()
+
+
 # 文書 ID の HMAC の鍵を、セッションの署名の鍵から派生させるときの、用途を表す固定のラベル(秘密ではない)。
 _LIMITER_KEY_LABEL = b"rate-limits"
 
@@ -199,12 +242,12 @@ def derive_limiter_key(session_signing_key: str) -> bytes:
     return hmac.new(session_signing_key.encode("utf-8"), _LIMITER_KEY_LABEL, hashlib.sha256).digest()
 
 
-def _rate_limited(
+def rate_limited_error(
     entrance: str, scope: LimitScope, *, limit: int, window_seconds: int | None, retry_after_seconds: int
 ) -> HTTPException:
     """429 の応答(本文は {"detail": {"code": "rate_limited", "entrance", "scope", "limit", "window_seconds", "retry_after_seconds"}}、Retry-After つき)。
 
-    window_seconds は、時間窓の長さ。時間窓のない上限(SSE の同時本数)は None。
+    window_seconds は、時間窓の長さ。時間窓のない上限(SSE の同時本数・面談の同時数)は None。面談の同時数(web.interview.service)も、この形で断る。
     """
     return HTTPException(
         status_code=429,
@@ -350,15 +393,15 @@ class RateLimiter:
     def guard(self, entrance: Entrance) -> Callable[[Request], Awaitable[None]]:
         """FastAPI の依存(`Depends(limiter.guard("demo_run"))`)。要求を数え、超えていれば 429、数えられなければ 503 にする。
 
-        依存は、本文を読む前に動く(本文を宣言しないルートなら、本文を読む前に断れる)。
+        依存は、本文を読む前に動く(本文を宣言しないルートなら、本文を読む前に断れる)。クライアントは client_key(IPv6 は /64 にまとめる。台帳 C-71)。
         """
 
         async def dependency(request: Request) -> None:
             try:
-                await self.admit(entrance, client_ip(request))
+                await self.admit(entrance, client_key(request))
             except RateLimitExceeded as exc:
                 _log.info("rate limited entrance=%s scope=%s", exc.entrance, exc.scope)
-                raise _rate_limited(
+                raise rate_limited_error(
                     exc.entrance,
                     exc.scope,
                     limit=exc.limit,
@@ -377,6 +420,9 @@ class RateLimiter:
 
 # 429 の本文の入口の名前。ENTRANCES には入れない(時間窓の回数ではなく、同時本数。Firestore には数えない)。
 SSE_ENTRANCE = "sse"
+# 面談の同時数(送信元ごとに同時に持てる面談の状態の数。web.interview.state・service。台帳 C-69・X-87)の 429 の入口の名前。これも時間窓ではなく、メモリの中の同時数
+# (window_seconds は null)。上限は [web.interview] max_concurrent_per_client。
+INTERVIEW_CONCURRENT_ENTRANCE = "interview_concurrent"
 # 429 の Retry-After(秒)。画面が、SSE をあきらめて通常の GET の再取得に切り替えたときの間隔と同じ(web.ui_api の StreamConfig の周期)。
 SSE_RETRY_AFTER_SECONDS = 2
 
@@ -435,12 +481,12 @@ class SseConnectionLimiter:
         return SseSlot(self, client)
 
     def acquire_for_request(self, request: Request) -> SseSlot:
-        """request を送ってきたクライアント(web.client_ip)の席を取る。上限なら 429(本文は _rate_limited の形。入口は sse、Retry-After は 2 秒)。"""
+        """request を送ってきたクライアント(web.client_ip.client_key。IPv6 は /64 にまとめる。台帳 C-71)の席を取る。上限なら 429(本文は rate_limited_error の形。入口は sse、Retry-After は 2 秒)。"""
         try:
-            return self.acquire(client_ip(request))
+            return self.acquire(client_key(request))
         except SseLimitReached as exc:
             _log.info("sse connection limit reached scope=%s", exc.scope)
-            raise _rate_limited(
+            raise rate_limited_error(
                 SSE_ENTRANCE, exc.scope, limit=exc.limit, window_seconds=None, retry_after_seconds=SSE_RETRY_AFTER_SECONDS
             ) from None
 
@@ -451,3 +497,134 @@ class SseConnectionLimiter:
             self._open_by_client[client] = remaining
         else:
             self._open_by_client.pop(client, None)
+
+
+# ----------------------------------------------------------------------
+# 読み取りの枠(台帳 C-68・C-72・C-73・C-74)
+# ----------------------------------------------------------------------
+
+# 429 の本文の入口の名前。ENTRANCES には入れない(Firestore の時間窓カウンタではなく、メモリの中の窓。全体の枠にも数えない)。
+ANONYMOUS_READ_ENTRANCE = "anonymous_read"
+# 窓の長さ(秒)。設計は「1 分」。上限の回数だけを設定ファイルに置く。
+ANONYMOUS_READ_WINDOW_SECONDS = 60
+# 画面のページ(web.app の PAGE_FILES の経路)への GET が読み取りの枠に当たったときの本文(台帳 L22-2)。静的な固定の HTML: スクリプトも外部の読み込みも入れず、
+# 動的な値(秒数・経路・IP)も入れない(待つ秒数は Retry-After ヘッダが運ぶ)。ブラウザで開いた人に、JSON の断片ではなく、待ってから開き直すことを伝える。
+RATE_LIMITED_PAGE_HTML = (
+    '<!DOCTYPE html>\n<html lang="ja">\n<head>\n<meta charset="utf-8">\n'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+    "<title>しばらくお待ちください</title>\n</head>\n<body>\n"
+    "<p>短い間に読み込みが多かったため、いまはこのページを開けません。1 分ほど待ってから、このページを開き直してください。</p>\n"
+    "</body>\n</html>\n"
+)
+
+
+class AnonymousReadLimitReached(Exception):
+    """読み取りの枠に達している。limit は、その上限の回数(窓あたり)。retry_after_seconds は、窓の終わりまでの秒数(1 以上)。"""
+
+    def __init__(self, *, limit: int, retry_after_seconds: int) -> None:
+        super().__init__("anonymous read limit reached")
+        self.limit = limit
+        self.retry_after_seconds = retry_after_seconds
+
+
+class AnonymousReadLimiter:
+    """金庫か Firestore を読む GET(SSE の開始を含む)と、セッションのクッキーを持つ要求の、クライアントごとの回数の枠(固定の 1 分の窓。メモリの中だけ。台帳 C-68・C-72・C-74)。
+
+    web は 1 インスタンスなので、メモリで足りる(Firestore に書くと、読み取りのたびに書き込みの課金が増える)。窓は UNIX 時刻を窓の長さで割った商が同じ間
+    (境目の前後で短い間に最大 2 倍通ることは、固定の窓の性質として受け入れる。Firestore の時間窓カウンタと同じ)。断った要求は数えない。
+    窓が変わったら、前の窓の数を全部捨てる(覚えているのは、いまの窓で読んだクライアントだけ。クライアントごとの記録が、増え続けない)。
+    数えるのに await をはさまない(1 つのイベントループの中で、途中で割り込まれない)。時刻は注入できる時計から取る。
+    """
+
+    def __init__(self, clock: Clock, config: AnonymousReadLimitConfig = DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG) -> None:
+        self._clock = clock
+        self._config = config
+        self._window: int | None = None
+        self._counts: dict[str, int] = {}
+
+    def __len__(self) -> int:
+        """いまの窓で数えているクライアントの数。"""
+        return len(self._counts)
+
+    def admit(self, client: str) -> None:
+        """client の読み取りを 1 回数える。上限に達していれば AnonymousReadLimitReached(何も数えない)。"""
+        now_seconds = self._clock.now().timestamp()
+        window = int(now_seconds) // ANONYMOUS_READ_WINDOW_SECONDS
+        if window != self._window:
+            self._window, self._counts = window, {}
+        count = self._counts.get(client, 0)
+        if count >= self._config.per_minute:
+            window_end = (window + 1) * ANONYMOUS_READ_WINDOW_SECONDS
+            raise AnonymousReadLimitReached(
+                limit=self._config.per_minute, retry_after_seconds=max(1, math.ceil(window_end - now_seconds))
+            )
+        self._counts[client] = count + 1
+
+
+class AnonymousReadLimitMiddleware:
+    """読み取りの枠(クライアントごと。AnonymousReadLimiter)を掛ける、純粋な ASGI ミドルウェア(台帳 C-68・C-72・C-73・C-74)。
+
+    次のどちらかに当たる要求を、1 要求につき 1 回だけ数える(counts_request。両方に当たっても 1 回)。
+    - GET で、exempt_routes(数えない GET の経路の型。"/v1/demo/replays/{case}" や "/static/{path:path}" のような、Starlette の経路の書き方)のどれにも当たらないもの
+      (経路があるかどうかによらない。足し忘れた経路は、数える側に入る)。SSE の開始・再接続も GET なので、ここで数える(ルートが動く前なので、最初の読み出しより前になる)。
+    - セッションのクッキー(SESSION_COOKIE_NAME)の値が空でない要求で、経路が session_free_prefixes(セッションを見ない経路の接頭辞。PrincipalSessionMiddleware に渡すものと同じ)で
+      始まらないもの(v25。台帳 C-74)。メソッドは問わない(入口の枠を持たない POST・存在しない経路への POST・数えない GET・GET と POST 以外も)。セッションのミドルウェアは、有効なクッキーつきの
+      要求で、経路を調べる前に利用記録を読む(touch)ので、その前に数える。クッキーの中身(署名・期限)は確かめず、持っているかどうかだけで見る。
+    クライアントは web.client_ip.client_key(IPv6 は /64 にまとめる。台帳 C-71)。超えたら、ルートにもセッションのミドルウェアにも渡さずに 429(本文は {"detail": {"code": "rate_limited",
+    "entrance": "anonymous_read", "scope": "client", "limit", "window_seconds": 60, "retry_after_seconds"}}、Retry-After つき)。ただし、page_routes(画面のページの経路。完全一致)への GET は、
+    JSON ではなく、短い静的な HTML(RATE_LIMITED_PAGE_HTML)を同じ 429 と Retry-After で返す(v25。台帳 L22-2)。数えない要求は、そのまま通す。
+    経路の型の突き合わせは、Starlette のルーターと同じ正規表現(compile_path)を、ルーターと同じ復号済みの経路(scope["path"])に当てる(エンコードで、見かけを変えて抜けることはできない)。
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        limiter: AnonymousReadLimiter,
+        exempt_routes: Iterable[str],
+        session_free_prefixes: tuple[str, ...] = (),
+        page_routes: Iterable[str] = (),
+    ) -> None:
+        self.app = app
+        self._limiter = limiter
+        self._exempt = tuple(compile_path(route)[0] for route in exempt_routes)
+        self._session_free_prefixes = session_free_prefixes
+        self._pages = frozenset(page_routes)
+
+    def counts(self, path: str) -> bool:
+        """path への GET を、GET の規則(a)で数えるか(数えない経路の型のどれにも当たらなければ、数える)。"""
+        return not any(pattern.match(path) for pattern in self._exempt)
+
+    def counts_request(self, method: str, path: str, has_session_cookie: bool) -> bool:
+        """method・path の要求を数えるか(v25。台帳 C-74)。次のどちらかなら数える(両方でも、数えるのは 1 回)。
+
+        - GET で、counts(path) が真(GET の規則。クッキーの有無によらない)。
+        - has_session_cookie(セッションのクッキーの値が空でない)で、path がセッションを見ない接頭辞で始まらない(メソッドは問わない)。
+        """
+        if method == "GET" and self.counts(path):
+            return True
+        return has_session_cookie and not path.startswith(self._session_free_prefixes)
+
+    def _refusal(self, scope: Scope, reached: AnonymousReadLimitReached) -> Response:
+        """429 の応答。画面のページ(page_routes)への GET は静的な HTML、それ以外は JSON(どちらも Retry-After つき)。"""
+        refused = rate_limited_error(
+            ANONYMOUS_READ_ENTRANCE,
+            "client",
+            limit=reached.limit,
+            window_seconds=ANONYMOUS_READ_WINDOW_SECONDS,
+            retry_after_seconds=reached.retry_after_seconds,
+        )
+        if scope["method"] == "GET" and scope["path"] in self._pages:
+            return HTMLResponse(RATE_LIMITED_PAGE_HTML, status_code=refused.status_code, headers=refused.headers)
+        return JSONResponse({"detail": refused.detail}, status_code=refused.status_code, headers=refused.headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            request = Request(scope)
+            if self.counts_request(scope["method"], scope["path"], bool(request.cookies.get(SESSION_COOKIE_NAME))):
+                try:
+                    self._limiter.admit(client_key(request))
+                except AnonymousReadLimitReached as reached:
+                    await self._refusal(scope, reached)(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)

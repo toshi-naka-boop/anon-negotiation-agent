@@ -12,7 +12,20 @@ Firestore エミュレータ(`(default)` の代わり)と、注入した時計�
 - 文書 ID の IP のハッシュは、鍵つきの HMAC-SHA256(台帳 L19-12)。鍵は、署名の鍵から固定のラベルで派生させる。鍵が違えば文書 ID も違い、鍵なしの SHA-256 とは一致しない。
 - SSE の同時本数の上限(台帳 C-65): 全体とクライアントごと。メモリの中だけで数え、戻すのは何度呼んでも 1 回(web.limits の SseConnectionLimiter)。
   HTTP の SSE の口で効くこと・接続が終わる、どの終わり方でも席が戻ることは tests/test_ui_static.py で確かめる。
-HTTP の入口(攻撃モード・デモ・ライブ)で枠が効くことは tests/test_attack_mode.py、面談の LLM を呼ぶ API は tests/test_interview_api.py、
+- クライアントの枠のキー(台帳 C-71): IPv4 はアドレス単位・IPv6 は /64 単位(同じ /64 の中のアドレスは同じ枠。IPv4 射影・unknown・書き方の違いも)。
+- 読み取りの枠(台帳 C-68・C-72・C-73。v24): 金庫か Firestore を読む GET(セッションの有無によらない。SSE の開始・再接続を含む)に、送信元ごとの 1 分 120 回
+  (メモリ。全体の枠・Firestore に数えない)。121 回目は 429(Retry-After つき。セッションの確認にも金庫にも届く前)・別の送信元は影響されない。数えない GET は、
+  静的ファイル・/health・面談の注記・ケースとリプレイの一覧・attestation・GET /start だけ(クッキーを持たない GET のとき)。本番の app(TEE ありとなし)の GET の経路の全体を、
+  「数える」「数えない」に分類させる(分類のない GET があれば落ちる)。画面の 2 秒ごとの再取得は枠に収まる。
+- 読み取りの枠(台帳 C-74。v25): セッションのクッキーを持つ要求は、メソッドと経路によらず(セッションを見ない経路 web.app の SESSION_FREE_PREFIXES を除く)、セッションの確認
+  (principals_meta.touch)より前に、同じ枠で数える。入口の枠を持たない実在の経路への POST・存在しない経路への POST・数えない GET(/start・面談の注記)も。121 回目は確認の前に 429。
+  GET で数えたものは二重に数えない。クッキーの中身(署名)は確かめず、持っているかどうかで数える。セッションを見ない経路は、クッキーがあっても、クッキーの規則では数えない。
+  判定は AnonymousReadLimitMiddleware.counts_request の 1 つ(セッションのミドルウェアと同じ接頭辞の定数を渡す)。GET・POST 以外は 405 に Allow: GET, POST(L22-1)。
+  画面のページ(PAGE_FILES の経路)の GET が枠に当たると、JSON ではなく短い静的な HTML の 429(L22-2)。
+- 本文の全体の上限と読み取りの期限(台帳 X-85・X-90): 64 KB を超える本文は、ルートの前(セッションより外)で 413。宣言があれば読まずに、なければ読みながら数えて。
+  本文は、上限まで読み切ってから内側(セッションのミドルウェアとルート)に渡す(宣言なしの大きな本文は、セッションの確認より前に 413)。期限(10 秒)までに読み切れなければ 408。
+  本文のない要求は、待たずに通す。
+HTTP の入口(攻撃モード・デモ・ライブ)で枠が効くことは tests/test_attack_mode.py、面談の LLM を呼ぶ API と面談の同時数・寿命は tests/test_interview_api.py、
 推定区間メーターは tests/test_meter.py で確かめる。
 """
 
@@ -21,20 +34,41 @@ import dataclasses
 import datetime as dt
 import hashlib
 import hmac
+import inspect
+import ipaddress
+import json
+import random
 import re
+import time
 from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import Depends, FastAPI, HTTPException
+from attack_helpers import CREATE, create_body, make_env, post  # noqa: F401  (make_env はフィクスチャ)
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.routing import iter_route_contexts
 from starlette.requests import Request
+from starlette.routing import Mount
+from test_web_tee_api import entry  # noqa: F401  (本番の起動口 create_app_from_env を、スタブの接続で呼ぶフィクスチャ)
+from vault.clock import FixedClock
+from web.api import TEE_ATTESTATION_PATH, TeeAttestationConfig
+from web.app import PAGE_FILES, READ_LIMIT_EXEMPT_GET_ROUTES, SESSION_FREE_PREFIXES, create_app
+from web.body_limit import RequestBodyLimitMiddleware
+from web.client_ip import UNKNOWN_CLIENT, client_key, normalize_client
+from web.config import DEFAULT_WEB_CONFIG, load_web_config
 from web.limits import (
+    ANONYMOUS_READ_WINDOW_SECONDS,
     CLIENT_ONLY_ENTRANCES,
+    DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG,
     DEFAULT_RATE_LIMIT_CONFIG,
     DEFAULT_SSE_LIMIT_CONFIG,
     ENTRANCES,
     OVERALL_ENTRANCES,
     RATE_LIMITS_COLLECTION,
+    AnonymousReadLimitConfig,
+    AnonymousReadLimiter,
+    AnonymousReadLimitMiddleware,
+    AnonymousReadLimitReached,
     RateLimitConfig,
     RateLimiter,
     RateLimiterUnavailable,
@@ -43,10 +77,13 @@ from web.limits import (
     SseLimitConfig,
     SseLimitReached,
     derive_limiter_key,
+    load_anonymous_read_limit_config,
     load_rate_limit_config,
     load_sse_limit_config,
 )
-from web.session import WeakSessionKeyError
+from web.session import SESSION_COOKIE_NAME, WeakSessionKeyError
+from web.session_middleware import PrincipalSessionMiddleware
+from web_app_helpers import REQUESTED_WITH, GatedVault, build_web_env, dump_documents
 
 pytestmark = pytest.mark.anyio
 
@@ -674,3 +711,1514 @@ def test_a_refused_sse_connection_becomes_a_429_shaped_like_the_other_entrances(
             "retry_after_seconds": 2,
         }
     assert len(limiter) == 2  # 断った分は、数えていない
+
+
+# ----------------------------------------------------------------------
+# クライアントの枠のキー(台帳 C-71): IPv4 はアドレス単位・IPv6 は /64 単位
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("203.0.113.5", "203.0.113.5"),  # IPv4 は、アドレス単位
+        ("2001:db8:1:2::1", "2001:db8:1:2::/64"),  # IPv6 は、/64 の接頭辞
+        ("2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"),  # 同じ /64 の端
+        ("2001:DB8:1:2:0:0:0:1", "2001:db8:1:2::/64"),  # 書き方(大文字・省略なし)が違っても、同じキー
+        ("2001:db8:1:3::1", "2001:db8:1:3::/64"),  # 次の /64 は、別のキー
+        ("::ffff:203.0.113.5", "203.0.113.5"),  # IPv4 射影アドレスは IPv4 に直す(そのまま /64 にすると、IPv4 の利用者が全員 ::/64 の 1 つのキーになる)
+        ("::ffff:cb00:7105", "203.0.113.5"),
+        ("fe80::1%eth0", "fe80::/64"),  # ゾーン ID が付いていても壊れない
+        ("unknown", "unknown"),  # 分からない要求の共有キーは、そのまま
+        ("not an address", "not an address"),  # IP として読めない値(テストの任意の文字列)も、そのまま
+        ("", ""),
+    ],
+)
+def test_the_client_key_is_the_ipv4_address_or_the_ipv6_64_prefix(address, expected):
+    assert normalize_client(address) == expected
+
+
+def test_every_address_in_one_ipv6_64_prefix_has_the_same_key_and_another_prefix_has_another_key():
+    rng = random.Random(20260705)
+    network = ipaddress.IPv6Network("2001:db8:aa:bb::/64")
+    keys = {normalize_client(str(network[rng.randrange(network.num_addresses)])) for _ in range(300)}
+
+    assert keys == {"2001:db8:aa:bb::/64"}
+    neighbours = [ipaddress.IPv6Network(f"2001:db8:aa:{suffix}::/64") for suffix in ("ba", "bc", "cb")]
+    assert all(normalize_client(str(other[rng.randrange(1000)])) not in keys for other in neighbours)
+
+
+def test_the_client_key_is_made_from_the_last_forwarded_address_and_keeps_the_unknown_key():
+    # client_ip の取り方(X-Forwarded-For の最後の要素)は変えず、その値をキーにする(台帳 C-3・C-71)
+    assert client_key(_request("10.0.0.1, 2001:db8:1:2::77")) == "2001:db8:1:2::/64"
+    assert client_key(_request("2001:db8:9::1, 198.51.100.7")) == "198.51.100.7"  # 先頭側(利用者が書ける値)は、見ない
+    assert client_key(_request()) == UNKNOWN_CLIENT == "unknown"  # ヘッダも接続元もない
+    assert client_key(Request({"type": "http", "headers": [], "client": ("2001:db8:5:6::1", 1)})) == "2001:db8:5:6::/64"  # 接続元
+
+
+async def test_the_guard_counts_the_addresses_of_one_ipv6_64_prefix_as_one_client_and_keys_the_document_by_the_prefix(
+    default_db, clock
+):
+    # AC-13(v23): IPv6 は同じ /64 の中のアドレスが同じ枠になる。別の /64 は別の枠。文書の ID の元も /64 の接頭辞(アドレス単位では数えない)。
+    limiter = _limiter(default_db, clock, _config(per_client={**DEFAULT_RATE_LIMIT_CONFIG.per_client, "demo_run": 2}))
+    async with _http(_guarded_app(limiter)) as client:
+        for address in ("2001:db8:1:2::1", "2001:DB8:1:2:ffff::2"):  # 同じ /64 の 2 つのアドレスで、枠(2 回)を使い切る
+            assert (await client.get("/probe", headers={"X-Forwarded-For": address})).status_code == 200
+        same_prefix = await client.get("/probe", headers={"X-Forwarded-For": "2001:db8:1:2:1234:5678:9abc:def0"})
+        another_prefix = await client.get("/probe", headers={"X-Forwarded-For": "2001:db8:1:3::1"})
+        ipv4 = await client.get("/probe", headers={"X-Forwarded-For": "203.0.113.5"})
+
+    assert same_prefix.status_code == 429  # 3 つ目のアドレスも、同じ枠
+    assert (another_prefix.status_code, ipv4.status_code) == (200, 200)
+    window = int(clock.now().timestamp()) // WINDOW
+    expected = hmac.new(KEY, b"2001:db8:1:2::/64", hashlib.sha256).hexdigest()[:32]
+    assert f"demo_run.{window}.{expected}" in _documents(default_db)  # /64 の接頭辞の文字列から作った文書(2 回の通過がここに数えられている)
+    assert _documents(default_db)[f"demo_run.{window}.{expected}"]["count"] == 2
+
+
+def test_the_sse_limiter_counts_an_ipv6_64_prefix_as_one_client():
+    limiter = _sse(max_connections=10, max_connections_per_client=2)
+    held = [limiter.acquire_for_request(_request("2001:db8:1:2::1")), limiter.acquire_for_request(_request("2001:db8:1:2:aaaa::2"))]
+
+    with pytest.raises(HTTPException) as refused:
+        limiter.acquire_for_request(_request("2001:db8:1:2:bbbb::3"))  # 同じ /64 の 3 つ目のアドレス
+
+    assert refused.value.status_code == 429 and refused.value.detail["scope"] == "client"
+    held.append(limiter.acquire_for_request(_request("2001:db8:1:3::1")))  # 別の /64 は、別の枠
+    assert len(limiter) == 3
+    for slot in held:
+        slot.release()
+
+# ----------------------------------------------------------------------
+# 読み取りの枠(台帳 C-68・C-72・C-73): 金庫か Firestore を読む GET(セッションの有無によらない。SSE の開始を含む)に、送信元ごとの 1 分あたりの枠(メモリ)
+# ----------------------------------------------------------------------
+
+
+def test_the_anonymous_read_config_holds_the_design_limit():
+    # §8.2(v23・v24): 送信元ごとに 1 分 120 回(キーの名前は、最初に作ったときのまま)
+    assert DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG == AnonymousReadLimitConfig(per_minute=120)
+    assert ANONYMOUS_READ_WINDOW_SECONDS == 60
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda text: re.sub(r"^anonymous_read_per_minute = \d+", "anonymous_read_per_minute = 0", text, flags=re.MULTILINE),
+        lambda text: re.sub(r"^anonymous_read_per_minute = \d+", "anonymous_read_per_minute = 1.5", text, flags=re.MULTILINE),
+        lambda text: re.sub(r"^anonymous_read_per_minute = \d+\n", "", text, flags=re.MULTILINE),  # 足りない項目
+    ],
+    ids=["zero", "float", "missing"],
+)
+def test_the_anonymous_read_config_rejects_values_that_do_not_make_sense(tmp_path, edit):
+    path = _broken_config(tmp_path, edit)
+    with pytest.raises(ValueError, match="web.limits"):
+        load_anonymous_read_limit_config(path)
+
+
+def test_the_body_limit_config_holds_the_design_values_and_rejects_nonsense(tmp_path):
+    # §8.2(v23・v24): 本文の全体の上限は 64 KB([web.limits] max_request_body_bytes)、本文を読み切るまでの期限は 10 秒(request_body_timeout_seconds。X-90)
+    assert DEFAULT_WEB_CONFIG.limits.max_request_body_bytes == 65536
+    assert DEFAULT_WEB_CONFIG.limits.request_body_timeout_seconds == 10
+    for edit in (
+        lambda text: text.replace("max_request_body_bytes = 65536\n", ""),  # 足りない項目
+        lambda text: text.replace("max_request_body_bytes = 65536", "max_request_body_bytes = 0"),
+    ):
+        with pytest.raises(ValueError, match="max_request_body_bytes"):
+            load_web_config(_broken_config(tmp_path, edit))
+    for edit in (
+        lambda text: text.replace("request_body_timeout_seconds = 10\n", ""),  # 足りない項目
+        lambda text: text.replace("request_body_timeout_seconds = 10", "request_body_timeout_seconds = 0"),
+        lambda text: text.replace("request_body_timeout_seconds = 10", "request_body_timeout_seconds = -3"),
+    ):
+        with pytest.raises(ValueError, match="request_body_timeout_seconds"):
+            load_web_config(_broken_config(tmp_path, edit))
+
+
+def _read_limiter(clock, per_minute: int = 120) -> AnonymousReadLimiter:
+    return AnonymousReadLimiter(clock, AnonymousReadLimitConfig(per_minute=per_minute))
+
+
+def test_a_client_is_admitted_120_times_in_a_minute_and_the_121st_is_refused_with_the_time_left(clock):
+    limiter = _read_limiter(clock)
+    for _ in range(120):
+        limiter.admit("203.0.113.5")
+    clock.advance(dt.timedelta(seconds=20))
+
+    with pytest.raises(AnonymousReadLimitReached) as raised:
+        limiter.admit("203.0.113.5")
+
+    assert (raised.value.limit, raised.value.retry_after_seconds) == (120, 40)  # 窓の終わりまでの秒数
+
+
+def test_each_client_has_its_own_read_allowance_and_the_count_starts_again_at_the_window_boundary(clock):
+    limiter = _read_limiter(clock, per_minute=3)
+    for _ in range(3):
+        limiter.admit("a")
+    for _ in range(10):  # 断られ続ける
+        with pytest.raises(AnonymousReadLimitReached):
+            limiter.admit("a")
+    limiter.admit("b")  # 別のクライアントは、別の枠
+
+    clock.set(dt.datetime(2026, 1, 1, 0, 0, 59, 500000, tzinfo=dt.timezone.utc))
+    with pytest.raises(AnonymousReadLimitReached) as raised:
+        limiter.admit("a")
+    assert raised.value.retry_after_seconds == 1  # 0.5 秒残っていても、1 秒未満には丸めない
+
+    clock.set(dt.datetime(2026, 1, 1, 0, 1, 0, tzinfo=dt.timezone.utc))  # 次の窓の始まり
+    for _ in range(3):  # 窓が変われば、また 3 回通る
+        limiter.admit("a")
+    with pytest.raises(AnonymousReadLimitReached) as again:
+        limiter.admit("a")
+    assert again.value.retry_after_seconds == 60  # 窓の始まりでは、窓の長さぶん残っている
+
+
+def test_the_read_limiter_remembers_only_the_clients_of_the_current_window(clock):
+    limiter = _read_limiter(clock)
+    for index in range(50):
+        limiter.admit(f"client-{index}")
+    assert len(limiter) == 50
+
+    clock.advance(dt.timedelta(minutes=1))
+    limiter.admit("client-0")
+
+    assert len(limiter) == 1  # 窓が変わったら、前の窓のクライアントの記録は捨てる(増え続けない)
+
+
+# 数える GET の見本(本番の app と同じ経路の型。{x} は適当な値)。数えない経路は、本番と同じ表(web.app の READ_LIMIT_EXEMPT_GET_ROUTES)だけが決める。
+COUNTED_PROBE_PATHS = [
+    "/v1/demo/negotiations/n1/activity",  # セッションなしで金庫を読む GET(デモ)
+    "/v1/demo/negotiations/n1/stage",
+    "/v1/demo/attack/negotiations/n1/events",
+    "/v1/demo/attack/walls/2/n1",
+    "/v1/demo/attack/walls/3/n1",
+    "/v1/principals/p1/negotiations",  # セッションのある GET(C-73: セッションは GET /start で誰でも作れるので、線引きにしない)
+    "/v1/negotiations/n1/panels",
+    "/v1/principals/p1/interview/state",
+    "/v1/session",
+    "/v1/jobs",  # 表に名前がない GET は、金庫を読まなくても数える(表は、数えない経路の限定)
+    "/v1/demo/attack/walls/1/example",
+    "/v1/demo/meter/simulation",
+    "/v1/stream/demo/negotiations/n1/activity",  # SSE の開始(C-72・X-89)
+    "/v1/stream/negotiations/n1/activity",
+]
+EXEMPT_PROBE_PATHS = [
+    "/static/api.js",  # 静的ファイル
+    "/health",
+    "/start",  # 独自の枠(session_start)
+    "/v1/interview/notice",  # 面談の入口の注記
+    "/v1/demo/cases",  # ケースとリプレイの一覧(フィクスチャ)
+    "/v1/demo/replays/1",
+    "/api/tee/attestation",  # 独自の転送の間隔
+]
+
+
+# 入口の枠を持たない、セッションのある口への POST の見本(本番の POST /v1/negotiations/{nid}/control と同じ型)
+POST_PROBE_PATH = "/v1/negotiations/n1/control"
+# セッションのクッキー(値の中身は何でもよい。読み取りの枠は、署名も期限も確かめず、持っているかどうかだけで数える。v25。C-74)
+SESSION_COOKIE = {"Cookie": f"{SESSION_COOKIE_NAME}=any-value-whose-signature-is-never-checked-here"}
+
+
+def _read_probe_app(per_minute: int, clock: FixedClock | None = None) -> tuple[FastAPI, AnonymousReadLimiter]:
+    """読み取りの枠だけを掛けた小さな app(本番と同じ表 READ_LIMIT_EXEMPT_GET_ROUTES・SESSION_FREE_PREFIXES・PAGE_FILES で、数えない経路・セッションを見ない経路・ページを選ぶ)。"""
+    limiter = _read_limiter(clock or FixedClock(dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)), per_minute)
+    app = FastAPI()
+    for path in (*COUNTED_PROBE_PATHS, *EXEMPT_PROBE_PATHS, *PAGE_FILES):
+        app.add_api_route(path, lambda: {"ok": True}, methods=["GET"])
+    app.add_api_route("/v1/demo/negotiations/n1/events", lambda: {"ok": True}, methods=["POST", "GET"])
+    app.add_api_route(POST_PROBE_PATH, lambda: {"ok": True}, methods=["POST"])
+    app.add_middleware(
+        AnonymousReadLimitMiddleware,
+        limiter=limiter,
+        exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES),
+        session_free_prefixes=SESSION_FREE_PREFIXES,
+        page_routes=tuple(PAGE_FILES),
+    )
+    return app, limiter
+
+
+@pytest.mark.parametrize("path", COUNTED_PROBE_PATHS)
+async def test_a_get_that_reads_the_vault_or_firestore_is_counted_with_or_without_a_session_and_refused_with_a_429(path):
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        first = await client.get(path)
+        second = await client.get(path)
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json() == {
+        "detail": {
+            "code": "rate_limited",
+            "entrance": "anonymous_read",
+            "scope": "client",
+            "limit": 1,
+            "window_seconds": 60,
+            "retry_after_seconds": 60,
+        }
+    }
+    assert second.headers["Retry-After"] == "60"
+    assert len(limiter) == 1
+
+
+@pytest.mark.parametrize("path", EXEMPT_PROBE_PATHS)
+async def test_the_gets_in_the_exemption_table_are_not_counted(path):
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        statuses = {(await client.get(path)).status_code for _ in range(5)}
+        counted = await client.get("/v1/demo/negotiations/n1/activity")  # 枠は、1 回も使っていない
+
+    assert statuses == {200} and counted.status_code == 200 and len(limiter) == 1
+
+
+async def test_a_get_to_a_path_that_has_no_route_is_counted_too():
+    # 表にない GET は、経路がなくても数える(足し忘れた経路が、枠から漏れない側に倒す。セッションのミドルウェアは、経路がなくても、クッキーがあれば利用記録を読む)
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        first = await client.get("/no/such/route")
+        second = await client.get("/no/such/route")
+
+    assert (first.status_code, second.status_code) == (404, 429) and len(limiter) == 1
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/health/", "/start/x", "/v1/interview/notice/", "/v1/demo/replays/1/2", "/v1/demo/replays/", "/v1/demo/cases/1", "/api/tee/attestation/x", "/static", "/me/x", "//health", "/Health"],
+)
+def test_a_path_that_only_looks_like_an_exempt_one_is_counted(path, clock):
+    # 数えない経路の型は、ルーターと同じ正規表現で、経路の全体に当てる。前置きや大文字小文字・余分な区切りで、数えない側に抜けられない。
+    middleware = AnonymousReadLimitMiddleware(None, limiter=_read_limiter(clock), exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES))
+
+    assert middleware.counts(path)
+
+
+async def test_a_post_is_counted_only_when_it_carries_a_session_cookie():
+    # POST は、それぞれの入口の枠(demo_run など)が受け持つ。クッキーのない POST まで数えると、読み取りの枠を、書き込みで食ってしまう(数えない)。
+    # クッキーを持つ POST は、入口の枠を持たない口でも、セッションの確認(Firestore の利用記録の読み出し)が先に走るので、数える(v25。C-74)。
+    app, limiter = _read_probe_app(per_minute=2)
+    async with _http(app) as client:
+        plain = [await client.post(POST_PROBE_PATH) for _ in range(5)]
+        counted_by_plain = len(limiter)
+        with_cookie = [await client.post(POST_PROBE_PATH, headers=SESSION_COOKIE) for _ in range(3)]
+        plain_after = await client.post(POST_PROBE_PATH)  # 枠が尽きた後でも、クッキーのない POST は断られない(数えない)
+
+    assert [response.status_code for response in plain] == [200] * 5 and counted_by_plain == 0  # クッキーのない POST は、何回でも数えない
+    assert [response.status_code for response in with_cookie] == [200, 200, 429]  # クッキーのある POST は数える(2 回まで)
+    assert with_cookie[2].json()["detail"]["entrance"] == "anonymous_read" and len(limiter) == 1
+    assert plain_after.status_code == 200
+
+
+# セッションのクッキーを持てば、メソッドと経路によらず数える要求(v25。C-74): 入口の枠を持たない実在の経路への POST・存在しない経路への POST・GET 専用の経路への POST・
+# 数えない GET の表の経路への GET(/start・面談の注記)・GET と POST 以外のメソッド
+COOKIE_COUNTED_REQUESTS = [
+    ("POST", POST_PROBE_PATH),
+    ("POST", "/no/such/route"),
+    ("POST", "/v1/session"),  # GET 専用の経路への POST(405 になる前に、セッションの確認が走る)
+    ("GET", "/start"),
+    ("GET", "/v1/interview/notice"),
+    ("HEAD", "/v1/session"),
+    ("PUT", POST_PROBE_PATH),
+    ("DELETE", "/no/such/route"),
+    ("OPTIONS", "/v1/session"),
+]
+# セッションのクッキーを持っていても、セッションを見ない経路(SESSION_FREE_PREFIXES)の要求は、クッキーの規則では数えない(デモ・攻撃・TEE・/health・静的ファイル・SSE の POST など)
+COOKIE_NOT_COUNTED_REQUESTS = [
+    ("POST", "/v1/demo/negotiations/n1/events"),
+    ("POST", "/v1/demo/negotiations"),
+    ("POST", "/v1/demo/attack/negotiations"),  # 攻撃も、デモの下
+    ("POST", "/v1/demo/meter"),
+    ("GET", "/v1/demo/cases"),
+    ("GET", "/v1/demo/replays/1"),
+    ("GET", "/health"),
+    ("POST", "/health"),
+    ("HEAD", "/health"),
+    ("GET", "/static/api.js"),
+    ("POST", "/static/api.js"),
+    ("GET", "/api/tee/attestation"),
+    ("POST", "/api/tee/attestation"),
+    ("POST", "/v1/stream/negotiations/n1/activity"),  # SSE の開始は GET(数える GET として 1 回)。POST は数えない
+]
+
+
+@pytest.mark.parametrize(("method", "path"), COOKIE_COUNTED_REQUESTS)
+async def test_a_request_with_a_session_cookie_is_counted_whatever_its_method_and_path(method, path):
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        first = await client.request(method, path, headers=SESSION_COOKIE)
+        second = await client.request(method, path, headers=SESSION_COOKIE)
+
+    assert first.status_code != 429  # 1 回目は通る(経路がなければ 404・メソッドが違えば 405 が、中から返る)
+    assert second.status_code == 429 and second.headers["Retry-After"] == "60" and len(limiter) == 1
+
+
+@pytest.mark.parametrize(("method", "path"), COOKIE_COUNTED_REQUESTS)
+async def test_the_same_request_without_a_session_cookie_is_not_counted(method, path):
+    # クッキーがなければ、GET の規則(数えない GET の表・GET 以外は数えない)のとおり
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        statuses = {(await client.request(method, path)).status_code for _ in range(3)}
+
+    assert 429 not in statuses and len(limiter) == 0
+
+
+@pytest.mark.parametrize(("method", "path"), COOKIE_NOT_COUNTED_REQUESTS)
+async def test_a_request_with_a_session_cookie_is_not_counted_on_the_routes_that_do_not_look_at_the_session(method, path):
+    # セッションの確認をしない経路は、確認の読み出しの増幅に使えないので、クッキーの規則では数えない(数える GET の規則は、これとは別)
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        statuses = {(await client.request(method, path, headers=SESSION_COOKIE)).status_code for _ in range(3)}
+
+    assert 429 not in statuses and len(limiter) == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/principals/p1/negotiations", "/v1/session", "/me", "/v1/demo/negotiations/n1/activity", "/v1/stream/negotiations/n1/activity"],
+)
+async def test_a_get_that_is_counted_anyway_is_counted_once_even_with_a_session_cookie(path):
+    # GET の規則とクッキーの規則の両方に当たっても、数えるのは 1 回(二重に数えない)。セッションを見ない経路(デモ・SSE)の GET は、GET の規則で 1 回。
+    app, limiter = _read_probe_app(per_minute=2)
+    async with _http(app) as client:
+        statuses = [(await client.get(path, headers=SESSION_COOKIE)).status_code for _ in range(3)]
+
+    assert statuses == [200, 200, 429] and len(limiter) == 1
+
+
+@pytest.mark.parametrize(
+    "cookie",
+    [
+        f"{SESSION_COOKIE_NAME}=x",
+        f"{SESSION_COOKIE_NAME}=forged.value.with-a-bad-signature",
+        f"theme=dark; {SESSION_COOKIE_NAME}=garbage; lang=ja",
+        f"{SESSION_COOKIE_NAME}=" + "A" * 3000,
+    ],
+    ids=["one-char", "bad-signature", "among-other-cookies", "long"],
+)
+async def test_the_content_of_the_session_cookie_is_not_checked_so_a_forged_one_is_counted(cookie):
+    # 署名が合わない・期限が切れたクッキーは、セッションのミドルウェアでは「セッションなし」で通るが、読み取りの枠は中身を確かめず、持っているかどうかで数える。
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        first = await client.post(POST_PROBE_PATH, headers={"Cookie": cookie})
+        second = await client.post(POST_PROBE_PATH, headers={"Cookie": cookie})
+
+    assert (first.status_code, second.status_code) == (200, 429) and len(limiter) == 1
+
+
+@pytest.mark.parametrize(
+    "cookie",
+    [f"{SESSION_COOKIE_NAME}=", "theme=dark", f"x{SESSION_COOKIE_NAME}=1", f"{SESSION_COOKIE_NAME.upper()}=1", ""],
+    ids=["empty-value", "other-cookie", "other-name", "other-case", "empty-header"],
+)
+async def test_a_cookie_that_is_not_the_session_cookie_or_has_no_value_does_not_make_a_post_counted(cookie):
+    app, limiter = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        statuses = {(await client.post(POST_PROBE_PATH, headers={"Cookie": cookie})).status_code for _ in range(3)}
+
+    assert statuses == {200} and len(limiter) == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "has_cookie", "expected"),
+    [
+        # GET の規則: 数えない GET の表にない GET は、クッキーの有無によらず数える(経路がなくても、ページも)
+        ("GET", "/v1/session", False, True),
+        ("GET", "/v1/session", True, True),
+        ("GET", "/no/such/route", False, True),
+        ("GET", "/me", False, True),
+        ("GET", "/v1/demo/negotiations/n1/activity", False, True),  # セッションを見ない経路の GET も、GET の規則では数える
+        ("GET", "/v1/stream/negotiations/n1/activity", True, True),
+        # 数えない GET の表: クッキーがなければ数えない。クッキーがあれば、セッションの確認が走る経路(/start・面談の注記)は数える
+        ("GET", "/start", False, False),
+        ("GET", "/start", True, True),
+        ("GET", "/v1/interview/notice", False, False),
+        ("GET", "/v1/interview/notice", True, True),
+        # 表の経路のうち、セッションを見ない経路は、クッキーがあっても数えない
+        ("GET", "/health", True, False),
+        ("GET", "/static/api.js", True, False),
+        ("GET", "/v1/demo/cases", True, False),
+        ("GET", "/v1/demo/replays/1", True, False),
+        ("GET", "/api/tee/attestation", True, False),
+        # POST・GET と POST 以外: クッキーがなければ数えない。あれば、メソッドを問わず、セッションの確認が走る経路は数える
+        ("POST", POST_PROBE_PATH, False, False),
+        ("POST", POST_PROBE_PATH, True, True),
+        ("POST", "/no/such/route", True, True),
+        ("POST", "/start", True, True),
+        ("HEAD", "/v1/session", False, False),
+        ("HEAD", "/v1/session", True, True),
+        ("PUT", POST_PROBE_PATH, True, True),
+        ("DELETE", POST_PROBE_PATH, True, True),
+        ("OPTIONS", "/v1/session", True, True),
+        # セッションを見ない経路(接頭辞)は、クッキーがあっても数えない
+        ("POST", "/v1/demo/negotiations", True, False),
+        ("POST", "/v1/demo/attack/negotiations", True, False),
+        ("POST", "/api/tee/anything", True, False),
+        ("POST", "/health", True, False),
+        ("POST", "/static/app.css", True, False),
+        ("POST", "/v1/stream/negotiations/n1/activity", True, False),
+        # 接頭辞は先頭からの一致で、セッションのミドルウェアの判定(startswith)と同じ: 末尾の / がない・先頭が違う・大文字小文字が違うものは、接頭辞に当たらない
+        ("POST", "/v1/demo", True, True),
+        ("POST", "/x/v1/demo/y", True, True),
+        ("POST", "/V1/demo/x", True, True),
+    ],
+)
+def test_counts_request_decides_by_the_method_the_path_and_the_cookie(clock, method, path, has_cookie, expected):
+    middleware = AnonymousReadLimitMiddleware(
+        None, limiter=_read_limiter(clock), exempt_routes=tuple(READ_LIMIT_EXEMPT_GET_ROUTES), session_free_prefixes=SESSION_FREE_PREFIXES
+    )
+
+    assert middleware.counts_request(method, path, has_cookie) is expected
+
+
+async def test_the_read_limit_counts_by_the_client_key_so_the_same_ipv6_64_prefix_shares_one_allowance():
+    app, _ = _read_probe_app(per_minute=2)
+    path = "/v1/demo/negotiations/n1/activity"
+    async with _http(app) as client:
+        for address in ("2001:db8:1:2::1", "2001:db8:1:2::2"):
+            assert (await client.get(path, headers={"X-Forwarded-For": address})).status_code == 200
+        same_prefix = await client.get(path, headers={"X-Forwarded-For": "10.0.0.1, 2001:db8:1:2:aaaa::3"})
+        another_prefix = await client.get(path, headers={"X-Forwarded-For": "2001:db8:1:3::1"})
+        other_ipv4 = await client.get(path, headers={"X-Forwarded-For": "198.51.100.9"})
+
+    assert same_prefix.status_code == 429  # 同じ /64(先頭側の値は見ない)
+    assert (another_prefix.status_code, other_ipv4.status_code) == (200, 200)
+
+
+# --- 画面のページが読み取りの枠に当たったとき(台帳 L22-2): JSON ではなく、短い静的な HTML の 429 ---
+
+# 429 の HTML に入れないもの(スクリプト・外部の読み込み・スタイル・リンク)
+HTML_429_FORBIDDEN = ("<script", "<link", "<img", "<iframe", "<style", "<form", "<a ", "src=", "href=", "http", "@import", "url(")
+
+
+@pytest.mark.parametrize("page", list(PAGE_FILES))
+async def test_a_page_that_hits_the_read_limit_gets_a_short_static_html_429_while_an_api_path_keeps_the_json_one(page):
+    app, _ = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        assert (await client.get("/v1/session")).status_code == 200  # 枠を使い切る
+        refused = await client.get(page)
+        api = await client.get("/v1/jobs")  # 同じ状態でも、API の経路は、いままでどおりの JSON
+        missing = await client.get("/no/such/route")  # 存在しない経路も JSON
+
+    assert refused.status_code == 429
+    assert refused.headers["Content-Type"] == "text/html; charset=utf-8"
+    assert refused.headers["Retry-After"] == "60" == api.headers["Retry-After"]  # JSON の場合と同じ秒数
+    body = refused.text
+    assert body.startswith("<!DOCTYPE html>") and 'lang="ja"' in body and body.count("<p>") == 1 and len(body) < 600  # 短い HTML
+    with pytest.raises(ValueError):
+        refused.json()  # JSON ではない
+    assert "1 分ほど待って" in body and "開き直して" in body  # 待ってから開き直すよう書いてある
+    for forbidden in HTML_429_FORBIDDEN:
+        assert forbidden not in body.lower(), forbidden
+    assert (api.status_code, api.headers["Content-Type"], api.json()["detail"]["entrance"]) == (429, "application/json", "anonymous_read")
+    assert (missing.status_code, missing.headers["Content-Type"]) == (429, "application/json")
+
+
+async def test_the_html_429_is_the_same_whatever_the_page_the_wait_or_the_client_is():
+    # 本文に動的な値(秒数・経路・IP)を入れない: ページ・待ち時間・送信元が違っても、まったく同じ。秒数は Retry-After ヘッダだけが運ぶ。
+    clock = FixedClock(dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
+    app, _ = _read_probe_app(per_minute=1, clock=clock)
+    async with _http(app) as client:
+        await client.get("/v1/session", headers={"X-Forwarded-For": "203.0.113.5"})
+        first = await client.get("/me", headers={"X-Forwarded-For": "203.0.113.5"})
+        clock.advance(dt.timedelta(seconds=20))
+        later = await client.get("/demo", headers={"X-Forwarded-For": "203.0.113.5"})  # 窓の終わりまで 40 秒
+        await client.get("/v1/session", headers={"X-Forwarded-For": "2001:db8:1:2::1"})
+        another = await client.get("/attack", headers={"X-Forwarded-For": "2001:db8:1:2::9"})  # 別の送信元(IPv6)
+
+    assert [response.status_code for response in (first, later, another)] == [429, 429, 429]
+    assert [response.headers["Retry-After"] for response in (first, later, another)] == ["60", "40", "40"]
+    assert first.text == later.text == another.text
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/me/"),
+        ("GET", "/me/x"),
+        ("GET", "/ME"),
+        ("GET", "/interview/x"),
+        ("GET", "/v1/me"),
+        ("POST", "/me"),
+        ("POST", "/"),
+        ("HEAD", "/me"),
+    ],
+)
+async def test_only_a_get_to_the_exact_path_of_a_page_gets_the_html_429(method, path):
+    # ページの経路は完全一致で、GET だけ。経路の見かけが似ているものや、クッキーの規則で数えられた POST・HEAD は、いままでどおりの JSON の 429。
+    app, _ = _read_probe_app(per_minute=1)
+    async with _http(app) as client:
+        assert (await client.get("/v1/session")).status_code == 200  # 枠を使い切る
+        refused = await client.request(method, path, headers=SESSION_COOKIE)
+
+    assert refused.status_code == 429 and refused.headers["Content-Type"] == "application/json"
+
+
+async def test_the_production_app_answers_a_page_over_the_read_limit_with_the_html_429_and_an_api_path_with_json(web_app):
+    browser = web_app.browser()
+    exhausted, other = {"X-Forwarded-For": "203.0.113.9"}, {"X-Forwarded-For": "203.0.113.10"}
+    for _ in range(DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG.per_minute):
+        web_app.services.read_limiter.admit("203.0.113.9")
+
+    for page in PAGE_FILES:
+        refused = await browser.client.get(page, headers=exhausted)
+        assert (refused.status_code, refused.headers["Content-Type"], refused.headers["Retry-After"]) == (429, "text/html; charset=utf-8", "60"), page
+        assert "開き直して" in refused.text and "<script" not in refused.text, page
+        assert (await browser.client.get(page, headers=other)).status_code == 200, page  # 別の送信元は、本物のページが開く
+    api = await browser.client.get("/v1/session", headers=exhausted)
+    assert api.status_code == 429 and api.headers["Content-Type"] == "application/json" and api.json()["detail"]["entrance"] == "anonymous_read"
+
+
+# --- GET の経路の分類(台帳 C-72・C-73): 本番の app の GET の経路の全体を、「数える」「数えない」のどちらかに分類させる ---
+
+# 数えると決めた GET の経路(本番の app の経路の型。金庫か Firestore を読む。セッションの有無によらない。SSE の開始を含む)。数えない経路は web.app の READ_LIMIT_EXEMPT_GET_ROUTES。
+# 実行時は、表にない GET は、すべて数える(足し忘れの安全側)。この一覧は、経路を足したときに、数えるか数えないかを、人が決めたことを残すためのもの。
+COUNTED_GET_ROUTES = frozenset(
+    {
+        # セッションなしの口(デモ・攻撃・メーター)
+        "/v1/demo/negotiations/{nid}/events",
+        "/v1/demo/negotiations/{nid}/activity",
+        "/v1/demo/negotiations/{nid}/panels",
+        "/v1/demo/negotiations/{nid}/stage",
+        "/v1/demo/attack/negotiations/{nid}/events",
+        "/v1/demo/attack/walls/1/example",
+        "/v1/demo/attack/walls/2/{nid}",
+        "/v1/demo/attack/walls/3/{nid}",
+        "/v1/demo/meter/simulation",
+        # セッションのある口(本人)
+        "/v1/principals/{pid}/policy",
+        "/v1/principals/{pid}/negotiations",
+        "/v1/principals/{pid}/ledger",
+        "/v1/principals/{pid}/panels",
+        "/v1/negotiations/{nid}/events",
+        "/v1/negotiations/{nid}/activity",
+        "/v1/negotiations/{nid}/panels",
+        "/v1/negotiations/{nid}/stage",
+        # 面談の読み取り(状態はメモリだが、セッションのミドルウェアが利用記録 [Firestore] を読む)
+        "/v1/principals/{pid}/interview/state",
+        "/v1/principals/{pid}/interview/axes",
+        "/v1/principals/{pid}/interview/choices",
+        "/v1/principals/{pid}/interview/confirmation",
+        "/v1/principals/{pid}/interview/worst-case",
+        "/v1/principals/{pid}/interview/companies",
+        # 画面に要る口
+        "/v1/session",
+        "/v1/jobs",
+        # SSE の開始(再接続を含む。1 回と数える)
+        "/v1/stream/negotiations/{nid}/activity",
+        "/v1/stream/demo/negotiations/{nid}/activity",
+        # 画面のページ(設計書の「数えない GET」にない。有効なクッキーがあるとセッションの確認〔Firestore〕が走る)
+        "/",
+        "/interview",
+        "/me",
+        "/demo",
+        "/attack",
+    }
+)
+
+
+def _get_route_templates(app) -> set[str]:
+    """app の GET の経路の型の全体(include したルーターの中も、マウントした /static も含む)。
+
+    FastAPI 0.141 は、include_router したルーターを app.routes に展開せず、遅延で持つので、iter_route_contexts でたどる。
+    マウントは、その下のすべての経路を受けるので、"{マウントの経路}/{path:path}" の 1 つとして数える(静的ファイルは GET を受ける)。
+    """
+    templates: set[str] = set()
+    for context in iter_route_contexts(app.routes):
+        route = context.original_route
+        if isinstance(route, Mount):
+            templates.add(f"{route.path}/{{path:path}}")
+        elif "GET" in (context.methods or ()):
+            templates.add(context.path)
+    return templates
+
+
+def _assert_every_get_route_is_classified(app) -> None:
+    """app の GET の経路が、すべて「数える」(COUNTED_GET_ROUTES)か「数えない」(READ_LIMIT_EXEMPT_GET_ROUTES)のどちらかにあること。どちらにもなければ失敗する。"""
+    unclassified = _get_route_templates(app) - COUNTED_GET_ROUTES - set(READ_LIMIT_EXEMPT_GET_ROUTES)
+    assert not unclassified, (
+        f"GET の経路が分類されていない: {sorted(unclassified)}"
+        "(金庫か Firestore を読むなら、このファイルの COUNTED_GET_ROUTES に。数えない理由があるなら、web.app の READ_LIMIT_EXEMPT_GET_ROUTES に、理由つきで)"
+    )
+
+
+def _plain_and_tee_apps(entry):
+    """本番の起動口(create_app_from_env)で組み立てた、TEE なしと TEE ありの app。"""
+    plain = entry(VAULT_TEE=None, VAULT_SERVICE_ACCOUNT=None, GOOGLE_CLOUD_PROJECT=None, VAULT_RELEASES_FILE=None)
+    return plain, entry()
+
+
+def test_every_get_route_of_the_production_app_is_classified_as_counted_or_exempt(entry):
+    plain, tee = _plain_and_tee_apps(entry)
+
+    for app in (plain, tee):
+        _assert_every_get_route_is_classified(app)
+    plain_routes, tee_routes = _get_route_templates(plain), _get_route_templates(tee)
+    assert len(plain_routes) > 30  # 経路の取り出しが壊れて、何も確かめずに通らない
+    assert tee_routes - plain_routes == {TEE_ATTESTATION_PATH} and plain_routes <= tee_routes  # TEE のときだけ、attestation の口がある
+    exempt = set(READ_LIMIT_EXEMPT_GET_ROUTES)
+    assert not (COUNTED_GET_ROUTES & exempt)  # どちらか一方だけ
+    assert (COUNTED_GET_ROUTES | exempt) - tee_routes == set()  # 分類にあって、本番の app にない経路(古くなった記述)が残っていない
+    # 数えない経路は、設計書 §8.2 の限定どおり(静的ファイル・/health・入口の注記・ケースとリプレイの一覧・attestation・GET /start)
+    assert exempt - {"/", "/interview", "/me", "/demo", "/attack"} == {
+        "/static/{path:path}",
+        "/health",
+        "/start",
+        "/v1/interview/notice",
+        "/v1/demo/cases",
+        "/v1/demo/replays/{case}",
+        TEE_ATTESTATION_PATH,
+    }
+    assert all(READ_LIMIT_EXEMPT_GET_ROUTES.values())  # どれも、数えない理由が書いてある
+
+
+async def test_the_classification_check_fails_when_a_get_route_is_not_classified(web_app):
+    # 分類のない GET を足すと、見張りの試験が落ちる(足し忘れを、人が決めるまで通さない)。include したルーターの中の経路も、マウントも見つける。
+    app = web_app.app
+    _assert_every_get_route_is_classified(app)  # 足す前は、通る
+
+    app.add_api_route("/v1/new/reads-the-vault", lambda: {}, methods=["GET"])
+    with pytest.raises(AssertionError, match="/v1/new/reads-the-vault"):
+        _assert_every_get_route_is_classified(app)
+
+    router = APIRouter()
+    router.add_api_route("/v1/included/reads-firestore", lambda: {}, methods=["GET"])
+    app.include_router(router)
+    app.mount("/legacy", FastAPI())
+    with pytest.raises(AssertionError) as raised:
+        _assert_every_get_route_is_classified(app)
+    for found in ("/v1/new/reads-the-vault", "/v1/included/reads-firestore", "/legacy/{path:path}"):
+        assert found in str(raised.value)
+    # POST だけの経路は、GET ではないので、分類は要らない
+    app.add_api_route("/v1/new/only-post", lambda: {}, methods=["POST"])
+    assert "/v1/new/only-post" not in _get_route_templates(app)
+
+
+def _sample_path(template: str) -> str:
+    """経路の型の {x} を、適当な値にした経路(実際に GET する)。"""
+    return re.sub(r"\{\w+\}", "x1", re.sub(r"\{\w+:path\}", "app.css", template))
+
+
+async def _counted_get_routes(app, monkeypatch, *, cookie: bool) -> tuple[list[str], set[str]]:
+    """app に GET の経路の全体を 1 回ずつ送り、読み取りの枠に数えられた経路の型を返す((経路の型の一覧, 数えられたもの))。経路ごとに別の送信元にして、どの経路が数えられたかを見分ける。
+
+    cookie が真なら、どの要求にもセッションのクッキーを付ける(中身は何でもよい)。偽なら付けない: GET /start が返すクッキーも、次の要求には持ち越さない
+    (持ち越すと、あとの要求がクッキーつきになり、クッキーの規則で数えられて、GET の規則だけの分類を確かめられない)。
+    """
+    admitted: list[str] = []
+    limiter = app.state.services.read_limiter
+    real_admit = limiter.admit
+
+    def recording_admit(client):
+        admitted.append(client)
+        real_admit(client)
+
+    monkeypatch.setattr(limiter, "admit", recording_admit)
+    templates = sorted(_get_route_templates(app))
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="https://web.test") as client:
+        for index, template in enumerate(templates):
+            headers = {**(SESSION_COOKIE if cookie else {}), "X-Forwarded-For": f"198.51.100.{index + 1}"}
+            await client.get(_sample_path(template), headers=headers)
+            client.cookies.clear()
+
+    counted = {template for index, template in enumerate(templates) if f"198.51.100.{index + 1}" in admitted}
+    assert len(admitted) == len(counted)  # 1 経路 1 回
+    return templates, counted
+
+
+def _plain_and_tee_apps_of(clock, vault_client, default_db, session_key):
+    """本番の組み立て(create_app)の app: TEE なしと TEE あり(attestation の口がある)。"""
+    from test_web_tee_api import RELEASES, FakeAttestationSource
+
+    plain = create_app(vault=vault_client, default_db=default_db, session_key=session_key, clock=clock)
+    tee_config = TeeAttestationConfig(FakeAttestationSource(), RELEASES)
+    tee = create_app(vault=vault_client, default_db=default_db, session_key=session_key, clock=clock, tee=tee_config)
+    return plain, tee
+
+
+async def test_the_read_limit_counts_exactly_the_get_routes_classified_as_counted(
+    clock, vault_client, default_db, session_key, monkeypatch
+):
+    # 経路の分類と、実際のミドルウェアの判断が合っていること: 本番の組み立て(create_app)の app に、GET の経路の全体を、セッションのクッキーなしで 1 回ずつ送り、
+    # 枠に数えられた経路が、「数える」に分類した経路と一致する(TEE ありの app も。attestation は数えない側)。クッキーのある場合は、次の試験。
+    for app in _plain_and_tee_apps_of(clock, vault_client, default_db, session_key):
+        templates, counted = await _counted_get_routes(app, monkeypatch, cookie=False)
+
+        assert counted == set(templates) - set(READ_LIMIT_EXEMPT_GET_ROUTES)
+        assert counted == set(templates) & COUNTED_GET_ROUTES
+
+
+# セッションのクッキーを持つ GET でも、数えない経路(セッションを見ない経路 SESSION_FREE_PREFIXES の下にあって、数えない GET の表にある経路)。
+# 数えない GET の表の残り(GET /start・面談の注記)は、セッションの確認が走るので、クッキーがあれば数える(v25。C-74)。
+NOT_COUNTED_EVEN_WITH_A_SESSION_COOKIE = frozenset(
+    {"/static/{path:path}", "/health", "/v1/demo/cases", "/v1/demo/replays/{case}", TEE_ATTESTATION_PATH}
+)
+
+
+async def test_the_read_limit_counts_every_get_route_with_a_session_cookie_except_those_that_do_not_look_at_the_session(
+    clock, vault_client, default_db, session_key, monkeypatch
+):
+    # 本番の組み立ての app に、GET の経路の全体を、セッションのクッキーつきで 1 回ずつ送る(v25。C-74)。数えない GET の表にある経路のうち、/start と面談の注記は数えられる
+    # (表は、クッキーのない GET にだけ効く)。セッションを見ない経路(静的ファイル・/health・ケースとリプレイの一覧・attestation)は、クッキーがあっても数えられない。
+    plain, tee = _plain_and_tee_apps_of(clock, vault_client, default_db, session_key)
+    exempt_without_cookie = set(READ_LIMIT_EXEMPT_GET_ROUTES)
+    assert NOT_COUNTED_EVEN_WITH_A_SESSION_COOKIE < exempt_without_cookie  # 表の一部
+    assert exempt_without_cookie - NOT_COUNTED_EVEN_WITH_A_SESSION_COOKIE == {"/start", "/v1/interview/notice"}
+
+    for app in (plain, tee):
+        templates, counted = await _counted_get_routes(app, monkeypatch, cookie=True)
+
+        assert counted == set(templates) - NOT_COUNTED_EVEN_WITH_A_SESSION_COOKIE
+        assert {"/start", "/v1/interview/notice"} <= counted
+
+
+def test_the_production_app_gives_the_same_session_free_prefixes_to_the_session_middleware_and_the_read_limit(entry):
+    # 2 か所でずれないように、1 つの定数(web.app の SESSION_FREE_PREFIXES)を、セッションのミドルウェアと読み取りの枠のミドルウェアの両方に渡している(TEE ありとなし)。
+    # ページの経路も、読み取りの枠のミドルウェアに渡している(L22-2)。
+    for app in _plain_and_tee_apps(entry):
+        given = {middleware.cls: middleware.kwargs for middleware in app.user_middleware}
+
+        assert given[PrincipalSessionMiddleware]["session_free_prefixes"] == SESSION_FREE_PREFIXES
+        assert given[AnonymousReadLimitMiddleware]["session_free_prefixes"] == SESSION_FREE_PREFIXES
+        assert given[AnonymousReadLimitMiddleware]["page_routes"] == tuple(PAGE_FILES)
+    # 設計書 §8.2 の「セッションを見ない経路」: デモ(攻撃も含む)・TEE・死活確認・静的ファイル・SSE。ページの経路は、設計書の 5 つ
+    assert set(SESSION_FREE_PREFIXES) == {"/v1/demo/", "/api/tee/", "/health", "/static/", "/v1/stream/"}
+    assert set(PAGE_FILES) == {"/", "/interview", "/me", "/demo", "/attack"}
+
+
+# --- 数えた枠が、実際の読み出しより前に効くこと(記録する偽物で、読み出しがなかったことを示す) ---
+
+
+def _recording_env(store, clock, vault_client, default_db, session_key, monkeypatch):
+    """金庫の呼び出しと、Firestore の読み出し(利用記録・段の状態)・SSE の席の取得を記録する web 一式。(env, 金庫の記録, 読み出しの記録)。"""
+    vault = GatedVault(vault_client)
+    env = build_web_env(store=store, clock=clock, vault=vault, default_db=default_db, session_key=session_key)
+    reads: list[str] = []
+
+    def record(owner, name, label):
+        original = getattr(owner, name)
+        if inspect.iscoroutinefunction(original):
+
+            async def wrapper(*args, **kwargs):
+                reads.append(label)
+                return await original(*args, **kwargs)
+
+        else:
+
+            def wrapper(*args, **kwargs):
+                reads.append(label)
+                return original(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, wrapper)
+
+    record(env.services.meta, "touch", "firestore:principals_meta.touch")  # セッションのミドルウェアが、クッキーのある要求ごとに読む
+    record(env.services.meta, "get", "firestore:principals_meta.get")
+    record(env.services.stages, "is_fictional_negotiation", "firestore:stages")
+    record(env.services.stream_limiter, "acquire_for_request", "sse:slot")  # SSE の席(読み出しより前に取る)
+    return env, vault, reads
+
+
+async def test_the_121st_get_with_a_session_in_a_minute_is_refused_before_any_vault_or_firestore_read(
+    store, clock, vault_client, default_db, session_key, monkeypatch
+):
+    # AC-13(v24): セッションのある GET も、送信元ごとに 1 分 121 回目が 429。断った要求は、セッションの確認(利用記録の更新)にも、金庫にも届かない。
+    env, vault, reads = _recording_env(store, clock, vault_client, default_db, session_key, monkeypatch)
+    try:
+        browser = env.browser()
+        pid = await browser.register()
+        paths = [f"/v1/principals/{pid}/negotiations", "/v1/principals/me/panels", f"/v1/principals/{pid}/ledger", "/v1/session"]
+        reads.clear()
+        vault.events.clear()
+
+        for index in range(120):
+            response = await browser.client.get(paths[index % len(paths)])
+            assert response.status_code == 200, (index, paths[index % len(paths)])
+        assert reads.count("firestore:principals_meta.touch") == 120 and vault.events  # 120 回は、通って、読んだ(以下の「読んでいない」が、足場の不備でない)
+        reads_before, events_before = list(reads), list(vault.events)
+
+        refused = await browser.client.get(f"/v1/principals/{pid}/negotiations")  # 121 回目
+        another = await browser.client.get("/v1/session")  # 経路をまたいで、1 つの枠
+
+        assert refused.status_code == another.status_code == 429
+        assert refused.json() == {
+            "detail": {
+                "code": "rate_limited",
+                "entrance": "anonymous_read",
+                "scope": "client",
+                "limit": 120,
+                "window_seconds": 60,
+                "retry_after_seconds": 60,
+            }
+        }
+        assert refused.headers["Retry-After"] == "60"
+        assert (reads, vault.events) == (reads_before, events_before)  # 断った要求は、何も読んでいない
+        assert (await browser.client.get(f"/v1/principals/{pid}/negotiations", headers={"X-Forwarded-For": "198.51.100.77"})).status_code == 200  # 別の送信元
+        env.clock.advance(dt.timedelta(seconds=60))  # 窓が変われば、また読める
+        assert (await browser.client.get(f"/v1/principals/{pid}/negotiations")).status_code == 200
+    finally:
+        await env.aclose()
+
+
+async def test_the_121st_request_with_a_session_cookie_in_a_minute_is_refused_before_the_session_touch_whatever_its_method_or_path(
+    store, clock, vault_client, default_db, session_key, monkeypatch
+):
+    # AC-13(v25。C-74): 有効なセッションのクッキーを持つ要求は、入口の枠を持たない実在の経路への POST・存在しない経路への POST・数えない GET(/start・面談の注記)でも、
+    # 同じ 1 つの枠で数え、既定の上限(120)の 121 回目は、セッションの確認(principals_meta.touch)にも金庫にも届く前に 429。
+    env, vault, reads = _recording_env(store, clock, vault_client, default_db, session_key, monkeypatch)
+    try:
+        browser = env.browser()
+        await browser.register()
+        control = "/v1/negotiations/0123456789abcdef/control"  # 入口の枠を持たない実在の経路。本人の交渉ではないので、金庫の一覧を引いてから 403
+        # (メソッド, 経路, 回数, 通ったときの状態)。合計がちょうど 120。GET /start は入口の枠 session_start(10 分に 20 回)があるので、10 回まで
+        requests = [
+            ("POST", control, 40, 403),
+            ("POST", "/v1/no/such/route", 40, 404),
+            ("GET", "/start", 10, 200),
+            ("GET", "/v1/interview/notice", 30, 200),
+        ]
+        assert sum(count for _method, _path, count, _status in requests) == DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG.per_minute
+        reads.clear()
+        vault.events.clear()
+
+        async def send(method: str, path: str, **headers):
+            if method == "POST":
+                return await browser.client.post(path, json={"action": "cancel"}, headers={**REQUESTED_WITH, **headers})
+            return await browser.client.get(path, headers=headers)
+
+        for method, path, count, status in requests:
+            for index in range(count):
+                response = await send(method, path)
+                assert response.status_code == status, (method, path, index)  # 通った(429 になっていない)
+        assert reads.count("firestore:principals_meta.touch") == 120 and vault.events  # 120 回は、確認まで進んだ(以下の「読んでいない」が、足場の不備でない)
+        reads_before, events_before = list(reads), list(vault.events)
+
+        for method, path, _count, _status in requests:  # 121 回目。どの種類の要求でも、1 つの枠
+            refused = await send(method, path)
+            assert refused.status_code == 429, (method, path)
+            assert refused.json() == {
+                "detail": {
+                    "code": "rate_limited",
+                    "entrance": "anonymous_read",
+                    "scope": "client",
+                    "limit": 120,
+                    "window_seconds": 60,
+                    "retry_after_seconds": 60,
+                }
+            }
+            assert refused.headers["Retry-After"] == "60"
+        assert (reads, vault.events) == (reads_before, events_before)  # 断った要求は、確認(touch)にも、金庫にも、段の状態にも届いていない
+        assert (await send("POST", control, **{"X-Forwarded-For": "198.51.100.77"})).status_code == 403  # 別の送信元は、影響されない
+        env.clock.advance(dt.timedelta(seconds=60))  # 窓が変われば、また通る
+        assert (await send("POST", control)).status_code == 403
+    finally:
+        await env.aclose()
+
+
+async def test_requests_with_a_forged_session_cookie_are_counted_in_the_production_app_too(web_app):
+    # AC-13(v25。C-74): 署名が合わないクッキーは、セッションのミドルウェアでは「セッションなし」で通る(確認の読み出しはない)が、読み取りの枠は中身を確かめずに数える。
+    # 121 回目は 429。クッキーのない同じ POST は、数えない(断られない)。
+    browser = web_app.browser()
+    forged = {"Cookie": f"{SESSION_COOKIE_NAME}=forged.value.with-a-bad-signature", **REQUESTED_WITH}
+
+    for index in range(DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG.per_minute):
+        assert (await browser.client.post("/v1/no/such/route", headers=forged)).status_code == 404, index
+    refused = await browser.client.post("/v1/no/such/route", headers=forged)
+
+    assert refused.status_code == 429 and refused.json()["detail"]["entrance"] == "anonymous_read"
+    assert (await browser.client.post("/v1/no/such/route", headers=REQUESTED_WITH)).status_code == 404
+
+
+async def test_a_method_other_than_get_and_post_with_a_session_cookie_gets_405_with_allow_before_the_session_touch_in_the_production_app(
+    store, clock, vault_client, default_db, session_key, monkeypatch
+):
+    # L22-1: 405 に Allow: GET, POST。本番の組み立て(読み取りの枠 → セッション)でも、有効なクッキーつきの 405 は、セッションの確認(touch)に届かない。
+    # ほかの拒否(403 など)の形は変えない(Allow を付けない)。
+    env, vault, reads = _recording_env(store, clock, vault_client, default_db, session_key, monkeypatch)
+    try:
+        browser = env.browser()
+        await browser.register()
+        reads.clear()
+
+        for method in ("HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            response = await browser.client.request(method, "/v1/session", headers=REQUESTED_WITH)
+            assert response.status_code == 405 and response.headers["Allow"] == "GET, POST", method
+        no_header = await browser.client.post("/v1/negotiations/0123456789abcdef/control", json={"action": "cancel"})  # X-Requested-With なし
+        assert no_header.status_code == 403 and no_header.json() == {"detail": "missing_requested_with_header"} and "Allow" not in no_header.headers
+        assert reads == []  # touch にも、段の状態にも届いていない
+    finally:
+        await env.aclose()
+
+
+async def test_an_sse_start_is_counted_once_before_anything_is_read_and_the_121st_in_a_minute_is_refused(
+    store, clock, vault_client, default_db, session_key, monkeypatch
+):
+    # AC-13(v24): SSE の開始(再接続を含む)も、同じ枠で 1 回と数える。席の確認・権限の確認(Firestore と金庫を読む)より前に数え、121 回目は 429。
+    # 存在しない交渉への開始は、すぐ 403 で終わって席を返すので、同時本数の上限(2 本)には当たらないまま、開き直せる(これが、枠のない v23 で止められなかったもの)。
+    env, vault, reads = _recording_env(store, clock, vault_client, default_db, session_key, monkeypatch)
+    try:
+        browser = env.browser()
+        pid = await browser.register()
+        nid = "0123456789abcdef"
+        starts = [f"/v1/stream/negotiations/{nid}/activity", f"/v1/stream/demo/negotiations/{nid}/activity?side=candidate"]
+        reads.clear()
+        vault.events.clear()
+
+        for index in range(120):
+            response = await browser.client.get(starts[index % 2])
+            assert response.status_code == 403, (index, starts[index % 2])  # 確認まで進んで、断られた(席は戻る)
+        assert len(env.services.stream_limiter) == 0
+        assert reads.count("sse:slot") == 120 and "firestore:stages" in reads and vault.events  # 確認の読み出しまで進んだ(足場)
+        reads_before, events_before = list(reads), list(vault.events)
+
+        refused_own = await browser.client.get(starts[0])  # 121 回目
+        refused_demo = await browser.client.get(starts[1])
+        session_get = await browser.client.get(f"/v1/principals/{pid}/negotiations")  # SSE の開始と、セッションのある GET は、1 つの枠
+
+        assert refused_own.status_code == refused_demo.status_code == session_get.status_code == 429
+        assert refused_own.json()["detail"]["entrance"] == "anonymous_read"
+        assert (reads, vault.events) == (reads_before, events_before)  # 席の確認にも、権限の確認(Firestore・金庫)にも届いていない
+        env.clock.advance(dt.timedelta(seconds=60))
+        assert (await browser.client.get(starts[0])).status_code == 403  # 窓が変われば、確認まで進む
+    finally:
+        await env.aclose()
+
+
+async def test_the_121st_anonymous_read_in_a_minute_is_refused_with_retry_after_and_another_client_is_not(make_env):
+    # AC-13(v23): セッションなしで金庫を読む口は、送信元ごとに 1 分 121 回目が 429(Retry-After つき)。経路をまたいで 1 つの枠。別の送信元は影響されない。
+    env = make_env()
+    browser = env.browser()
+    nid = (await post(browser, CREATE, create_body(1))).json()["nid"]  # 架空人物の攻撃の交渉(読み出しの相手)
+    reads = [
+        (f"/v1/demo/negotiations/{nid}/activity", {"side": "candidate"}),
+        (f"/v1/demo/negotiations/{nid}/panels", {}),
+        (f"/v1/demo/attack/negotiations/{nid}/events", {}),
+    ]
+    for index in range(120):
+        path, params = reads[index % len(reads)]
+        response = await browser.client.get(path, params=params)
+        assert response.status_code == 200, (index, path)
+
+    refused = await browser.client.get(f"/v1/demo/negotiations/{nid}/stage")  # 121 回目(別の経路でも、同じ枠)
+    again = await browser.client.get(f"/v1/demo/attack/walls/3/{nid}")
+
+    assert refused.status_code == again.status_code == 429
+    detail = refused.json()["detail"]
+    assert detail == {
+        "code": "rate_limited",
+        "entrance": "anonymous_read",
+        "scope": "client",
+        "limit": 120,
+        "window_seconds": 60,
+        "retry_after_seconds": 60,
+    }
+    assert refused.headers["Retry-After"] == "60"
+    other = await browser.client.get(f"/v1/demo/negotiations/{nid}/panels", headers={"X-Forwarded-For": "198.51.100.77"})
+    assert other.status_code == 200  # 別の送信元は、影響されない
+
+    # 窓が変われば、また読める
+    env.clock.advance(dt.timedelta(seconds=60))
+    assert (await browser.client.get(f"/v1/demo/negotiations/{nid}/stage")).status_code == 200
+    # 読み取りは、全体の枠(300)にも Firestore にも数えない: rate_limits にあるのは、交渉の作成(attack_create)の分だけ
+    counters = {path: data for path, data in dump_documents(env.default_db).items() if path.startswith("rate_limits/")}
+    assert sorted(path.split("/")[1].split(".")[0] for path in counters) == ["attack_create", "overall"]
+    assert [data["count"] for path, data in counters.items() if path.startswith("rate_limits/overall.")] == [1]
+
+
+def test_the_two_second_polling_fallback_of_the_pages_stays_well_inside_the_default_read_limit(clock):
+    # 画面の再取得(SSE がつながらないときの 2 秒ごと。static/ui.js の pollInterval)は、1 ページで毎分 30 回(両側を 1 回で返す /panels)。
+    # 攻撃画面は、記録が届くたびに壁 3 を 1 回読み直す(続けて届くときはまとめて 1 回)ので、最大 60 回。デモの画面と攻撃画面を両方開いて、
+    # 5 分続けても(毎分 30 + 60 = 90 回)、1 分 120 回の枠に収まる。画面のコードから数字を引く試験は tests/test_ui_static.py(v24 で、SSE の開始・セッションのある GET も数える)。
+    poll_seconds = 2
+    streams = ("demo /panels", "attack /panels", "attack walls/3")  # 同じ送信元から、同時に動く読み取りの流れ
+    limit = DEFAULT_ANONYMOUS_READ_LIMIT_CONFIG.per_minute
+    assert len(streams) * (60 // poll_seconds) < limit  # 毎分 90 回 < 120 回
+
+    limiter = _read_limiter(clock, limit)
+    for _ in range(5 * 60 // poll_seconds):
+        for _stream in streams:
+            limiter.admit("203.0.113.5")  # 例外にならない(= 429 にならない)
+        clock.advance(dt.timedelta(seconds=poll_seconds))
+
+
+# ----------------------------------------------------------------------
+# 本文の全体の上限と、読み取りの期限(台帳 X-85・X-90): すべての要求の本文を、ルートの前で 64 KB までに抑え、読み切ってから内側に渡す
+# ----------------------------------------------------------------------
+
+BODY_LIMIT = DEFAULT_WEB_CONFIG.limits.max_request_body_bytes
+JSON_HEADERS = {**REQUESTED_WITH, "Content-Type": "application/json"}
+# 本文を宣言したルート(FastAPI が、依存より先に本文を読む)・自分で本文を読むルート(ルートごとの 32 KB の上限がある)・本文を宣言しないルートの、代表。
+# セッションも枠も要らない形で呼ぶ(本文の上限は、それより先に効く)。
+BODY_ROUTES = [
+    "/v1/principals/someone/interview/begin",
+    "/v1/principals/someone/interview/profile",
+    "/v1/principals/someone/interview/salary/answers",
+    "/v1/principals/someone/negotiations",
+    "/v1/principals/someone/blocklist",
+    "/v1/principals/someone/delete",
+    "/v1/negotiations/0123456789abcdef/principal-answer",
+    "/v1/negotiations/0123456789abcdef/stage/meet",
+    "/v1/demo/negotiations",
+    "/v1/demo/meter",
+    "/v1/demo/attack/negotiations",
+    "/v1/demo/attack/walls/1",
+]
+
+
+@pytest.mark.parametrize("path", BODY_ROUTES)
+async def test_a_body_over_64_kb_is_refused_with_413_before_the_route_reads_or_parses_it(web_app, path):
+    # AC-13(v23): 64 KB を超える本文は、解析の前に 413(Content-Length が超えていれば、本文を読まずに断る)。本文は JSON ですらないので、ルートが読めば 422 になる。
+    browser = web_app.browser()
+
+    refused = await browser.client.post(path, content=b"x" * (BODY_LIMIT + 1), headers=JSON_HEADERS)
+
+    assert (refused.status_code, refused.json()) == (413, {"detail": "request_body_too_large"})
+    assert refused.headers["Connection"] == "close"  # 読み切っていない本文を残さない
+
+
+async def test_a_body_of_exactly_the_limit_is_handed_to_the_route_and_one_byte_more_is_refused(web_app):
+    # 比べるために: 小さい壊れた JSON は 422(ルートが解析した)。ちょうど 64 KB の壊れた本文も 422(上限は超えていない)。1 バイト超えれば 413。
+    browser = web_app.browser()
+    path = "/v1/demo/negotiations"
+
+    small = await browser.client.post(path, content=b"x" * 100, headers=JSON_HEADERS)
+    at_limit = await browser.client.post(path, content=b"x" * BODY_LIMIT, headers=JSON_HEADERS)
+    over = await browser.client.post(path, content=b"x" * (BODY_LIMIT + 1), headers=JSON_HEADERS)
+
+    assert (small.status_code, at_limit.status_code, over.status_code) == (422, 422, 413)
+
+
+async def test_a_body_over_64_kb_is_refused_before_the_session_the_header_check_and_the_rate_limits(web_app, monkeypatch):
+    # ミドルウェアの順(外 → 内): 本文の上限 → セッション。有効なクッキーがあっても、利用記録に触れず、入口の枠を数えない。
+    # X-Requested-With がなくても 413(セッションのミドルウェアの 403 より先)。
+    browser = web_app.browser()
+    pid = await browser.register()
+    touched, admitted = [], []
+
+    async def touch(principal_id):
+        touched.append(principal_id)
+
+    async def admit(entrance, client):
+        admitted.append(entrance)
+
+    monkeypatch.setattr(web_app.services.meta, "touch", touch)
+    monkeypatch.setattr(web_app.services.limiter, "admit", admit)
+    oversized = b"x" * (BODY_LIMIT + 1)
+
+    with_cookie = await browser.client.post(f"/v1/principals/{pid}/interview/begin", content=oversized, headers=JSON_HEADERS)
+    without_header = await browser.client.post(f"/v1/principals/{pid}/interview/begin", content=oversized)  # X-Requested-With なし
+
+    assert with_cookie.status_code == without_header.status_code == 413
+    assert (touched, admitted) == ([], [])  # セッションのミドルウェアにも、入口の枠にも、届いていない
+
+
+@pytest.mark.parametrize("path", ["/v1/demo/negotiations", "/v1/principals/someone/interview/begin", "/v1/demo/meter"])
+async def test_a_body_without_a_declared_length_is_counted_while_it_is_read_and_cut_off_at_64_kb(web_app, path):
+    # AC-13(v23): 宣言のない本文(チャンク送信)も、読みながら数えて 413。上限を超えた時点で、読むのをやめる(4,096 バイトずつ 16 個 = ちょうど 64 KB
+    # までは読み、17 個目で超えて止まる。残りの 83 個は、読まない)。
+    browser = web_app.browser()
+    pulled = []
+
+    async def chunks():
+        for index in range(100):
+            pulled.append(index)
+            yield b"a" * 4096
+
+    response = await browser.client.post(path, content=chunks(), headers=JSON_HEADERS)
+
+    assert (response.status_code, response.json()) == (413, {"detail": "request_body_too_large"})
+    assert response.headers["Connection"] == "close"
+    assert len(pulled) == 17
+
+
+async def test_a_chunked_body_with_a_valid_session_is_refused_with_413_before_the_session_touch_the_lock_or_the_route(web_app, monkeypatch):
+    # AC-13(v24。X-90): 宣言のない大きな本文は、有効なクッキーつきでも、セッションのミドルウェア(利用記録の更新・依頼者のロック)より前に 413 になる。
+    # 本文を読まないルート(discard)も、上限の判定なしに状態を変えない。v23 では、本文を読むルートが読むまで数えなかったので、413 の前にこれらが走った。
+    browser = web_app.browser()
+    pid = await browser.register()
+    touched, locked, called = [], [], []
+    real_touch, real_lock = web_app.services.meta.touch, web_app.services.locks.lock
+
+    async def touch(principal_id):
+        touched.append(principal_id)
+        return await real_touch(principal_id)
+
+    def lock(principal_id):
+        locked.append(principal_id)
+        return real_lock(principal_id)
+
+    monkeypatch.setattr(web_app.services.meta, "touch", touch)
+    monkeypatch.setattr(web_app.services.locks, "lock", lock)
+    monkeypatch.setattr(web_app.services.interview, "discard", lambda principal_id: called.append(principal_id) or {"status": "discarded"})
+    pulled = []
+
+    async def chunks():
+        for index in range(100):
+            pulled.append(index)
+            yield b"a" * 4096
+
+    for route in ("begin", "discard"):  # 本文を宣言するルートと、本文を読まないルート
+        pulled.clear()
+        response = await browser.client.post(f"/v1/principals/{pid}/interview/{route}", content=chunks(), headers=JSON_HEADERS)
+
+        assert (response.status_code, response.json()) == (413, {"detail": "request_body_too_large"}), route
+        assert response.headers["Connection"] == "close" and len(pulled) == 17, route
+    assert (touched, locked, called) == ([], [], [])  # セッションにも、ロックにも、ルートにも届いていない
+
+    # 対照(足場の不備でないこと): 小さな本文なら、同じ要求が、セッションのミドルウェアにもルートにも届く
+    async def small():
+        yield b"{}"
+
+    response = await browser.client.post(f"/v1/principals/{pid}/interview/discard", content=small(), headers=JSON_HEADERS)
+
+    assert response.status_code == 200
+    assert (touched, locked, called) == ([pid], [pid], [pid])
+
+
+async def test_a_slow_body_times_out_with_408_without_reaching_the_session_or_the_route(make_env, monkeypatch):
+    # AC-13(v24。X-90): 本文が期限(ここでは 0.2 秒)までに読み切れなければ 408。セッションのミドルウェアにもルートにも渡さない。応答には Connection: close。
+    short = dataclasses.replace(
+        DEFAULT_WEB_CONFIG, limits=dataclasses.replace(DEFAULT_WEB_CONFIG.limits, request_body_timeout_seconds=0.2)
+    )
+    env = make_env(config=short)
+    browser = env.browser()
+    pid = await browser.register()
+    touched, begun = [], []
+
+    async def touch(principal_id):
+        touched.append(principal_id)
+        raise AssertionError("the session middleware must not run for a body that timed out")
+
+    monkeypatch.setattr(env.services.meta, "touch", touch)
+    monkeypatch.setattr(env.services.interview, "begin", lambda *args: begun.append(args) or {})
+
+    async def stalled():
+        yield b'{"restart": '
+        await asyncio.sleep(30)  # 残りが届かない(期限で打ち切られるので、30 秒は待たない)
+        yield b"false}"
+
+    started = time.monotonic()
+    response = await browser.client.post(f"/v1/principals/{pid}/interview/begin", content=stalled(), headers=JSON_HEADERS)
+
+    assert (response.status_code, response.json()) == (408, {"detail": "request_body_timeout"})
+    assert response.headers["Connection"] == "close"
+    assert time.monotonic() - started < 5
+    assert (touched, begun) == ([], [])
+
+
+async def test_normal_small_posts_still_work_with_and_without_a_declared_length(make_env):
+    # 本文を読み切ってから渡し直しても、普通の小さな POST は、そのまま通る(Content-Length あり・チャンク送信)。ルートは、本文の全体を読む。
+    env = make_env()
+    browser = env.browser()
+    body = json.dumps(create_body(1)).encode()
+
+    declared = await post(browser, CREATE, content=body)
+
+    async def in_chunks():
+        for start in range(0, len(body), 20):
+            yield body[start : start + 20]
+
+    chunked = await browser.client.post(CREATE, content=in_chunks(), headers=JSON_HEADERS)
+    empty = await browser.client.post("/v1/principals/someone/delete", headers=REQUESTED_WITH)  # 本文のない POST(Content-Length: 0)も、待たずに通る
+
+    assert declared.status_code == 200
+    assert chunked.status_code == 200 and chunked.json() == declared.json()  # 同じ request_id の再送: 同じ交渉
+    assert empty.status_code == 401  # 本文のない要求が、ルートまで届いている(セッションがないので 401)
+
+
+async def test_the_limit_counts_a_body_on_any_method_and_leaves_requests_without_a_body_alone(web_app):
+    browser = web_app.browser()
+
+    plain = await browser.client.get("/health")
+    with_body = await browser.client.request("GET", "/health", content=b"x" * (BODY_LIMIT + 1))
+
+    assert plain.status_code == 200
+    assert (with_body.status_code, with_body.json()) == (413, {"detail": "request_body_too_large"})
+
+
+async def test_the_per_route_limits_stay_in_place_under_the_overall_limit(make_env):
+    # ルートごとの上限(攻撃 32 KB)は、全体の上限(64 KB)の内側にそのまま残る: 33,000 バイトは、全体の上限は通り、攻撃の口の上限で断る(body_too_large)。
+    env = make_env()
+    browser = env.browser()
+    body = b'{"request_id":"request-0001","instruction":"' + b"a" * 33000 + b'"}'
+
+    refused = await post(browser, CREATE, content=body)
+
+    assert (refused.status_code, refused.json()) == (413, {"detail": "body_too_large"})
+
+
+# --- ミドルウェアそのもの(ASGI のまま) ---
+
+CHUNKED = [(b"transfer-encoding", b"chunked")]
+
+
+async def _call(app, headers: list[tuple[bytes, bytes]], chunks: list[bytes], *, method: str = "POST") -> list[dict]:
+    """ミドルウェアを ASGI のまま呼ぶ(本文は chunks を 1 個ずつ渡す。最後の 1 個だけ more_body が偽)。app が送ったメッセージを返す。"""
+    sent: list[dict] = []
+    pending = list(chunks)
+
+    async def receive():
+        body = pending.pop(0) if pending else b""
+        return {"type": "http.request", "body": body, "more_body": bool(pending)}
+
+    async def send(message):
+        sent.append(message)
+
+    await app({"type": "http", "method": method, "path": "/", "headers": headers}, receive, send)
+    return sent
+
+
+def _reading_app(seen: list[int]):
+    """本文をすべて読んで、読んだバイト数を seen に残し、200 を返す app。"""
+
+    async def app(scope, receive, send):
+        total = 0
+        while True:
+            message = await receive()
+            total += len(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        seen.append(total)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    return app
+
+
+def _limit(app, *, max_bytes: int = 10, timeout_seconds: float = 5) -> RequestBodyLimitMiddleware:
+    return RequestBodyLimitMiddleware(app, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
+
+
+async def test_the_middleware_refuses_a_declared_length_over_the_limit_without_calling_the_app():
+    seen: list[int] = []
+    middleware = _limit(_reading_app(seen))
+
+    sent = await _call(middleware, [(b"content-length", b"11")], [b"x" * 11])
+
+    assert sent[0]["status"] == 413 and (b"connection", b"close") in sent[0]["headers"]
+    assert json.loads(sent[1]["body"]) == {"detail": "request_body_too_large"}
+    assert seen == []  # 下流の app は、呼ばれていない(本文も読んでいない)
+
+
+@pytest.mark.parametrize("declared", [b"abc", b"-5", b""], ids=["text", "negative", "empty"])
+async def test_a_content_length_that_is_not_a_number_is_ignored_and_the_bytes_are_counted_instead(declared):
+    # 数字でない宣言は信じない: 宣言なしと同じに、読みながら数える。ちょうど上限は通り、超えた時点で 413(下流の app は呼ばない)。
+    seen: list[int] = []
+    middleware = _limit(_reading_app(seen))
+
+    ok = await _call(middleware, [(b"content-length", declared)], [b"x" * 10])
+    assert ok[0]["status"] == 200 and seen == [10]
+    over = await _call(middleware, [(b"content-length", declared)], [b"x" * 6, b"y" * 5])
+    assert over[0]["status"] == 413 and (b"connection", b"close") in over[0]["headers"]
+    assert seen == [10]  # 下流の app は、2 回目には呼ばれていない
+
+
+async def test_a_declared_length_smaller_than_the_real_body_is_not_trusted():
+    # 宣言(5)が小さくても、実際に届いた本文のバイト数を数える
+    seen: list[int] = []
+    middleware = _limit(_reading_app(seen))
+
+    sent = await _call(middleware, [(b"content-length", b"5")], [b"x" * 6, b"y" * 6])
+
+    assert sent[0]["status"] == 413 and seen == []
+
+
+async def test_the_body_is_read_to_the_end_before_the_app_is_called_and_handed_over_as_one_message():
+    # X-90: 本文は、内側(セッションのミドルウェアとルート)を呼ぶ前に、すべて読む。渡し直した本文は 1 つのメッセージ(more_body は偽)。
+    # 渡し直したあとの receive は、元の receive のまま(切断の知らせが届く)。
+    events: list[str] = []
+    pending = [b"abc", b"def", b"gh"]
+
+    async def receive():
+        if pending:
+            events.append(f"server:{pending[0].decode()}")
+            body = pending.pop(0)
+            return {"type": "http.request", "body": body, "more_body": bool(pending)}
+        events.append("server:disconnect")
+        return {"type": "http.disconnect"}
+
+    received: list[dict] = []
+
+    async def app(scope, inner_receive, send):
+        events.append("app:start")
+        received.append(await inner_receive())
+        received.append(await inner_receive())
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    await _limit(app)({"type": "http", "method": "POST", "path": "/", "headers": CHUNKED}, receive, send)
+
+    assert events == ["server:abc", "server:def", "server:gh", "app:start", "server:disconnect"]  # 本文を読み切ってから、app が始まる
+    assert received == [{"type": "http.request", "body": b"abcdefgh", "more_body": False}, {"type": "http.disconnect"}]
+    assert sent[0]["status"] == 204
+
+
+async def test_a_body_that_is_not_complete_within_the_time_gets_a_408_and_the_app_is_not_called():
+    # X-90: 期限は、本文の全体に対する(チャンクごとではない): 0.03 秒おきに届き続けても、全体が 0.1 秒を超えれば 408。
+    called: list[int] = []
+
+    async def app(scope, receive, send):
+        called.append(1)
+
+    async def receive():
+        await asyncio.sleep(0.03)
+        return {"type": "http.request", "body": b"x", "more_body": True}  # 終わらない
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    started = time.monotonic()
+    await _limit(app, max_bytes=10_000, timeout_seconds=0.1)({"type": "http", "method": "POST", "path": "/", "headers": CHUNKED}, receive, send)
+
+    assert time.monotonic() - started < 2
+    assert sent[0]["status"] == 408 and (b"connection", b"close") in sent[0]["headers"]
+    assert json.loads(sent[1]["body"]) == {"detail": "request_body_timeout"}
+    assert called == []  # 下流の app は、呼ばれていない
+
+
+async def test_a_body_that_stalls_before_its_first_byte_also_gets_a_408():
+    called: list[int] = []
+
+    async def app(scope, receive, send):
+        called.append(1)
+
+    async def receive():
+        await asyncio.sleep(30)
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    declared = [(b"content-length", b"100")]  # 100 バイトと宣言して、1 バイトも送らない
+    await _limit(app, max_bytes=1000, timeout_seconds=0.05)({"type": "http", "method": "POST", "path": "/", "headers": declared}, receive, send)
+
+    assert sent[0]["status"] == 408 and called == []
+
+
+@pytest.mark.parametrize("headers", [[], [(b"content-length", b"0")], [(b"accept", b"application/json")]], ids=["no-headers", "length-0", "other-headers"])
+async def test_a_request_without_a_body_is_passed_on_at_once_without_reading_anything(headers):
+    # X-90: 本文のない要求(GET・HEAD など。Content-Length がない・0 で、Transfer-Encoding もない)は、待たずに、何も読まずに通す(SSE を遅らせない)。
+    # この receive は、読まれたら記録して、切断まで返らない(本文のない要求の receive が、サーバによっては、そうなる)。
+    reads: list[int] = []
+    given: list[object] = []
+
+    async def receive():
+        reads.append(1)
+        await asyncio.sleep(3600)
+
+    async def app(scope, inner_receive, send):
+        given.append(inner_receive)
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    for method in ("GET", "HEAD", "POST"):
+        await asyncio.wait_for(
+            _limit(app, timeout_seconds=0.05)({"type": "http", "method": method, "path": "/", "headers": headers}, receive, send), 2
+        )
+
+    assert reads == []  # 1 回も読んでいない
+    assert given == [receive] * 3 and [message["status"] for message in sent[::2]] == [204] * 3  # 元の receive を、そのまま渡した
+
+
+async def test_a_client_that_goes_away_before_the_body_is_complete_gets_no_response_and_the_app_is_not_called():
+    called: list[int] = []
+
+    async def app(scope, receive, send):
+        called.append(1)
+
+    messages = iter([{"type": "http.request", "body": b"ab", "more_body": True}, {"type": "http.disconnect"}])
+
+    async def receive():
+        return next(messages)
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    await _limit(app)({"type": "http", "method": "POST", "path": "/", "headers": CHUNKED}, receive, send)
+
+    assert (called, sent) == ([], [])  # 返す相手がいない
+
+
+async def test_a_body_over_the_limit_stops_the_reading_at_the_chunk_that_crosses_it():
+    pulled: list[int] = []
+
+    async def app(scope, receive, send):
+        raise AssertionError("not called")
+
+    async def receive():
+        pulled.append(1)
+        return {"type": "http.request", "body": b"x" * 4, "more_body": True}
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    await _limit(app, max_bytes=10)({"type": "http", "method": "POST", "path": "/", "headers": CHUNKED}, receive, send)
+
+    assert len(pulled) == 3 and sent[0]["status"] == 413  # 4 + 4 + 4 バイト目で 10 を超えた: そこで止める
+
+
+async def test_the_middleware_passes_other_scopes_through_and_refuses_a_nonsense_limit():
+    events: list[str] = []
+
+    async def inner(scope, receive, send):
+        events.append(scope["type"])
+
+    await _limit(inner)({"type": "lifespan"}, None, None)
+
+    assert events == ["lifespan"]
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="max_bytes"):
+            _limit(inner, max_bytes=bad)
+    for bad in (0, -1, -0.5):
+        with pytest.raises(ValueError, match="timeout_seconds"):
+            _limit(inner, timeout_seconds=bad)
+
+
+@pytest.mark.parametrize("method", ["HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"])
+def test_methods_other_than_get_and_post_are_refused_before_the_session_touch(method):
+    # 有効なクッキーの有無によらず、GET・POST 以外は、クッキーの読み出しとセッションの確認(利用記録の touch)より前に 405(v24。C-73 の抜け道)
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from web.session_middleware import PrincipalSessionMiddleware
+
+    calls = []
+
+    class Refuse:
+        def read(self, *args, **kwargs):
+            calls.append("codec.read")
+            raise AssertionError("the cookie must not be read")
+
+        async def touch(self, *args, **kwargs):
+            calls.append("meta.touch")
+            raise AssertionError("touch must not run")
+
+        def lock(self, *args, **kwargs):
+            calls.append("locks.lock")
+            raise AssertionError("the principal lock must not be taken")
+
+    inner = Starlette(routes=[Route("/v1/session", lambda request: PlainTextResponse("ok"), methods=["GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"])])
+    middleware = PrincipalSessionMiddleware.__new__(PrincipalSessionMiddleware)
+    middleware.app = inner
+    middleware._session_free_prefixes = ()
+    middleware._codec = middleware._meta = middleware._locks = Refuse()
+    client = TestClient(middleware)
+    response = client.request(method, "/v1/session", headers={"Cookie": "anon_session=whatever", "X-Requested-With": "x"})
+
+    assert response.status_code == 405
+    assert response.headers["Allow"] == "GET, POST"  # v25。L22-1
+    assert calls == []

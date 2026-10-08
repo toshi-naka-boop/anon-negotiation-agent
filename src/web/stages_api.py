@@ -4,7 +4,8 @@
 他人の交渉も、同じ 403)。セッションがなければ 401。状態を変える POST は、ミドルウェアが X-Requested-With を必須にする。
 - GET  /v1/negotiations/{nid}/stage          候補者から見た段の状態(StageView)。純粋な読み出し(台帳 X-84): 段の状態がなければ作る(冪等な作成。
                                              台帳 L9-4)だけで、判定の検出・架空の求人の自動応答・台帳は書かない(決着処理は、レフェリーの完了のフックと
-                                             見回りが行う。web.stages.StageSettler)。判定の前は、見込みを出さない(FR-26)。
+                                             見回りが行う。web.stages.StageSettler)。判定の前は、見込みを出さない(FR-26)。決着処理を済ませたかは
+                                             settled で返す(画面は、判定の後、settled でない間だけ読み直す。台帳 C-67)。
 - POST /v1/negotiations/{nid}/stage/meet     「会う」。本文は {"job_summary": "..."}(匿名職務要約。前後の空白を除いて 1 文字以上
                                              [web.stages] job_summary_max_chars 文字以下。本文は [web.stages] max_request_body_bytes まで)。
                                              合意で終わった交渉だけ(判定の前は 409 not_judged、見込み「なし」は 409 not_agreed)。冪等。この操作は、

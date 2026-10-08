@@ -11,6 +11,10 @@ GCP にも、実物の gcloud・curl にも接続しない。スクリプトは�
 - `--list` が、(a)〜(i) と §10 の項目名を出す(環境変数なしで動く)。`--show-expected` は gcloud を呼ばずに、期待する主体の集合を出す。
 - 「良い世界」(すべて本番の設定どおり)では、VAULT_MODE=tee・cloudrun のどちらでも、SKIP にしている項目のほかが、すべて [OK]・終了コード 0。
 - 項目ごとに、設定を 1 つ壊すと [NG](終了コード 1)になり、理由が出る。gcloud・curl が失敗したときも [NG](確かめられないものを通さない)。
+- agents の起動元(iam-agents)は、サービスに直に付いた束縛に加えて、Policy Analyzer が列挙する run.routes.invoke を持つ主体(継承込み)が、
+  web の SA と承認済みのオーナーだけであること(X-86)。web の TEE の設定(web-vault-env)は、VAULT_EXPECTED_ZONE・VAULT_EXPECTED_INSTANCE も、金庫の VM と一致すること(L20-8)。
+- (i)(tee-i)は、組織の配下でなければ [SKIP](拒否ポリシーは作れない。I-37)。組織の配下(祖先に組織がある・ORG_ID がある)なら、これまでどおり確かめる。
+  プール管理者の問い合わせ(tee-b-pool)は、完全な形の権限名(iam.googleapis.com/...)で行う(I-39)。
 - 読み出しだけを行う(--reset-vault がなければ、gcloud に書き込みの動詞を渡さない)。--reset-vault は、停止→開始を 1 回だけ行い(reset は使わない)、再起動の後の自己試験を確かめる。
 - トークンの値は、出力にも、curl の引数にも出ない(ヘッダは標準入力で渡す)。
 - uv pip show aiohttp は、実物の uv でも動く(リポジトリの環境に aiohttp はない)。
@@ -34,11 +38,14 @@ PROJECT_ID = "demo-project"
 PROJECT_NUMBER = "123456789012"
 REGION = "asia-northeast1"
 ZONE = "asia-northeast1-b"
+VM_NAME = "vault-tee"
 WEB_URL = "https://web-abc.a.run.app"
 AGENTS_URL = "https://agents-abc.a.run.app"
 VAULT_RUN_URL = "https://vault-abc.a.run.app"
 WEB_SA = f"web-run@{PROJECT_ID}.iam.gserviceaccount.com"
 VAULT_SA = f"vault-tee@{PROJECT_ID}.iam.gserviceaccount.com"
+COMPUTE_SA = f"{PROJECT_NUMBER}-compute@developer.gserviceaccount.com"  # Compute Engine の既定の SA(プロジェクトの roles/editor。run.routes.invoke を含む)
+CI_SA = f"ci-runner@{PROJECT_ID}.iam.gserviceaccount.com"  # プロジェクトに roles/run.invoker を付けられた SA
 OWNER = "owner@example.com"
 DIGEST = "sha256:" + "ab" * 32
 OLD_DIGEST = "sha256:" + "cd" * 32
@@ -211,7 +218,7 @@ def make_world(mode: str = "tee") -> dict:
     adk = {"ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS": "false"}
     web_env = {**adk, **vertex, "VAULT_BASE_URL": "https://10.10.0.10:8443" if mode == "tee" else VAULT_RUN_URL}
     if mode == "tee":
-        web_env.update({"VAULT_TEE": "true", "VAULT_SERVICE_ACCOUNT": VAULT_SA})
+        web_env.update({"VAULT_TEE": "true", "VAULT_SERVICE_ACCOUNT": VAULT_SA, "VAULT_EXPECTED_ZONE": ZONE, "VAULT_EXPECTED_INSTANCE": VM_NAME})
     scale = {
         "autoscaling.knative.dev/minScale": "1",
         "autoscaling.knative.dev/maxScale": "1",
@@ -246,6 +253,8 @@ def make_world(mode: str = "tee") -> dict:
         "ancestors": [{"id": PROJECT_ID, "type": "project"}],  # 組織の配下ではない(組織の配下の世界は、試験が organization を足す)
         "kms_analysis": analysis_json([f"user:{OWNER}", POOL_PATTERN.format(digest=DIGEST)]),
         "pool_analysis": analysis_json([f"user:{OWNER}"]),
+        # run.routes.invoke を持つ主体(agents を呼べる主体): web の SA(サービスの束縛)と、承認済みのオーナー(基本ロール)だけ
+        "agents_analysis": analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}"]),
         "key": {"name": KEY_NAME, "primary": {"name": PRIMARY, "state": "ENABLED", "createTime": "2026-10-03T12:00:00.123456Z"}},
         "versions": [
             {"name": f"{KEY_NAME}/cryptoKeyVersions/1", "state": "DISABLED"},
@@ -328,6 +337,7 @@ def scenario_of(world: dict) -> dict:
     add("ancestors", ["projects get-ancestors"], world["ancestors"])
     add("kms-analysis", ["asset analyze-iam-policy", "//cloudkms.googleapis.com/"], world["kms_analysis"])
     add("pool-analysis", ["asset analyze-iam-policy", "//cloudresourcemanager.googleapis.com/projects/"], world["pool_analysis"])
+    add("agents-analysis", ["asset analyze-iam-policy", "//run.googleapis.com/"], world["agents_analysis"])
     add("kms-key", ["kms keys describe vault-kek"], world["key"])
     add("kms-versions", ["kms keys versions list"], world["versions"])
     add("vm", ["compute instances describe vault-tee"], world["vm"])
@@ -612,9 +622,9 @@ def test_a_good_tee_world_passes_and_every_item_has_exactly_one_line(good_tee):
     listed = subprocess.run([BASH, str(SCRIPT), "--list"], capture_output=True, text=True).stdout.splitlines()[1:]
     assert set(good_tee.items) == {line.split()[0] for line in listed}
     assert not [item for item, (status, _, _) in good_tee.items.items() if status == "NG"]
-    # SKIP は、確かめられない項目・Cloud Run 版だけの項目・--reset-vault なしの再起動だけ
+    # SKIP は、確かめられない項目・Cloud Run 版だけの項目・--reset-vault なしの再起動・組織の配下でない世界の (i)(拒否ポリシーは作れない。I-37)だけ
     skipped = {item for item, (status, _, _) in good_tee.items.items() if status == "SKIP"}
-    assert skipped == ALWAYS_SKIP | {"iam-vault", "vault-command", "tee-h-reset"}
+    assert skipped == ALWAYS_SKIP | {"iam-vault", "vault-command", "tee-h-reset", "tee-i"}
     assert re.search(r"結果: OK \d+・NG 0・SKIP \d+", good_tee.stdout)
 
 
@@ -724,6 +734,11 @@ NG_CASES = [
     ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_BASE_URL", "http://10.10.0.10:8443"), "https", "tee"),
     ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_SERVICE_ACCOUNT", "someone@example.com"), "VAULT_SERVICE_ACCOUNT", "tee"),
     ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_BASE_URL", None), "VAULT_BASE_URL が未設定", "tee"),
+    # L20-8: web は、あれば金庫の VM のゾーン・名前を照合し、なければ照合しない。必須にして、金庫の VM(ZONE・VM_NAME)と一致させる
+    ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_EXPECTED_ZONE", None), "VAULT_EXPECTED_ZONE が未設定", "tee"),
+    ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_EXPECTED_INSTANCE", None), "VAULT_EXPECTED_INSTANCE が未設定", "tee"),
+    ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_EXPECTED_ZONE", "asia-northeast1-a"), "VAULT_EXPECTED_ZONE が 'asia-northeast1-a'(期待: asia-northeast1-b)", "tee"),
+    ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_EXPECTED_INSTANCE", "vault-tee-2"), "VAULT_EXPECTED_INSTANCE が 'vault-tee-2'(期待: vault-tee)", "tee"),
     ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_BASE_URL", "https://other.a.run.app"), "金庫の Cloud Run サービスの URL", "cloudrun"),
     ("web-vault-env", lambda w: edit_env(w, "web", "VAULT_TEE", "true"), "VAULT_MODE=cloudrun", "cloudrun"),
     ("agents-url", lambda w: w["files"].update(params='[agents]\npublic_base_url = "http://localhost:8080"\n'), "localhost:8080", "tee"),
@@ -732,6 +747,20 @@ NG_CASES = [
     ("iam-agents", lambda w: w["iam"]["agents"]["bindings"][0]["members"].append("user:friend@example.com"), "friend@example.com", "tee"),
     ("iam-agents", lambda w: w["iam"]["agents"].update(bindings=[]), "なし", "tee"),
     ("iam-agents", lambda w: w["svc"]["agents"]["metadata"]["annotations"].update({"run.googleapis.com/invoker-iam-disabled": "true"}), "invoker-iam-disabled", "tee"),
+    # X-86: サービスの束縛が web の SA だけでも、プロジェクトなど上位の階層の束縛から agents を呼べる主体(Policy Analyzer の列挙)がいれば NG
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}", f"serviceAccount:{COMPUTE_SA}"])), COMPUTE_SA, "tee"),  # roles/editor
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}", f"serviceAccount:{CI_SA}"])), CI_SA, "tee"),  # プロジェクトの roles/run.invoker
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}", "allAuthenticatedUsers"])), "allAuthenticatedUsers", "tee"),
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}", f"serviceAccount:{COMPUTE_SA}"])), COMPUTE_SA, "cloudrun"),
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}"], fully_explored=False)), "未完了", "tee"),
+    ("iam-agents", lambda w: w.update(agents_analysis=[]), "想定の形でない", "tee"),
+    # 結果に web の SA・承認済みのオーナーがいないのも NG(権限名・資源名の形が違うと、エラーにならずに 0 件が返ることがある。I-39)
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"user:{OWNER}"])), f"足りない(期待にあって、解析の結果にない): {WEB_SA}", "tee"),
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}"])), f"足りない(期待にあって、解析の結果にない): {OWNER}", "tee"),
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([])), "結果が 0 件", "tee"),
+    # Google 管理のサービスエージェントは、このプロジェクトの Vertex AI・Cloud Run の 2 つだけを許す(ほかのサービスエージェントは想定外)
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}", f"serviceAccount:service-{PROJECT_NUMBER}@gcp-sa-cloudbuild.iam.gserviceaccount.com"])), "gcp-sa-cloudbuild", "tee"),
+    ("iam-agents", lambda w: w.update(agents_analysis=analysis_json([f"serviceAccount:{WEB_SA}", f"user:{OWNER}", "serviceAccount:service-999999999999@gcp-sa-aiplatform.iam.gserviceaccount.com"])), "service-999999999999", "tee"),
     ("iam-vault", lambda w: w["iam"]["vault"]["bindings"][0]["members"].append("allAuthenticatedUsers"), "allAuthenticatedUsers", "cloudrun"),
     ("vault-command", lambda w: remove_command(w, "vault"), "起動コマンド", "cloudrun"),
     ("vault-command", lambda w: edit_container(w, "vault", command=["uvicorn", "web.app:create_app_from_env", "--factory"]), "web.app", "cloudrun"),
@@ -768,6 +797,7 @@ def test_breaking_one_setting_makes_the_item_ng(repo, item, change, fragment, mo
     [
         ("adk-capture", "svc-web"),
         ("iam-agents", "iam-agents"),
+        ("iam-agents", "agents-analysis"),
         ("ttl-default", "ttl-default"),
         ("ttl-vault", "ttl-vault"),
         ("request-log", "sink-default"),
@@ -781,6 +811,8 @@ def test_breaking_one_setting_makes_the_item_ng(repo, item, change, fragment, mo
 )
 def test_a_failing_gcloud_call_is_ng_not_a_pass(repo, item, name):
     world = make_world("tee")
+    if item == "tee-i":
+        world["ancestors"] = IN_ORGANIZATION  # (i) は、組織の配下のときだけ確かめる(組織の配下でなければ SKIP。I-37)
     world["fail"][name] = (1, "ERROR: (gcloud.x) PERMISSION_DENIED: no permission")
 
     result = run_script(repo, world, "--only", item)
@@ -910,6 +942,11 @@ def test_show_expected_refuses_a_malformed_file(repo):
 IN_ORGANIZATION = [{"id": PROJECT_ID, "type": "project"}, {"id": "987654321", "type": "organization"}]
 
 
+def in_org(change):
+    """組織の配下の世界で change を行う(拒否ポリシーの照合 (i) は、組織の配下のときだけ。組織の配下でなければ SKIP。I-37)。"""
+    return lambda world: (world.update(ancestors=IN_ORGANIZATION), change(world))
+
+
 def edit_provider(world, **changes):
     world["providers"][0].update(changes)
 
@@ -938,10 +975,11 @@ TEE_NG_CASES = [
     ("tee-b", lambda w: w.update(kms_analysis=analysis_json([f"user:{OWNER}", f"serviceAccount:{VAULT_SA}", POOL_PATTERN.format(digest=DIGEST)])), VAULT_SA),
     ("tee-b", lambda w: w.update(ancestors=IN_ORGANIZATION), "ORG_ID=987654321 を設定"),
     ("tee-b-pool", lambda w: w.update(ancestors=IN_ORGANIZATION), "ORG_ID=987654321 を設定"),
+    ("iam-agents", lambda w: w.update(ancestors=IN_ORGANIZATION), "ORG_ID=987654321 を設定"),
     ("tee-c", lambda w: w.update(ancestors=IN_ORGANIZATION), "ORG_ID=987654321 を設定"),
     ("tee-b-pool", lambda w: w.update(pool_analysis=analysis_json([f"user:{OWNER}", "user:evil@example.com"])), "evil@example.com"),
     ("tee-b-pool", lambda w: w.update(pool_analysis=analysis_json([f"user:{OWNER}"], fully_explored=False)), "未完了"),
-    # Policy Analyzer は基本ロールのプール権限を数えない(実測)ので、プロジェクトの IAM の owner・pool admin の束縛も見る
+    # Policy Analyzer の結果に加えて、プロジェクトの IAM の owner・pool admin の束縛も見る(二重の守り。I-39)
     ("tee-b-pool", lambda w: (w.update(pool_analysis=analysis_json([])), w["project_iam"]["bindings"].append({"role": "roles/owner", "members": ["user:evil@example.com"]})), "evil@example.com"),
     ("tee-b-pool", lambda w: (w.update(pool_analysis=analysis_json([])), w["project_iam"]["bindings"].append({"role": "roles/iam.workloadIdentityPoolAdmin", "members": ["serviceAccount:ci@example.iam.gserviceaccount.com"]})), "ci@example.iam.gserviceaccount.com"),
     ("tee-b-pool", lambda w: w.update(pool_analysis=analysis_json([])), "1 件も見つからない"),
@@ -964,12 +1002,12 @@ TEE_NG_CASES = [
     ("tee-g", lambda w: w.update(audit_expected=[]), "1 件もない"),
     ("tee-h", lambda w: w["dek"]["fields"]["kek_version"].update(stringValue=f"{KEY_NAME}/cryptoKeyVersions/1"), "primary の版と違う"),
     ("tee-h", lambda w: w["dek"]["fields"].pop("kek_version"), "kek_version がない"),
-    ("tee-i", lambda w: w["fail"].update({"deny-policy": (1, "ERROR: (gcloud.iam.policies.get) NOT_FOUND: policy does not exist")}), "NOT_FOUND"),
-    ("tee-i", lambda w: w["deny"].update(name="policies/x/denypolicies/another-policy"), "name が vault-kek-deny でない"),
-    ("tee-i", lambda w: w["deny"]["rules"][0]["denyRule"].update(exceptionPrincipals=["principalSet://iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/other/*"]), "手順 G と違う"),
-    ("tee-i", lambda w: w["deny"]["rules"][0]["denyRule"].update(deniedPermissions=["cloudkms.googleapis.com/cryptoKeyVersions.useToDecrypt"]), "手順 G と違う"),
-    ("tee-i", lambda w: w["deny"]["rules"].append(w["deny"]["rules"][0]), "手順 G と違う"),
-    ("tee-i", lambda w: w["deny"].pop("rules"), "手順 G と違う"),
+    ("tee-i", in_org(lambda w: w["fail"].update({"deny-policy": (1, "ERROR: (gcloud.iam.policies.get) NOT_FOUND: policy does not exist")})), "NOT_FOUND"),
+    ("tee-i", in_org(lambda w: w["deny"].update(name="policies/x/denypolicies/another-policy")), "name が vault-kek-deny でない"),
+    ("tee-i", in_org(lambda w: w["deny"]["rules"][0]["denyRule"].update(exceptionPrincipals=["principalSet://iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/other/*"])), "手順 G と違う"),
+    ("tee-i", in_org(lambda w: w["deny"]["rules"][0]["denyRule"].update(deniedPermissions=["cloudkms.googleapis.com/cryptoKeyVersions.useToDecrypt"])), "手順 G と違う"),
+    ("tee-i", in_org(lambda w: w["deny"]["rules"].append(w["deny"]["rules"][0])), "手順 G と違う"),
+    ("tee-i", in_org(lambda w: w["deny"].pop("rules")), "手順 G と違う"),
 ]
 
 
@@ -983,7 +1021,7 @@ def test_breaking_one_tee_setting_makes_the_item_ng(repo, item, change, fragment
 
 
 def test_pool_admins_are_taken_from_the_project_iam_when_the_analyzer_returns_nothing(repo):
-    # 実測(2026-10-04): roles/owner のプール権限は Policy Analyzer に出ない。プロジェクトの IAM の owner の束縛で補う
+    # 二重の守り(I-39): Policy Analyzer が 0 件・欠けを返しても(権限名の形が違うと、エラーにならずに 0 件が返る)、プロジェクトの IAM の owner の束縛で補う
     def change(w):
         w.update(pool_analysis=analysis_json([]))
         w["project_iam"]["bindings"].append({"role": "roles/owner", "members": [f"user:{OWNER}"]})
@@ -993,6 +1031,21 @@ def test_pool_admins_are_taken_from_the_project_iam_when_the_analyzer_returns_no
     assert result.status("tee-b-pool") == "OK", result.stdout
     assert "Policy Analyzer 0" in result.text("tee-b-pool") and "owner/pool admin 1" in result.text("tee-b-pool")
     assert any("projects get-iam-policy" in call for call in result.commands)
+
+
+def test_agents_invokers_allow_this_projects_vertex_ai_and_cloud_run_service_agents(repo):
+    # 実測(2026-10-05): Vertex AI と Cloud Run のサービスエージェントは、役割に run.routes.invoke を含む。名前で許し、OK の文に数を出す
+    def change(w):
+        w.update(agents_analysis=analysis_json([
+            f"serviceAccount:{WEB_SA}", f"user:{OWNER}",
+            f"serviceAccount:service-{PROJECT_NUMBER}@gcp-sa-aiplatform.iam.gserviceaccount.com",
+            f"serviceAccount:service-{PROJECT_NUMBER}@serverless-robot-prod.iam.gserviceaccount.com",
+        ]))
+
+    result = run_script(repo, mutated("tee", change), "--only", "iam-agents")
+
+    assert result.status("iam-agents") == "OK", result.stdout
+    assert "サービスエージェント 2" in result.text("iam-agents")
 
 
 def test_policy_analyzer_uses_the_organization_when_org_id_is_given_and_the_project_otherwise(repo):
@@ -1005,10 +1058,12 @@ def test_policy_analyzer_uses_the_organization_when_org_id_is_given_and_the_proj
     assert "--permissions=cloudkms.cryptoKeyVersions.useToDecrypt,cloudkms.cryptoKeyVersions.useToEncrypt" in analysis_calls[0]
     # Policy Analyzer は WIF のプールを対象にできない(実測 INVALID_ARGUMENT)ので、プロジェクトを対象に解析する
     assert "--full-resource-name=//cloudresourcemanager.googleapis.com/projects/" + PROJECT_ID in analysis_calls[1]
+    # 権限名は完全な形(iam.googleapis.com/...)。iam.workloadIdentityPoolProviders.create の形では、Policy Analyzer は常に 0 件を返す(実測 2026-10-05。I-39)
     assert (
-        "--permissions=iam.workloadIdentityPoolProviders.create,iam.workloadIdentityPoolProviders.update,"
-        "iam.workloadIdentityPoolProviders.delete,iam.workloadIdentityPools.update" in analysis_calls[1]
-    )
+        "--permissions=iam.googleapis.com/workloadIdentityPoolProviders.create,iam.googleapis.com/workloadIdentityPoolProviders.update,"
+        "iam.googleapis.com/workloadIdentityPoolProviders.delete,iam.googleapis.com/workloadIdentityPoolProviders.undelete,"
+        "iam.googleapis.com/workloadIdentityPools.update,iam.googleapis.com/workloadIdentityPools.undelete"
+    ) in analysis_calls[1].split()
     organization_calls = [call for call in organization_scope.commands if "analyze-iam-policy" in call]
     assert len(organization_calls) == 2 and all("--organization=987654321" in call and "--project" not in call for call in organization_calls)
     assert "--show-response" in analysis_calls[0]  # 解析が未完了かの判定(fullyExplored)に要る
@@ -1021,19 +1076,125 @@ def test_policy_analyzer_uses_the_organization_when_org_id_is_given_and_the_proj
 def test_the_organization_scope_is_what_lets_a_project_in_an_organization_pass(repo):
     in_organization = mutated("tee", lambda w: w.update(ancestors=IN_ORGANIZATION))
 
-    with_org = run_script(repo, in_organization, "--only", "tee-b,tee-b-pool,tee-c", env_extra={"ORG_ID": "987654321"})
+    with_org = run_script(repo, in_organization, "--only", "tee-b,tee-b-pool,tee-c,iam-agents", env_extra={"ORG_ID": "987654321"})
     unknown_ancestors = make_world("tee")
     unknown_ancestors["fail"]["ancestors"] = (1, "ERROR: (gcloud.projects.get-ancestors) denied")
-    without_ancestors = run_script(repo, unknown_ancestors, "--only", "tee-b")
+    without_ancestors = run_script(repo, unknown_ancestors, "--only", "tee-b,iam-agents")
 
-    assert [with_org.status(item) for item in ("tee-b", "tee-b-pool", "tee-c")] == ["OK", "OK", "OK"]
-    # 祖先を取れなかったときは、止めずに、弱い範囲であることを書く
-    assert without_ancestors.status("tee-b") == "OK" and "祖先を確かめられなかった" in without_ancestors.items["tee-b"][1]
+    assert [with_org.status(item) for item in ("tee-b", "tee-b-pool", "tee-c", "iam-agents")] == ["OK", "OK", "OK", "OK"]
+    # 祖先を取れなかったときは、組織が無いと確かめられないので不合格(--project の範囲で合格にしない。v24。X-88)
+    for item in ("tee-b", "iam-agents"):
+        assert without_ancestors.status(item) == "NG", without_ancestors.stdout
+        assert "祖先を確かめられない" in without_ancestors.text(item) and "X-88" in without_ancestors.text(item)
+
+
+@pytest.mark.parametrize(
+    "ancestors",
+    [
+        [],  # 空(プロジェクトの行もない)
+        {"id": "x"},  # 配列でない
+        ["not-an-object"],  # 要素がオブジェクトでない
+    ],
+)
+def test_unreadable_ancestors_fail_the_policy_analyzer_checks(repo, ancestors):
+    # 祖先の出力が読めない・形が違うときも、組織が無いと確かめられないので不合格(v24。X-88)
+    result = run_script(repo, mutated("tee", lambda w: w.update(ancestors=ancestors)), "--only", "tee-b,tee-b-pool,tee-c,iam-agents")
+
+    for item in ("tee-b", "tee-b-pool", "tee-c", "iam-agents"):
+        assert result.status(item) == "NG", result.stdout
+        assert "X-88" in result.text(item)
+
+
+def test_org_id_skips_the_ancestor_check_entirely(repo):
+    # ORG_ID があれば祖先を読まずに組織の範囲で解析するので、祖先の取得の失敗は関係ない
+    world = mutated("tee", lambda w: (w.update(ancestors=IN_ORGANIZATION), w["fail"].update(ancestors=(1, "ERROR: denied"))))
+    result = run_script(repo, world, "--only", "tee-b,iam-agents", env_extra={"ORG_ID": "987654321"})
+
+    assert [result.status(item) for item in ("tee-b", "iam-agents")] == ["OK", "OK"], result.stdout
+
+
+# ---- agents を呼べる主体(iam-agents。X-86) ----
+
+
+def test_the_agents_invokers_are_listed_with_policy_analyzer_for_run_routes_invoke_on_the_service(repo):
+    project_scope = run_script(repo, make_world("tee"), "--only", "iam-agents")
+    organization_scope = run_script(repo, make_world("tee"), "--only", "iam-agents", env_extra={"ORG_ID": "987654321"})
+
+    assert project_scope.status("iam-agents") == "OK", project_scope.stdout
+    calls = [call for call in project_scope.commands if "analyze-iam-policy" in call]
+    assert len(calls) == 1
+    arguments = calls[0].split()
+    # Cloud Run のサービス(Cloud Asset の run.googleapis.com/Service)の完全な名前。範囲は --project(ORG_ID があれば --organization)
+    assert f"--full-resource-name=//run.googleapis.com/projects/{PROJECT_ID}/locations/{REGION}/services/agents" in arguments
+    assert "--permissions=run.routes.invoke" in arguments
+    assert f"--project={PROJECT_ID}" in arguments and not any(argument.startswith("--organization") for argument in arguments)
+    assert "--show-response" in arguments  # 解析が未完了かの判定(fullyExplored)に要る
+    assert "範囲: プロジェクトのみ(組織の配下ではない)" in project_scope.items["iam-agents"][1]
+    # サービスに直に付いた束縛の確認(これまでの確認)も行う
+    assert any("run services get-iam-policy agents" in call for call in project_scope.commands)
+    organization_calls = [call for call in organization_scope.commands if "analyze-iam-policy" in call]
+    assert len(organization_calls) == 1 and "--organization=987654321" in organization_calls[0].split() and "--project" not in organization_calls[0]
+    assert organization_scope.status("iam-agents") == "OK" and "範囲: 組織 987654321" in organization_scope.items["iam-agents"][1]
+
+
+def test_the_agents_invokers_are_compared_with_the_web_sa_and_the_approved_owners_after_normalizing_them(repo):
+    world = make_world("tee")
+    world["files"]["expected"]["owners"] = [OWNER, "user:Second.Owner@Example.com"]  # 大文字小文字・user: の接頭辞は、そろえて比べる
+    world["agents_analysis"] = analysis_json([f"serviceAccount:{WEB_SA.upper()}", f"user:{OWNER}", "user:second.owner@example.com"])
+
+    result = run_script(repo, world, "--only", "iam-agents")
+
+    assert result.status("iam-agents") == "OK", result.stdout
+    assert "3 件(web の SA 1・承認済みのオーナー 2・Google 管理のサービスエージェント 0)" in result.text("iam-agents")
+
+
+# ---- (i) 拒否ポリシー(組織の配下のときだけ確かめる。I-37) ----
+
+
+def test_i_is_skipped_without_asking_for_more_when_the_project_is_not_in_an_organization(repo):
+    # 拒否ポリシーを作る役割(Deny Admin)は組織にだけ付与できる。祖先に組織がなければ、拒否ポリシーは作れないので、NG でなく SKIP
+    world = make_world("tee")
+    world["fail"]["project-number"] = (1, "ERROR: (gcloud.projects.describe) denied")  # SKIP にプロジェクト番号は要らない
+
+    result = run_script(repo, world, "--only", "tee-i", drop=("PROJECT_NUMBER",))
+
+    assert result.status("tee-i") == "SKIP" and result.code == 0 and "NG 0" in result.stdout
+    for phrase in ("組織の配下でないので拒否ポリシーは作れない", "Deny Admin は組織にだけ付与できる", "I-37", "オーナーの抑止は監査ログの記録のみ"):
+        assert phrase in result.text("tee-i"), phrase
+    assert any("projects get-ancestors" in call for call in result.commands)
+    assert not any("iam policies get" in call or "projects describe" in call for call in result.commands)  # 作れないものを、取りに行かない
+
+
+def test_i_is_checked_as_before_when_an_organization_is_an_ancestor_or_org_id_is_given(repo):
+    by_ancestor = run_script(repo, mutated("tee", lambda w: w.update(ancestors=IN_ORGANIZATION)), "--only", "tee-i")
+    by_org_id = run_script(repo, make_world("tee"), "--only", "tee-i", env_extra={"ORG_ID": "987654321"})
+
+    assert by_ancestor.status("tee-i") == "OK" and by_org_id.status("tee-i") == "OK"
+    for result in (by_ancestor, by_org_id):
+        assert any("iam policies get vault-kek-deny" in call for call in result.commands)
+    assert not any("get-ancestors" in call for call in by_org_id.commands)  # ORG_ID があれば、祖先は見ない
+
+
+def test_i_is_not_skipped_when_the_ancestors_cannot_be_read(repo):
+    # 組織の配下でないと確かめられないときは、SKIP にしない(確かめられないものを、通ったことにしない)。これまでどおり、拒否ポリシーを確かめる
+    unknown = make_world("tee")
+    unknown["fail"]["ancestors"] = (1, "ERROR: (gcloud.projects.get-ancestors) denied")
+    refused = make_world("tee")
+    refused["fail"].update({"ancestors": (1, "ERROR: (gcloud.projects.get-ancestors) denied"), "deny-policy": (1, "ERROR: (gcloud.iam.policies.get) NOT_FOUND: policy does not exist")})
+
+    assert run_script(repo, unknown, "--only", "tee-i").status("tee-i") == "OK"
+    for unreadable_ancestors in ({"not": "a list"}, [], None):  # 形が違う・空(プロジェクト自身も返らない)も、確かめられていない
+        unreadable = make_world("tee")
+        unreadable["ancestors"] = unreadable_ancestors
+        assert run_script(repo, unreadable, "--only", "tee-i").status("tee-i") == "OK", unreadable_ancestors
+    result = run_script(repo, refused, "--only", "tee-i")
+    assert result.status("tee-i") == "NG" and "NOT_FOUND" in result.text("tee-i") and "SKIP にしない" in result.text("tee-i")
 
 
 def test_the_project_number_is_fetched_when_it_is_not_given_and_a_failure_is_ng(repo):
-    fetched = run_script(repo, make_world("tee"), "--only", "tee-i", drop=("PROJECT_NUMBER",))
-    world = make_world("tee")
+    in_organization = mutated("tee", lambda w: w.update(ancestors=IN_ORGANIZATION))
+    fetched = run_script(repo, in_organization, "--only", "tee-i", drop=("PROJECT_NUMBER",))
+    world = mutated("tee", lambda w: w.update(ancestors=IN_ORGANIZATION))
     world["fail"]["project-number"] = (1, "ERROR: (gcloud.projects.describe) denied")
     refused = run_script(repo, world, "--only", "tee-i", drop=("PROJECT_NUMBER",))
 
