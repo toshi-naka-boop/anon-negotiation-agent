@@ -17,8 +17,8 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "画面は Negocie の UX 設計（DESIGN.md。別のセッションが 7372f52 まで）に作り替え済み。呼び出し側で全体の試験 3885 件・保存領域の検査を確認。提出物の下書きは Negocie の名前と新しい画面に合わせた（b43347a）。次: 本番への反映（ユーザーの Run 1 回。イメージは前もって作る）→ tests/manual/ui_checklist.md の新しい表で確認と deploy_check → 動画（ユーザー）→ 記事の仕上げ → main への取り込み → 提出（10/14）。本番は 10/28 まで止めない。",
-  "lastUpdated": "2026-10-12",
+  "nextAction": "保留中（2026-10-13）: ユーザーの指示で、DESIGN.md のセッションが画面をもう一度作り直す（CRM 風の 2 カラム・配色 Morphous Blue Jay・求職者側にダミーの求人分析画面など）。本番への反映と main への取り込みは、その最終コミットが届くまで保留（app:b25ce1e は使わない）。届いたら: 全体の試験と保存領域の検査を確認 → 台本の操作の文を合わせる → イメージを作り直す → ユーザーの Run で反映 → tests/manual/ui_checklist.md と deploy_check で確認 → 動画（ユーザー）→ 記事の仕上げ → main への取り込み → 提出（10/14）。このセッションは static/・tests/test_ui_static.py・tests/manual/ui_checklist.md・DESIGN.md・CLAUDE.md に触らない。本番は 10/28 まで止めない。",
+  "lastUpdated": "2026-10-13",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
     "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）。v25（2026-10-08）: sonnet の worktree 1 本。1 本目は古い main（abada3c）から作られて ff できずに止まり、2 本目で `git checkout --detach 238d2ef` してから実装。画面の 3 つの場所（2026-10-12）: sonnet の worktree 1 本（基点に detach してから）",
