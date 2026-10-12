@@ -20,6 +20,11 @@ async function showNotice() {
 }
 
 showNotice();
+// ナビの「金庫の確認(TEE)」(/#tee)で来たときは、畳んである「詳しく見る」を開く
+if (location.hash === "#tee") {
+  const more = document.getElementById("more");
+  if (more) more.open = true;
+}
 showTee(document.getElementById("tee-body"), { load: () => call("GET /api/tee/attestation"), origin: location.origin });
 
 mountVeil();

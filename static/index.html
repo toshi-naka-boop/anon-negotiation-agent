@@ -41,16 +41,22 @@
   </header>
 
   <main>
-    <h1>匿名交渉エージェント</h1>
-    <p class="lead">
-      年収などの条件を、生の値のままではなく、グリッドの一番近いマスに丸めた形だけ預けて、AI のエージェントどうしが交渉します。
-      生の値は面談の間だけ扱い、送信したあとは、このブラウザにも残しません。
-    </p>
+    <section class="hero" aria-labelledby="hero-title">
+      <h1 id="hero-title">Negocie<span class="reading">(ネゴシエ)</span></h1>
+      <p class="tagline">本音を預けられる転職エージェント。</p>
+      <ul class="promises">
+        <li>相手に分かるのは、最大でもマス目 1 つぶん(年収なら 50 万円の幅)です。</li>
+        <li>生の値は、預けた後に保存しません。</li>
+        <li>面談中の AI の処理は Google Cloud で行われ、不正利用の監視のために一定期間記録され得ます。</li>
+      </ul>
+      <div class="cta"><a class="btn btn-primary btn-wide" href="/interview">面談を始める</a></div>
+      <p class="small muted">まず年収の 3 問だけ。途中でやめても、答えた分は 1 時間は残ります。</p>
+    </section>
 
     <div class="grid cols-3 spaced">
       <section class="card link-card place-card zone-seeker" aria-labelledby="place-seeker-title">
         <h2 id="place-seeker-title">求職者として使う</h2>
-        <p>あなた自身の条件で交渉する人向けです。面談で本音を預けると、丸めた形だけが保存され、AI のエージェントが代わりに交渉します。</p>
+        <p>あなた自身の条件で交渉する人向けです。面談で本音を預けると、丸めた形だけが残り、あなたのエージェントが代わりに交渉します。</p>
         <div class="row">
           <a class="btn btn-primary" href="/interview">面談で本音を預ける</a>
           <a class="btn" href="/me">自分の交渉</a>
@@ -78,12 +84,12 @@
     <div class="grid cols-2 spaced">
       <section class="card link-card" aria-labelledby="start-title">
         <h2 id="start-title">面談を始める</h2>
-        <p>年収・リモート・当直などの条件を聞き取り、丸めた形だけを保存します。下の注記を読んでから始めてください。</p>
+        <p>年収・リモート・当直などの条件を、短い問いで聞きます。答えたくない条件は飛ばせます。相手に伝わるのはマス目までです。</p>
         <a class="btn btn-primary" href="/interview">面談を始める</a>
       </section>
       <section class="card link-card" aria-labelledby="me-title">
         <h2 id="me-title">自分の交渉</h2>
-        <p>面談を送信したあと、求人を選んで交渉を始めます。活動ログの確認と、一時停止・再開・取消ができます。</p>
+        <p>預けた後は、ここで今どこまで進んでいるかが分かります。求人を選んで交渉を始め、途中の確認に答え、開示の記録を見られます。</p>
         <a class="btn" href="/me">自分の交渉を見る</a>
       </section>
     </div>
@@ -93,13 +99,17 @@
       <div id="notice-body"><p class="muted">読み込み中…</p></div>
     </section>
 
-    <section class="card" id="tee" aria-labelledby="tee-title">
-      <h2 id="tee-title">金庫の確認(TEE)</h2>
-      <p class="small muted">
-        条件を預かる「金庫」が、どのプログラムを、どんな環境で動かしているか。web が確かめた結果を示します。
-      </p>
-      <div id="tee-body"><p class="muted">読み込み中…</p></div>
-    </section>
+    <details class="card" id="more">
+      <summary>詳しく見る: 金庫の確認(TEE)</summary>
+      <section id="tee" aria-labelledby="tee-title">
+        <h2 id="tee-title">金庫の確認(TEE)</h2>
+        <p class="small muted">
+          条件を預かる「金庫」が、どのプログラムを、どんな環境で動かしているか。運営者の web が確かめた結果を示します。
+          金庫の中身を運営者も見られない仕組み(TEE)で動いているかどうかが分かります。
+        </p>
+        <div id="tee-body"><p class="muted">読み込み中…</p></div>
+      </section>
+    </details>
   </main>
 
   <footer class="site-footer">
