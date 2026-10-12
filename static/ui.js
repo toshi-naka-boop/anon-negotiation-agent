@@ -436,3 +436,63 @@ export function watchNegotiation({ sides, streamRoute, path, poll, onEntries, on
   else sides.forEach(openStream);
   return { close: stop };
 }
+
+// ---- Negocie の共通部品(DESIGN.md §4.11・§6・§4) ----
+
+/**
+ * 伏せる(DESIGN.md §4.11)。ヘッダの右上の「伏せる」(#veil-button)を押すと、画面全体を地の色 1 色の覆い(#veil)で隠す。
+ * 覆いのどこかを押す(または Enter・Esc)と戻る。タブを切り替えた・アプリを切り替えたときも(visibilitychange)、戻ってきた画面が
+ * 一瞬でも見られないよう、覆いを出す。どのページでも同じ位置・同じ動き。保存領域には何も書かない。
+ */
+export function mountVeil() {
+  const button = document.getElementById("veil-button");
+  const veil = document.getElementById("veil");
+  if (!button || !veil) return;
+  const show = () => {
+    veil.hidden = false;
+    veil.focus?.();
+  };
+  const hide = () => {
+    veil.hidden = true;
+    button.focus?.();
+  };
+  button.addEventListener("click", show);
+  veil.addEventListener("click", hide);
+  veil.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === "Escape" || event.key === " ") hide();
+  });
+  document.addEventListener?.("visibilitychange", () => {
+    if (document.hidden) show();
+  });
+}
+
+/**
+ * 現在地の箱(DESIGN.md §6): いま何をしているか・次に何が起きるか・あなたが決めること、の 3 行。
+ * 期限は時刻で書く(カウントダウンにしない)。
+ */
+export function whereBox({ now, next, yours }) {
+  return h(
+    "dl",
+    { class: "where" },
+    h("dt", {}, "いま"),
+    h("dd", {}, now),
+    h("dt", {}, "次に"),
+    h("dd", {}, next),
+    h("dt", {}, "あなたが決めること"),
+    h("dd", { class: "yours" }, yours),
+  );
+}
+
+/**
+ * 状態の箱(DESIGN.md §4): kind は empty(空)・waiting(待ち)・error(エラー)・ok(成功)。title は太字の 1 行、body は本文(文字列か要素)。
+ * 待ちには回転の印を付ける(reduced-motion では止まる)。
+ */
+export function stateBox(kind, title, ...body) {
+  const role = kind === "error" ? "alert" : "status";
+  return h(
+    "div",
+    { class: `state state-${kind}`, role },
+    title ? h("span", { class: "state-title" }, kind === "waiting" ? [h("span", { class: "spinner", "aria-hidden": "true" }), title] : title) : null,
+    body.length ? h("div", {}, body) : null,
+  );
+}

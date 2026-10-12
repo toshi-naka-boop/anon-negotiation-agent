@@ -528,3 +528,99 @@ th { color: var(--muted); font-weight: 600; white-space: nowrap; }
 .examples .btn { text-align: left; }
 details.wall > summary { cursor: pointer; font-weight: 700; font-size: 1.05rem; }
 details.wall[open] > summary { margin-bottom: 0.8rem; }
+
+/* ======================================================================
+   Negocie(製品版の UX。DESIGN.md §9)。ここから下は、共通層の追加。上の既存の決まり(場所の色・ナビ・部品)は変えない。
+   ====================================================================== */
+
+:root {
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  --tap: 44px;           /* タップ領域の最小(DESIGN.md §9) */
+  --text-body: 16px;     /* 本文 */
+  --text-small: 14px;    /* 補足。これより小さくしない */
+  --text-title: 20px;    /* 画面の見出し */
+  --text-question: 18px; /* 面談の 1 問 */
+  --text-figure: 24px;   /* 見込み・幅などの数値の強調 */
+}
+
+/* 伏せる(DESIGN.md §4.11): ヘッダの右上の同じ位置にあるボタン。押すと画面全体を地の色 1 色で覆い、どこかをタップすると戻る。 */
+.veil-button { margin-left: auto; min-height: var(--tap); min-width: var(--tap); }
+.veil {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+/* ボタン: 片手で届く大きさ。主要アクションは幅いっぱい・高さ 48px(.btn-wide)。 */
+.btn { min-height: var(--tap); }
+.btn-small { min-height: 0; }
+.btn-wide { display: block; width: 100%; min-height: 48px; text-align: center; }
+.row > .btn-wide { flex: 1 1 100%; }
+
+/* 入口(オンボーディング。DESIGN.md §4.1): 製品名、一言、3 行の注記、主要アクション 1 つ。装飾しない。 */
+.hero { margin: 0 0 var(--space-5); }
+.hero h1 { font-size: 2rem; margin-bottom: 0.2em; }
+.hero .reading { font-size: var(--text-small); color: var(--muted); font-weight: 400; margin-left: 0.4em; }
+.hero .tagline { font-size: 1.15rem; margin: 0 0 var(--space-4); }
+.hero .promises { margin: 0 0 var(--space-4); padding-left: 1.2em; }
+.hero .promises li { margin-bottom: 0.2em; }
+.hero .cta { max-width: 28rem; }
+
+/* 現在地(DESIGN.md §6): いま・次に・あなたが決めること、の 3 行。交渉状況の上に固定で出す。 */
+.where {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin: 0 0 var(--space-4);
+}
+.where dt { color: var(--muted); font-size: var(--text-small); padding-top: 0.15em; }
+.where dd { margin: 0; }
+.where dd.yours { font-weight: 600; }
+@media (max-width: 480px) { .where { grid-template-columns: 1fr; } .where dt { padding-top: var(--space-2); } }
+
+/* 状態の箱(DESIGN.md §4): 空・待ち・エラー・成功を、同じ見た目で。文言は §8。 */
+.state { padding: var(--space-3) var(--space-4); border-radius: var(--radius); border: 1px solid var(--border); margin: 0 0 var(--space-4); }
+.state-empty { color: var(--muted); background: var(--surface-2); }
+.state-waiting { background: var(--info-bg); color: var(--info); border-color: var(--info); }
+.state-error { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); }
+.state-ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+.state > :last-child { margin-bottom: 0; }
+.state .state-title { font-weight: 700; display: block; margin-bottom: 0.15em; }
+
+/* あなたの番(ホームの最上段。DESIGN.md §4.3)。期限は時刻で書く。 */
+.your-turn { border: 2px solid var(--warn); background: var(--warn-bg); color: var(--warn); border-radius: var(--radius); padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-4); }
+.your-turn > :last-child { margin-bottom: 0; }
+
+/* 自分の交渉の中の画面切り替え(DESIGN.md §4.3〜§4.8。1 画面 1 目的)。<nav> は 1 ページに 1 つ(主なページ)なので、ここは group。 */
+.subnav { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-4); }
+.subnav a {
+  display: inline-flex; align-items: center; min-height: var(--tap); padding: 0 var(--space-4);
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); text-decoration: none;
+}
+.subnav a[aria-current="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 700; }
+.view[hidden] { display: none !important; }
+.back-link { display: inline-flex; align-items: center; min-height: var(--tap); margin: 0 0 var(--space-3); }
+
+/* 数値の強調(見込み・幅・件数)。評価の語は使わない。 */
+.figure { font-size: var(--text-figure); font-weight: 600; line-height: 1.3; }
+
+/* 面談の 1 問 1 画面(DESIGN.md §4.2): 問いは 18px・600。進み具合は上の .steps(既存)。 */
+.question { font-size: var(--text-question); font-weight: 600; margin: 0 0 var(--space-3); }
+.answers-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+.answers-2 .btn { min-height: 48px; }
+@media (max-width: 360px) { .answers-2 { grid-template-columns: 1fr; } }
+
+/* 求人の一覧(DESIGN.md §4.4)。判定は出さない。公開条件と、本人の「最悪ここまで」を並べる。 */
+.job-card { margin: 0 0 var(--space-3); }
+.job-card h3 { margin: 0 0 0.2em; }
+.job-meta { color: var(--muted); font-size: var(--text-small); margin: 0 0 var(--space-2); }
+
+/* 補足の文字は 14px より小さくしない */
+.small { font-size: var(--text-small); }

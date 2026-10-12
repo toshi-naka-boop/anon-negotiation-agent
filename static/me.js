@@ -14,21 +14,7 @@ import { call, newRequestId } from "./api.js";
 import { mountLedger } from "./ledger.js";
 import { mountPanels } from "./panels.js";
 import { mountStages } from "./stages.js";
-import {
-  ActivityView,
-  LIKELIHOOD_LABELS,
-  clear,
-  formatDateTime,
-  h,
-  message,
-  packageChips,
-  replace,
-  resultView,
-  showError,
-  showMessage,
-  watchNegotiation,
-  withBusy,
-} from "./ui.js";
+import { ActivityView, LIKELIHOOD_LABELS, clear, formatDateTime, h, message, mountVeil, packageChips, replace, resultView, showError, showMessage, watchNegotiation, withBusy } from "./ui.js";
 
 const STATE_LABELS = { active: ["進行中", "ok"], paused: ["一時停止中", "warn"], ended: ["終了", ""] };
 
@@ -361,3 +347,5 @@ el("delete-ack").addEventListener("change", (event) => {
 el("delete-button").addEventListener("click", (event) => deleteData(event.currentTarget));
 
 init();
+
+mountVeil();

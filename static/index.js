@@ -5,7 +5,7 @@
 
 import { call } from "./api.js";
 import { showTee } from "./tee.js";
-import { h, replace, showError } from "./ui.js";
+import { h, mountVeil, replace, showError } from "./ui.js";
 
 async function showNotice() {
   const title = document.getElementById("notice-title");
@@ -21,3 +21,5 @@ async function showNotice() {
 
 showNotice();
 showTee(document.getElementById("tee-body"), { load: () => call("GET /api/tee/attestation"), origin: location.origin });
+
+mountVeil();

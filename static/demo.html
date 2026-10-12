@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>求人担当の画面(デモ) - 匿名交渉エージェント</title>
+  <title>Negocie</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/app.css">
   <script type="module" src="/static/demo.js"></script>
@@ -11,7 +11,7 @@
 <body class="zone-employer">
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="/">匿名交渉エージェント</a>
+      <a class="brand" href="/">Negocie</a>
       <nav class="site-nav" aria-label="主なページ">
         <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
           <span class="nav-label" id="nav-label-seeker">求職者</span>
@@ -36,6 +36,7 @@
           </div>
         </div>
       </nav>
+      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
     </div>
   </header>
   <div class="zone-band" role="note">
@@ -124,5 +125,6 @@
   <footer class="site-footer">
     <p>人物と求人はすべて架空です。</p>
   </footer>
+  <div id="veil" class="veil" hidden tabindex="0" role="button" aria-label="伏せています。押すと画面に戻ります"></div>
 </body>
 </html>

@@ -15,24 +15,7 @@
 
 import { ApiError, call, newRequestId } from "./api.js";
 import { describeInterval, mountMeter, mountSimulation } from "./meter.js";
-import {
-  ActivityView,
-  VERDICT_LABELS,
-  clear,
-  counterFor,
-  fillTextarea,
-  h,
-  message,
-  packageChips,
-  replace,
-  resultView,
-  showError,
-  showMessage,
-  verdictBadge,
-  waiting,
-  watchNegotiation,
-  withBusy,
-} from "./ui.js";
+import { ActivityView, VERDICT_LABELS, clear, counterFor, fillTextarea, h, message, mountVeil, packageChips, replace, resultView, showError, showMessage, verdictBadge, waiting, watchNegotiation, withBusy } from "./ui.js";
 
 const el = (id) => document.getElementById(id);
 const views = {
@@ -457,3 +440,5 @@ mountMeter({ body: el("meter-body"), error: el("meter-error") });
 mountSimulation({ value: el("simulation-value"), button: el("simulation-button"), error: el("simulation-error"), result: el("simulation-result") });
 
 loadExample();
+
+mountVeil();

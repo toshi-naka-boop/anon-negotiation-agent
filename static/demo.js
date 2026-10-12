@@ -14,7 +14,7 @@
 
 import { call, newRequestId } from "./api.js";
 import { mountStages } from "./stages.js";
-import { ActivityView, clear, formatDateTime, h, replace, resultView, showError, showMessage, watchNegotiation, withBusy } from "./ui.js";
+import { ActivityView, clear, formatDateTime, h, mountVeil, replace, resultView, showError, showMessage, watchNegotiation, withBusy } from "./ui.js";
 
 // リプレイの再生の速さ。interval は 1 手(記録の 1 件)ごとの間隔(秒)で、記録の時刻によらず一定。null(記録どおり)は、記録した時刻の間隔のまま。
 const SPEEDS = [
@@ -300,3 +300,5 @@ async function init() {
 }
 
 init();
+
+mountVeil();

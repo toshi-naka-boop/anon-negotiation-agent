@@ -7,7 +7,7 @@
  */
 
 import { ApiError, call, ensureSession } from "./api.js";
-import { AXIS_LABELS, clear, counterFor, h, message, replace, showError, showMessage, waiting, withBusy } from "./ui.js";
+import { AXIS_LABELS, clear, counterFor, h, message, mountVeil, replace, showError, showMessage, waiting, withBusy } from "./ui.js";
 
 const STEPS = [
   { id: "profile", label: "プロフィール" },
@@ -697,3 +697,5 @@ el("discard-button").addEventListener("click", async () => {
 });
 
 showNotice();
+
+mountVeil();
