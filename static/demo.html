@@ -47,7 +47,7 @@
     <h1>交渉のデモ(架空の人物)</h1>
     <p class="lead">
       架空の求人と架空の候補者の交渉を、求人側の画面・求職者の画面・並べて比べる、の 3 つの視点で見られます。それぞれの画面には、その側に届いた記録だけが出ます
-      (相手の評価は、どちらにも出ません)。
+      (相手の金庫の答えは、どちらにも出ません)。
     </p>
 
     <section class="card" aria-labelledby="cases-title">
@@ -69,7 +69,7 @@
       <button id="view-candidate" class="btn" type="button" aria-pressed="false">求職者の画面</button>
       <button id="view-both" class="btn" type="button" aria-pressed="false">並べて比べる</button>
     </div>
-    <p id="view-note" class="view-note" aria-live="polite">求人担当に届くのは、候補者の提案と、自分の金庫の答えだけで、候補者の本音(金庫の中身)は届きません。</p>
+    <p id="view-note" class="view-note" aria-live="polite">求人担当に届くのは、候補者の提案と、自分の金庫の答えだけで、候補者の条件(本音の値)は見えません。</p>
 
     <section id="run" class="hidden" aria-live="polite">
       <div id="banner" class="banner" role="status"></div>
@@ -115,7 +115,7 @@
         種類と、どのマスの中かだけを示します。
       </p>
       <p class="small muted">
-        デモの架空人物は、生の条件をフィクスチャに持っています(デモ用に公開しているもの)が、その値を並べて見せる口は、まだありません。
+        デモの架空人物の生の条件は、デモ用の台本として公開していますが、その値を並べて見せる画面は、この版にはまだありません。
         代わりに、上の視点の切り替えの「求職者の画面」で、金庫が返した答え(自分側の評価)を見られます。攻撃者が、その答えをすべて見られたときに年収の境目がどこまで分かるかは、
         <a href="/attack#slot-meter">推定区間メーター</a>で確かめられます。
       </p>

@@ -37,7 +37,7 @@ const views = {
 // とき。次に押したときに、同じ request_id で、できた交渉は作り直さずに、続きから進める。終わったら消す。ページを開き直すと、消えて、最初からやり直す)。
 const attack = { nids: [], selected: null, watchers: [], wall3Timer: null, offerSeq: new Map(), scripted: new Set(), bisectionRequestId: null };
 
-const DAILY_LIMIT_TEXT = "本日の上限に達しました。明日以降にもう一度お試しください。";
+const DAILY_LIMIT_TEXT = "本日の上限に達しました。明日以降に、もう一度試せます。";
 
 // 攻撃の指示の例文(押すと入力欄に入る。入力欄は 400 文字まで)。
 const EXAMPLE_INSTRUCTIONS = [
@@ -138,7 +138,7 @@ function renderSelect() {
 async function createAttack() {
   const instruction = el("instruction").value;
   if (!instruction.trim()) {
-    showMessage(el("create-error"), "warn", "攻撃の指示を入力してください。");
+    showMessage(el("create-error"), "warn", "攻撃の指示が入っていません。入れてから、もう一度押せます。");
     return;
   }
   await withBusy(
@@ -158,7 +158,7 @@ async function createAttack() {
 async function replaceInstruction() {
   const instruction = el("new-instruction").value;
   if (!instruction.trim()) {
-    showMessage(el("replace-message"), "warn", "新しい指示を入力してください。");
+    showMessage(el("replace-message"), "warn", "新しい指示が入っていません。入れてから、もう一度押せます。");
     return;
   }
   await withBusy(
@@ -197,7 +197,7 @@ async function runBisection() {
     el("bisection-button"),
     async () => {
       showMessage(el("bisection-message"), null);
-      replace(el("bisection-status"), waiting("台本の攻撃者が、交渉を作って、年収を二分探索しています(交渉 3 件まで。数秒〜数十秒かかります)…"));
+      replace(el("bisection-status"), waiting("台本の攻撃者が、交渉を作って、年収を二分探索しています。あなたは何もしなくて大丈夫。交渉 3 件まで、数秒〜数十秒かかります…"));
       const requestId = attack.bisectionRequestId ?? newRequestId();
       let result;
       try {
@@ -234,7 +234,7 @@ const OUTCOMES = {
 };
 const STOPPED_AT = {
   web: "web の受信口(agents へ送る前)",
-  agents_endpoint: "agents の受信口(/a2a/candidate。LLM が動く前)",
+  agents_endpoint: "agents の受信口(/a2a/candidate。AI が動く前)",
 };
 const REASONS = {
   body_too_large: "本文が上限を超えています",
@@ -284,7 +284,7 @@ function renderWall1(result) {
   const rows = [
     ["結果", h("span", { class: `badge badge-${kind}` }, label)],
     ["止まった場所", result.stopped_at ? (STOPPED_AT[result.stopped_at] ?? result.stopped_at) : "止まりませんでした"],
-    ["LLM", result.llm_called === true ? "動きました" : result.llm_called === false ? "動いていません" : "動いたかどうか分かりません"],
+    ["AI", result.llm_called === true ? "動きました" : result.llm_called === false ? "動いていません" : "動いたかどうか分かりません"],
     ["金庫への登録", result.registered_in_vault ? "登録されました" : "登録されていません(どの交渉にも影響しません)"],
     ["送った大きさ", `${result.sent_bytes} バイト`],
   ];
@@ -298,7 +298,7 @@ function renderWall1(result) {
     {},
     factsTable(rows),
     rejection ? h("details", {}, h("summary", {}, "拒否の詳細(JSON)"), h("pre", {}, pretty(rejection))) : null,
-    result.result ? h("details", { open: true }, h("summary", {}, "LLM が返した出力(計画または手)"), h("pre", {}, pretty(result.result))) : null,
+    result.result ? h("details", { open: true }, h("summary", {}, "AI が返した出力(計画または手)"), h("pre", {}, pretty(result.result))) : null,
     result.usage ? h("details", {}, h("summary", {}, "使用量"), h("pre", {}, pretty(result.usage))) : null,
   );
 }
@@ -337,13 +337,13 @@ function renderWall2(report) {
   const checked = (phase) => {
     const found = report.inspection[phase];
     if (!found) return null;
-    return h("p", { class: "small" }, `検査: 自由文 ${found.free_text.length} 件・ID ${found.ids.length} 件・グリッド外の数値 ${found.off_grid_numbers.length} 件`);
+    return h("p", { class: "small" }, `検査: 自由文 ${found.free_text.length} 件・ID ${found.ids.length} 件・マス目の外の数値 ${found.off_grid_numbers.length} 件`);
   };
   return h(
     "div",
     {},
     report.clean
-      ? h("div", { class: "msg msg-ok" }, "検査の結果: 自由文・ID・グリッド外の数値(生の値)は、入っていません。")
+      ? h("div", { class: "msg msg-ok" }, "検査の結果: 自由文・ID・マス目の外の数値(生の値)は、入っていません。")
       : h("div", { class: "msg msg-error", role: "alert" }, "検査で、入ってはならないものが見つかりました。"),
     h("details", {}, h("summary", {}, "固定の前文(指示文)"), h("pre", {}, report.preamble)),
     ["plan", "decide"].map((phase) =>
@@ -363,7 +363,7 @@ async function refreshWall2({ quiet = false } = {}) {
   if (!nid) return;
   if (attack.scripted.has(nid)) {
     showMessage(el("wall2-error"), null);
-    replace(el("wall2-result"), message("info", "この交渉は、二分探索の実演(台本の攻撃者・候補者)で作りました。台本は LLM を呼ばないので、LLM に渡った入力はありません。"));
+    replace(el("wall2-result"), message("info", "この交渉は、二分探索の実演(台本の攻撃者・候補者)で作りました。台本は AI を呼ばないので、AI に渡った入力はありません。"));
     return;
   }
   try {

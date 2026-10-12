@@ -30,7 +30,7 @@ const VIEWS = {
   employer: {
     button: "view-employer",
     panels: ["employer"],
-    note: "求人担当に届くのは、候補者の提案と、自分の金庫の答えだけで、候補者の本音(金庫の中身)は届きません。",
+    note: "求人担当に届くのは、候補者の提案と、自分の金庫の答えだけで、候補者の条件(本音の値)は見えません。",
   },
   candidate: {
     button: "view-candidate",
@@ -162,7 +162,7 @@ async function runLive(info) {
         employer_template_id: info.employer_template_id,
       },
     });
-    el("run-status").textContent = "交渉は進んでいます。記録が届くたびに追記します。";
+    el("run-status").textContent = "交渉は進んでいます。あなたは何もしなくて大丈夫。記録が届くたびに、ここに出ます。";
     const path = { nid: created.nid };
     document.dispatchEvent(new CustomEvent("negotiation:selected", { detail: { nid: created.nid, jobId: null } }));
     running.watchers.push(
@@ -215,7 +215,7 @@ async function playReplay(info) {
   } catch (error) {
     el("stop-button").hidden = true;
     if (error.name === "ApiError") showError(el("run-error"), error);
-    else showMessage(el("run-error"), "error", "リプレイの記録を読み取れません。");
+    else showMessage(el("run-error"), "error", "リプレイの記録を読み取れませんでした。しばらくしてから、もう一度試せます。");
     return;
   }
   const { header, events } = replay;
