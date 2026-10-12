@@ -12,7 +12,10 @@
   <header class="site-header">
     <div class="inner">
       <a class="brand" href="/" aria-current="page">Negocie</a>
-      <nav class="site-nav" aria-label="主なページ">
+      <span class="feather-bar brand-mark" aria-hidden="true"></span>
+      <button id="nav-toggle" class="btn btn-small nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">メニュー</button>
+      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
+      <nav class="site-nav" id="site-nav" aria-label="主なページ">
         <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
           <span class="nav-label" id="nav-label-seeker">求職者</span>
           <div class="nav-links">
@@ -36,11 +39,10 @@
           </div>
         </div>
       </nav>
-      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
     </div>
   </header>
 
-  <main>
+  <main class="entrance-page">
     <section class="hero" aria-labelledby="hero-title">
       <h1 id="hero-title">Negocie<span class="reading">(ネゴシエ)</span></h1>
       <p class="tagline">本音を預けられる転職エージェント。</p>
@@ -50,10 +52,10 @@
         <li>面談中の AI の処理は Google Cloud で行われ、不正利用の監視のために一定期間記録され得ます。</li>
       </ul>
       <div class="cta"><a class="btn btn-primary btn-wide" href="/interview">面談を始める</a></div>
-      <p class="small muted">まず年収の 3 問だけ。途中でやめても、答えた分は 1 時間は残ります。</p>
+      <p class="note">まず年収の 3 問だけ。途中でやめても、答えた分は 1 時間は残ります。</p>
     </section>
 
-    <div class="grid cols-3 spaced">
+    <div class="grid cols-3 places">
       <section class="card link-card place-card zone-seeker" aria-labelledby="place-seeker-title">
         <h2 id="place-seeker-title">求職者として使う</h2>
         <p>あなた自身の条件で交渉する人向けです。面談で本音を預けると、丸めた形だけが残り、あなたのエージェントが代わりに交渉します。</p>
@@ -81,6 +83,8 @@
       </section>
     </div>
 
+    <details class="card compact" id="more">
+      <summary>ほかの入口(面談を始める・自分の交渉)</summary>
     <div class="grid cols-2 spaced">
       <section class="card link-card" aria-labelledby="start-title">
         <h2 id="start-title">面談を始める</h2>
@@ -93,13 +97,14 @@
         <a class="btn" href="/me">自分の交渉を見る</a>
       </section>
     </div>
+    </details>
 
     <section class="card" id="notice" aria-labelledby="notice-title">
       <h2 id="notice-title">はじめに(必ずお読みください)</h2>
       <div id="notice-body"><p class="muted">読み込み中…</p></div>
     </section>
 
-    <details class="card" id="more">
+    <details class="card" id="more-tee">
       <summary>詳しく見る: 金庫の確認(TEE)</summary>
       <section id="tee" aria-labelledby="tee-title">
         <h2 id="tee-title">金庫の確認(TEE)</h2>

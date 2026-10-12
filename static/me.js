@@ -20,6 +20,7 @@ import { mountStages } from "./stages.js";
 import {
   ActivityView,
   LIKELIHOOD_LABELS,
+  barChart,
   clear,
   formatDateTime,
   h,
@@ -31,13 +32,14 @@ import {
   showError,
   showMessage,
   stateBox,
+  statTile,
   watchNegotiation,
   whereBox,
   withBusy,
 } from "./ui.js";
 
 const STATE_LABELS = { active: ["進行中", "ok"], paused: ["一時停止中", "warn"], ended: ["終了", ""] };
-const VIEWS = ["home", "jobs", "negotiation", "disclosure", "delete"];
+const VIEWS = ["home", "jobs", "analysis", "negotiation", "disclosure", "delete"];
 
 // pid: 依頼者 ID、jobs: 求人の公開情報、negotiations: 本人の交渉の一覧(金庫が返す項目)、question: 答えを待っている組み合わせ、
 // lastEntry: 選んだ交渉の活動ログの最後の記録(現在地の文に使う)、pending: 交渉ごとの、答えを待っている組み合わせ(ホームの「あなたの番」)
@@ -54,6 +56,7 @@ const app = {
   activityOnce: new Map(),
   disclosureMounted: false,
   ledger: null,
+  analysisRendered: false,
 };
 const el = (id) => document.getElementById(id);
 const pv = (route, options = {}) => call(route, { ...options, path: { pid: app.pid, ...(options.path ?? {}) } });
@@ -92,7 +95,7 @@ function go(name) {
   VIEWS.forEach((other) => {
     el(`view-${other}`).hidden = other !== name;
   });
-  for (const tab of ["home", "jobs", "disclosure"]) {
+  for (const tab of ["home", "jobs", "analysis", "negotiation", "disclosure"]) {
     const link = el(`tab-${tab}`);
     if (tab === name) link.setAttribute("aria-current", "true");
     else link.removeAttribute("aria-current");
@@ -108,6 +111,12 @@ function route() {
     go("negotiation");
   } else if (hash === "#view-jobs" || hash.startsWith("#job/")) {
     go("jobs");
+  } else if (hash === "#view-analysis") {
+    renderAnalysis();
+    go("analysis");
+  } else if (hash === "#view-negotiation") {
+    if (!app.selected && app.negotiations.length) select(app.negotiations[0].nid);
+    go("negotiation");
   } else if (hash === "#view-disclosure" || hash === "#slot-ledger" || hash === "#slot-fr39") {
     ensureDisclosure();
     go("disclosure");
@@ -191,9 +200,76 @@ function renderHome() {
     clear(state);
   }
 
+  const ended = app.negotiations.filter((item) => item.state === "ended");
+  const agreedCount = ended.filter((item) => item.result && item.result.likelihood !== "none").length;
+  replace(
+    el("stats"),
+    statTile({ label: "交渉", value: app.negotiations.length, unit: "件", note: running ? `進行中 1 件(${STATE_LABELS[running.state]?.[0] ?? running.state})` : "進行中はありません" }),
+    statTile({ label: "合意で終わった交渉", value: agreedCount, unit: "件", note: ended.length ? `終わった ${ended.length} 件のうち` : "まだ終わった交渉はありません" }),
+    statTile({ label: "選べる求人", value: app.jobs.length, unit: "件", note: "すべて架空の求人です" }),
+    statTile({ label: "相手に分かる幅", value: "50", unit: "万円まで", note: "年収のマス目 1 つぶん。生の値は渡りません" }),
+  );
   el("home-jobs-text").textContent = running
     ? `いま選べる求人は ${app.jobs.length} 件です。進行中の交渉が終わるか取り消すと、次を始められます。`
     : `いま選べる求人は ${app.jobs.length} 件です。相手に渡るのは「受けられるか」の答えだけです。`;
+}
+
+// ---- 求人分析(ダミーの数字。本物の求人データはまだない。画面の形を確かめるための見本) ----
+
+const SAMPLE_MARKET = {
+  salary: [
+    { label: "〜450 万円", value: 6 },
+    { label: "450〜500", value: 11 },
+    { label: "500〜550", value: 19 },
+    { label: "550〜600", value: 24 },
+    { label: "600〜650", value: 21, mine: true },
+    { label: "650〜700", value: 14 },
+    { label: "700〜800", value: 9 },
+    { label: "800 万円〜", value: 4 },
+  ],
+  remote: [
+    { label: "週 0 日", value: 22 },
+    { label: "週 1 日", value: 13 },
+    { label: "週 2 日", value: 26, mine: true },
+    { label: "週 3 日", value: 25 },
+    { label: "週 4 日", value: 8 },
+    { label: "週 5 日", value: 14 },
+  ],
+  duty: [
+    { label: "なし", value: 61, mine: true },
+    { label: "月 2 回", value: 23 },
+    { label: "月 4 回", value: 16 },
+    { label: "月 6 回以上", value: 8 },
+  ],
+  category: [
+    { label: "IT・Web", value: 41 },
+    { label: "医療・福祉", value: 29 },
+    { label: "営業", value: 18 },
+    { label: "事務", value: 13 },
+    { label: "その他", value: 7 },
+  ],
+};
+
+function renderAnalysis() {
+  if (app.analysisRendered) return;
+  app.analysisRendered = true;
+  const total = SAMPLE_MARKET.salary.reduce((sum, row) => sum + row.value, 0);
+  const remoteAny = SAMPLE_MARKET.remote.filter((row) => row.label !== "週 0 日").reduce((sum, row) => sum + row.value, 0);
+  const remoteTotal = SAMPLE_MARKET.remote.reduce((sum, row) => sum + row.value, 0);
+  const dutyTotal = SAMPLE_MARKET.duty.reduce((sum, row) => sum + row.value, 0);
+  replace(
+    el("analysis-stats"),
+    statTile({ label: "求人の数", value: total, unit: "件", note: "見本の数字です" }),
+    statTile({ label: "年収の中央の帯", value: "550〜600", unit: "万円", note: "あなたのマス目は 600〜650 万円" }),
+    statTile({ label: "リモートがある求人", value: Math.round((remoteAny / remoteTotal) * 100), unit: "%", note: "週 1 日以上" }),
+    statTile({ label: "当直なしの求人", value: Math.round((SAMPLE_MARKET.duty[0].value / dutyTotal) * 100), unit: "%", note: "当直のない職種を含む" }),
+  );
+  const legend = () =>
+    h("p", { class: "legend" }, h("span", {}, h("span", { class: "swatch accent" }), "求人の数"), h("span", {}, h("span", { class: "swatch acorn" }), "あなたの条件に当たる帯"));
+  replace(el("chart-salary"), barChart({ rows: SAMPLE_MARKET.salary, unit: " 件", title: "年収帯ごとの求人の数" }), legend());
+  replace(el("chart-remote"), barChart({ rows: SAMPLE_MARKET.remote, unit: " 件", title: "リモート日数の分布" }), legend());
+  replace(el("chart-duty"), barChart({ rows: SAMPLE_MARKET.duty, unit: " 件", title: "当直の回数" }), legend());
+  replace(el("chart-category"), barChart({ rows: SAMPLE_MARKET.category, unit: " 件", title: "職種ごとの件数" }));
 }
 
 // ---- 求人(§4.4)と交渉の開始 ----

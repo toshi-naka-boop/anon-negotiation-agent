@@ -12,7 +12,10 @@
   <header class="site-header">
     <div class="inner">
       <a class="brand" href="/">Negocie</a>
-      <nav class="site-nav" aria-label="主なページ">
+      <span class="feather-bar brand-mark" aria-hidden="true"></span>
+      <button id="nav-toggle" class="btn btn-small nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">メニュー</button>
+      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
+      <nav class="site-nav" id="site-nav" aria-label="主なページ">
         <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
           <span class="nav-label" id="nav-label-seeker">求職者</span>
           <div class="nav-links">
@@ -36,15 +39,16 @@
           </div>
         </div>
       </nav>
-      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
     </div>
   </header>
 
   <main>
-    <h1>面談</h1>
-    <p class="lead">
+    <div class="topbar">
+      <h1>面談</h1>
+      <p class="lead">
       短い問いに、1 つずつ答えます。答えはサーバーのメモリにだけ置き、預けるとマス目に丸めた形だけが残ります。預けたあと、このページの入力は消えます。
     </p>
+    </div>
 
     <section class="card" id="intro" aria-labelledby="notice-title">
       <h2 id="notice-title">はじめに</h2>

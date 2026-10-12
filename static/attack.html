@@ -12,7 +12,10 @@
   <header class="site-header">
     <div class="inner">
       <a class="brand" href="/">Negocie</a>
-      <nav class="site-nav" aria-label="主なページ">
+      <span class="feather-bar brand-mark" aria-hidden="true"></span>
+      <button id="nav-toggle" class="btn btn-small nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">メニュー</button>
+      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
+      <nav class="site-nav" id="site-nav" aria-label="主なページ">
         <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
           <span class="nav-label" id="nav-label-seeker">求職者</span>
           <div class="nav-links">
@@ -36,7 +39,6 @@
           </div>
         </div>
       </nav>
-      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
     </div>
   </header>
   <div class="zone-band" role="note">
@@ -44,11 +46,13 @@
   </div>
 
   <main>
-    <h1>攻撃してみる</h1>
-    <p class="lead">
+    <div class="topbar">
+      <h1>攻撃してみる</h1>
+      <p class="lead">
       求人担当になって、架空の候補者の本音(年収の境目)を探れます。あなたのエージェントにどう指示しても、分かるのは年収のグリッド 1 マス(50 万円の幅)までです。
       防御がなければ、7 手以内で特定されてしまいます。
     </p>
+    </div>
 
     <section class="card" id="bisection" aria-labelledby="bisection-title">
       <h2 id="bisection-title">ボタン 1 つで攻撃を実演</h2>
