@@ -463,7 +463,9 @@ textarea.mono { min-height: 16rem; line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 
 /* 伏せる(DESIGN.md §4.11): 画面全体を地の色 1 色で覆い、どこかをタップすると戻る */
-.veil { position: fixed; inset: 0; z-index: 1000; background: var(--bg); cursor: pointer; }
+.veil { position: fixed; inset: 0; z-index: 1000; background: var(--bg); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+/* 覆いに出すのは、戻り方の 1 文だけ(真っ白な画面で、壊れていると受け取られないように。「転職」「交渉」などは出さない) */
+.veil::after { content: "伏せています。\A押すと戻ります"; white-space: pre-line; text-align: center; color: var(--muted); font-family: var(--font); font-size: var(--text-title); font-weight: 600; line-height: 1.8; }
 
 /* ---- 組み合わせ・活動ログ ---- */
 

@@ -3522,3 +3522,17 @@ def test_the_example_buttons_of_the_attack_page_fill_the_instruction_field():
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert result.stdout.split() == ["ok", "examples"]
+
+
+def test_the_veil_shows_only_when_pressed_and_says_how_to_come_back():
+    # 伏せる(DESIGN.md §4.11。2026-10-13、ユーザーの判断): タブやアプリを切り替えても、自動では伏せない(文字のない無地だと、戻ってきた人には
+    # 真っ白な画面に見え、壊れていると受け取られるため)。覆いには、戻り方の 1 文だけを出す(「転職」「交渉」などは出さない)。
+    ui = (STATIC / "ui.js").read_text(encoding="utf-8")
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+    message = re.search(r'\.veil::after\s*\{[^}]*content:\s*"([^"]*)"', css)
+
+    assert '"visibilitychange"' not in ui  # 購読していない(説明のコメントの語は数えない)
+    assert message and message.group(1).replace("\\A", "") == "伏せています。押すと戻ります"
+    assert not any(word in message.group(1) for word in ("転職", "交渉", "本音"))
+    for path in HTML_FILES:  # 覆いは、どのページでも同じ形で、最初は隠れている
+        assert '<div id="veil" class="veil" hidden tabindex="0" role="button"' in path.read_text(encoding="utf-8"), path.name

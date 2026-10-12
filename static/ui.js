@@ -441,8 +441,9 @@ export function watchNegotiation({ sides, streamRoute, path, poll, onEntries, on
 
 /**
  * 伏せる(DESIGN.md §4.11)。ヘッダの右上の「伏せる」(#veil-button)を押すと、画面全体を地の色 1 色の覆い(#veil)で隠す。
- * 覆いのどこかを押す(または Enter・Esc)と戻る。タブを切り替えた・アプリを切り替えたときも(visibilitychange)、戻ってきた画面が
- * 一瞬でも見られないよう、覆いを出す。どのページでも同じ位置・同じ動き。保存領域には何も書かない。
+ * 覆いのどこかを押す(または Enter・Esc)と戻る。覆いには「伏せています。押すと戻ります」だけを出す(app.css の .veil::after)。
+ * タブやアプリを切り替えたとき(visibilitychange)には、自動では伏せない(文字のない無地だと、戻ってきた人には真っ白な画面に見え、
+ * 壊れていると受け取られるため。2026-10-13、ユーザーの判断)。どのページでも同じ位置・同じ動き。保存領域には何も書かない。
  */
 export function mountVeil() {
   mountNavToggle();
@@ -461,9 +462,6 @@ export function mountVeil() {
   veil.addEventListener("click", hide);
   veil.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === "Escape" || event.key === " ") hide();
-  });
-  document.addEventListener?.("visibilitychange", () => {
-    if (document.hidden) show();
   });
 }
 
