@@ -13,6 +13,7 @@
  */
 
 import { call, newRequestId } from "./api.js";
+import { mountDisclosure } from "./disclosure.js";
 import { mountLedger } from "./ledger.js";
 import { mountPanels } from "./panels.js";
 import { mountStages } from "./stages.js";
@@ -524,6 +525,7 @@ function ensureDisclosure() {
     },
   );
   mountPanels({ body: el("fr39-body"), error: el("fr39-error") }, { load: () => pv("GET /v1/principals/{pid}/panels", { path: { pid: "me" } }) });
+  mountDisclosure({ body: el("disclosure-body"), error: el("disclosure-error") }, { loadPanels: () => pv("GET /v1/principals/{pid}/panels", { path: { pid: "me" } }) });
   if (app.selected) document.dispatchEvent(new CustomEvent("negotiation:selected", { detail: { nid: app.selected, jobId: selectedNegotiation()?.job_id ?? null } }));
 }
 

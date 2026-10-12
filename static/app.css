@@ -624,3 +624,25 @@ details.wall[open] > summary { margin-bottom: 0.8rem; }
 
 /* 補足の文字は 14px より小さくしない */
 .small { font-size: var(--text-small); }
+
+/* 開示設定の上部の説明(disclosure.js。DESIGN.md §4.6): 4 つの区分を、見出し 1 行ずつで縦に。 */
+.disclosure { display: grid; gap: var(--space-4); margin: 0 0 var(--space-4); }
+.disclosure-group > h3 { margin: 0 0 var(--space-2); font-size: var(--text-body); }
+.disclosure-group > p, .disclosure-group > ul, .disclosure-group > ol { margin: 0 0 var(--space-2); }
+.disclosure-stages li { margin-bottom: var(--space-2); }
+
+/* ヘッダ: 1 行目は製品名と「伏せる」(右上の同じ位置)。ナビは 2 行目(狭い画面では、組ごとに 1 行の横並びに畳む)。 */
+.site-header .inner { align-items: center; }
+.brand { order: 0; }
+.veil-button { order: 1; }
+.site-nav { order: 2; flex-basis: 100%; }
+@media (min-width: 900px) {
+  .site-nav { order: 1; flex-basis: auto; }
+  .veil-button { order: 2; }
+}
+@media (max-width: 600px) {
+  .site-nav { gap: 0.3rem; font-size: var(--text-small); }
+  .nav-group { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0.1rem 0.5rem; padding: 0.1rem 0 0.1rem 0.5rem; }
+  .nav-label { flex: 0 0 auto; min-width: 5.5em; }
+  .site-nav a { padding: 0.15rem 0.5rem; min-height: 32px; display: inline-flex; align-items: center; }
+}

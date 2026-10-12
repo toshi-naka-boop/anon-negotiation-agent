@@ -11,7 +11,7 @@
  */
 
 import { ITEM_LABELS } from "./stages.js";
-import { formatDateTime, h, packageChips, replace, showError, showMessage, waiting } from "./ui.js";
+import { formatDateTime, h, packageChips, replace, showError, showMessage, stateBox, waiting } from "./ui.js";
 
 const OPERATOR_LABELS = {
   principal: "あなたの操作",
@@ -90,7 +90,7 @@ export function mountLedger({ body, error }, { loadLedger, loadAnswers, negotiat
   const endedAnswers = new Map(); // 終わった交渉の回答(メモリだけ)
 
   function showEmpty() {
-    replace(body, h("p", { class: "empty-note" }, "まだ記録がありません。交渉が合意で終わると、段 0 の表示から記録されます。"));
+    replace(body, stateBox("empty", "まだ何も渡していません", "この台帳には、まだ記録がありません。判定が出ると、段 0 の表示から、ここに残ります。"));
   }
 
   async function refresh() {
@@ -133,7 +133,7 @@ export function mountLedger({ body, error }, { loadLedger, loadAnswers, negotiat
     showMessage(error, null);
     showEmpty();
   });
-  replace(body, waiting("読み込み中…"));
+  replace(body, waiting("台帳を読み込んでいます…"));
   refresh();
   return { refresh };
 }
