@@ -646,3 +646,14 @@ details.wall[open] > summary { margin-bottom: 0.8rem; }
   .nav-label { flex: 0 0 auto; min-width: 5.5em; }
   .site-nav a { padding: 0.15rem 0.5rem; min-height: 32px; display: inline-flex; align-items: center; }
 }
+
+/* 面談の 1 問 1 画面(interview.js。DESIGN.md §4.2): 問いの下に入力 1 つ、画面下部に主要アクション 1 つ、その下に飛ばす・戻る。 */
+.screen-actions { display: grid; gap: var(--space-2); margin-top: var(--space-5); }
+.screen .eyebrow { color: var(--muted); font-size: var(--text-small); margin: 0 0 var(--space-1); }
+.answers-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); margin-top: var(--space-2); }
+.answers-3 .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 700; }
+.reach { border-left: 4px solid var(--accent); }
+.reach .figure { margin: 0 0 var(--space-2); }
+.worst-list { display: grid; gap: var(--space-3); margin: 0 0 var(--space-4); }
+.worst-list dt { font-weight: 600; }
+.worst-list dd { margin: 0; }
