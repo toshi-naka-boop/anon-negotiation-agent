@@ -657,3 +657,6 @@ details.wall[open] > summary { margin-bottom: 0.8rem; }
 .worst-list { display: grid; gap: var(--space-3); margin: 0 0 var(--space-4); }
 .worst-list dt { font-weight: 600; }
 .worst-list dd { margin: 0; }
+
+/* 二択の 3 つの答え(行く・行かない・迷う): 375px でも 1 行に収める */
+.answers-3 .btn { padding-left: 0.4rem; padding-right: 0.4rem; white-space: nowrap; }
