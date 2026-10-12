@@ -14,10 +14,13 @@
   --border: #d8dfe8;
   --border-strong: #b9c4d2;
   /* 主役の色 */
-  --accent: #1e4fd7;      /* コバルト */
+  --accent: #1e4fd7;      /* コバルト(リンク・ラベル) */
+  --accent-fill: #1e4fd7; /* 主要ボタンの塗り */
   --accent-hover: #1a44b9;
-  --accent-text: #fbfdff;
+  --accent-text: #fbfdff; /* 場所の色の上の文字(羽の白) */
+  --on-fill: #fbfdff;     /* 主要ボタンの塗りの上の文字 */
   --accent-soft: #e4ecfb;
+  --crest: #2b6fd6;       /* ジェイの冠の青(ホバー・副次の強調) */
   --sky: #2f9df1;         /* 空色(フォーカス・強調) */
   --sky-soft: #d9eefc;
   --oak: #6b4423;         /* 樫の茶 */
@@ -68,12 +71,15 @@
     --surface-2: #1c2636;
     --text: #eef3f9;        /* 羽の白 */
     --muted: #9aa7b8;
-    --border: #2a3444;
-    --border-strong: #3f4b5e;
-    --accent: #7fb0ff;
-    --accent-hover: #9cc2ff;
-    --accent-text: #0b1220;
-    --accent-soft: #16243d;
+    --border: #3b2e22;      /* 樫の茶(暗) */
+    --border-strong: #5a4632;
+    --accent: #6a9dff;      /* 青(リンク・ラベル。地の上で 4.5:1 以上) */
+    --accent-fill: #2860dc; /* 主要ボタンの塗り(白の文字で 4.5:1 以上) */
+    --accent-hover: #3d78f0;
+    --accent-text: #0b1220; /* 場所の色(明るい青・黄土・赤)の上の文字は墨 */
+    --on-fill: #f4f8fd;     /* 青の塗りの上は羽の白 */
+    --accent-soft: #14213a;
+    --crest: #8db5ff;
     --sky: #5ec8ff;
     --sky-soft: #10304a;
     --oak: #d9b77a;
@@ -92,7 +98,7 @@
     --replay: #c7a9f0;
     --replay-bg: #2c2040;
     --zone-seeker: var(--accent);
-    --zone-seeker-bg: #16243d;
+    --zone-seeker-bg: #121d33;
     --zone-employer: #d9b77a;
     --zone-employer-bg: #33261a;
     --zone-security: #f08a7c;
@@ -133,7 +139,7 @@ body {
 }
 
 a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 0.15em; }
-a:hover { text-decoration-thickness: 2px; }
+a:hover { text-decoration-thickness: 2px; color: var(--crest); }
 :focus-visible { outline: 3px solid var(--sky); outline-offset: 2px; border-radius: var(--radius-sm); }
 
 h1, h2, h3, h4 { line-height: 1.3; margin: 0 0 0.5em; letter-spacing: 0.005em; font-weight: 700; }
@@ -368,7 +374,7 @@ main { grid-area: main; max-width: 1180px; width: 100%; padding: var(--space-5) 
 }
 .btn:hover { background: var(--surface-2); }
 .btn:disabled, .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn-primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-fill); }
 .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-danger { border-color: var(--danger); color: var(--danger); }
 .btn-danger:hover { background: var(--danger-bg); }
@@ -564,7 +570,7 @@ textarea.mono { min-height: 16rem; line-height: 1.5; }
   font-variant-numeric: tabular-nums;
 }
 .steps button[aria-current="step"] { background: var(--zone-bg, var(--accent-soft)); color: var(--accent); font-weight: 700; }
-.steps button[aria-current="step"]::before { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.steps button[aria-current="step"]::before { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-fill); }
 .steps button.done { color: var(--text); cursor: pointer; }
 .steps button.done::before { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); content: "✓"; }
 .steps button.done:hover { background: var(--surface-2); }
@@ -688,7 +694,7 @@ tbody tr:hover { background: var(--surface-2); }
   border: 1px solid var(--border);
   border-radius: 3px;
 }
-.meter-cell.in-range { background: var(--accent); border-color: var(--accent); }
+.meter-cell.in-range { background: var(--accent-fill); border-color: var(--accent-fill); }
 .meter-cell.open-end { border-style: dashed; }
 .meter-tick {
   position: absolute;
@@ -807,7 +813,7 @@ details.wall[open] > summary { margin-bottom: 0.8rem; }
 .screen .eyebrow { color: var(--muted); font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; margin: 0 0 var(--space-1); }
 .answers-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); margin-top: var(--space-2); }
 .answers-3 .btn { padding-left: 0.4rem; padding-right: 0.4rem; white-space: nowrap; }
-.answers-3 .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 700; }
+.answers-3 .btn[aria-pressed="true"] { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-fill); font-weight: 700; }
 .reach { border-left: 4px solid var(--sky); background: var(--sky-soft); }
 .reach .figure { margin: 0 0 var(--space-2); }
 .worst-list { display: grid; gap: var(--space-3); margin: 0 0 var(--space-4); }
