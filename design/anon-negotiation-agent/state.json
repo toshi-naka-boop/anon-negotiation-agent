@@ -17,11 +17,11 @@
     "ledger.md"
   ],
   "specSha256": "36565ed46771d79b4872a54dda16dc9b9c4028073be75f18e76f70fbba03294e",
-  "nextAction": "コードは提出まで止めている。main は PR #2 で本番と同じ（2026-10-09）。本番は 10/28 まで止めずに動かす（ユーザーの判断。10/28 の後は発表と運営への確認で決める）。提出の後（10/15〜12/1）は main を提出時点のまま保つ。次: 提出物（説明文・アーキテクチャ図の画像・3 分のデモ動画〔YouTube〕・提出フォーム。Zenn 記事は任意）。動画の台本は骨組みを提示済みで、面談の場面・声か字幕か・ライブで録るかの判断待ち。",
-  "lastUpdated": "2026-10-09",
+  "nextAction": "画面の改修（3 つの場所）は a23fcfd。いまは DESIGN.md のセッションが static/ を Negocie の UX 設計で作り替える番（このセッションは static/・tests/test_ui_static.py・scripts/check_no_web_storage.sh に触らない）。その後に 1 回だけ: 台本の文言合わせ → 本番への反映（Run）→ 動画 → 記事の仕上げ・説明文と図の名前合わせ → main への取り込み。本番は 10/28 まで止めない。提出の後は main を提出時点のまま保つ。",
+  "lastUpdated": "2026-10-12",
   "delegation": {
     "批評": "claude/design-critic（frontmatter `model: opus`。16〜18 巡目は claude-opus-5-5。ユーザーの判断 2026-10-03: opus のままでよい）+ codex exec (gpt-5.6-sol, xhigh)",
-    "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）。v25（2026-10-08）: sonnet の worktree 1 本。1 本目は古い main（abada3c）から作られて ff できずに止まり、2 本目で `git checkout --detach 238d2ef` してから実装",
+    "実装": "claude/general-purpose (model: sonnet)。ユーザーの選択（2026-09-28）。③-0 は vault／agents／web+tests の 3 並行（worktree）。v25（2026-10-08）: sonnet の worktree 1 本。1 本目は古い main（abada3c）から作られて ff できずに止まり、2 本目で `git checkout --detach 238d2ef` してから実装。画面の 3 つの場所（2026-10-12）: sonnet の worktree 1 本（基点に detach してから）",
     "反証": "claude/design-critic(opus)（正しさ）+ codex exec xhigh（安全性）。ユーザーの指示で 2 レンズ（2026-09-30）。20 巡目（2026-10-05）: 最初の codex は CLI 0.146.1 で設定のモデル gpt-6.1-sol が ChatGPT アカウントで拒否された。安全性は design-critic(opus) でも並行して実施（reviews/round-20-security.md）。ユーザーの了承で CLI を 0.160.0 に上げ、gpt-6.1-sol xhigh が応答したので codex の安全性のレンズも実施（reviews/round-20-security-codex.md。モデルは codex の設定のまま）。23 巡目（2026-10-08。v25 の実装の軽い確認）: codex gpt-6.1-sol xhigh の 1 レンズ（安全性）だけ（ユーザーの判断「おすすめにして」）",
     "TEE スパイクの実装": "claude/general-purpose (model: sonnet) ×3 worktree（A 金庫の TEE 版・B web と共有の検証部品・C イメージと手順）2026-10-03"
   }
