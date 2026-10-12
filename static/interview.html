@@ -8,17 +8,33 @@
   <link rel="stylesheet" href="/static/app.css">
   <script type="module" src="/static/interview.js"></script>
 </head>
-<body>
+<body class="zone-seeker">
   <header class="site-header">
     <div class="inner">
       <a class="brand" href="/">匿名交渉エージェント</a>
       <nav class="site-nav" aria-label="主なページ">
-        <a href="/interview" aria-current="page">面談</a>
-        <a href="/me">自分の交渉</a>
-        <a href="/demo">デモ</a>
-        <a href="/attack">攻撃の実演</a>
-        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
-        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+        <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
+          <span class="nav-label" id="nav-label-seeker">求職者</span>
+          <div class="nav-links">
+            <a href="/interview" aria-current="page">面談</a>
+            <a href="/me">自分の交渉</a>
+            <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+          </div>
+        </div>
+        <div class="nav-group zone-employer" role="group" aria-labelledby="nav-label-employer">
+          <span class="nav-label" id="nav-label-employer">求人側</span>
+          <div class="nav-links">
+            <a href="/demo">求人担当の画面(デモ)</a>
+          </div>
+        </div>
+        <div class="nav-group zone-security" role="group" aria-labelledby="nav-label-security">
+          <span class="nav-label" id="nav-label-security">セキュリティテスト</span>
+          <div class="nav-links">
+            <a href="/attack">攻撃してみる</a>
+            <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+            <a href="/#tee">金庫の確認(TEE)</a>
+          </div>
+        </div>
       </nav>
     </div>
   </header>

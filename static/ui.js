@@ -105,6 +105,12 @@ export function counterFor(textarea) {
   return counter;
 }
 
+/** textarea の中身を text に入れ替える。入力と同じ input イベントを飛ばすので、文字数の表示(counterFor)も変わる。 */
+export function fillTextarea(textarea, text) {
+  textarea.value = text;
+  textarea.dispatchEvent(new Event("input"));
+}
+
 // ---- 組み合わせ・評価・結果の言葉 ----
 
 export const AXIS_LABELS = {
@@ -147,14 +153,36 @@ export function packageText(pkg) {
     .join(" / ");
 }
 
-/** 組み合わせ(7 軸)を、軸ごとの小さな札で並べる。 */
-export function packageChips(pkg) {
+/** 組み合わせ(7 軸)を、軸ごとの小さな札で並べる。changed(軸の集合)に入っている軸は、直前の組み合わせから変わった項目として強調する。 */
+export function packageChips(pkg, changed = new Set()) {
   const chips = Object.keys(AXIS_LABELS)
     .filter((axis) => axis in pkg)
     .map((axis) =>
-      h("span", { class: "chip" }, h("span", { class: "chip-label" }, AXIS_LABELS[axis]), formatAxisValue(axis, pkg[axis])),
+      h(
+        "span",
+        { class: changed.has(axis) ? "chip chip-changed" : "chip" },
+        h("span", { class: "chip-label" }, AXIS_LABELS[axis]),
+        formatAxisValue(axis, pkg[axis]),
+        changed.has(axis) ? h("span", { class: "visually-hidden" }, "(直前から変更)") : null,
+      ),
     );
   return h("span", { class: "pkg" }, chips);
+}
+
+// 1 行の要約に出す軸。7 項目の全部は、1 行目を押すと開く表にある。
+const HEADLINE_AXES = ["salary", "remote_days", "night_duty"];
+
+/** 組み合わせの要点(年収・リモート・当直)を 1 行にする。例: 年収 750 万円・リモート 週 3 日・当直 月 2 回 */
+export function packageHeadline(pkg) {
+  return HEADLINE_AXES.filter((axis) => axis in pkg)
+    .map((axis) => `${AXIS_LABELS[axis]} ${formatAxisValue(axis, pkg[axis])}`)
+    .join("・");
+}
+
+/** previous(同じ画面の直前の組み合わせ)から値が変わった軸の集合。previous がなければ空(比べるものがない)。 */
+export function changedAxes(pkg, previous) {
+  if (!previous) return new Set();
+  return new Set(Object.keys(AXIS_LABELS).filter((axis) => axis in pkg && pkg[axis] !== previous[axis]));
 }
 
 export const VERDICT_LABELS = {
@@ -225,44 +253,65 @@ const MOVE_LABELS = {
   end: "終了",
 };
 
+/** 何が起きたかの 1 行(entry-line の中身)。言葉は、行動のラベル(ACTION_LABELS)・評価の 3 値・無効な手の理由(REASON_LABELS)・見込みの言葉(LIKELIHOOD_LABELS)を使う。 */
+function summaryLine(entry, labels, actionLabel) {
+  const verdict = entry.own_evaluation ? verdictBadge(entry.own_evaluation) : null;
+  switch (`${entry.actor}:${entry.action}`) {
+    case "self:propose":
+    case "self:ask_principal":
+      return entry.package ? `${actionLabel}: ${packageHeadline(entry.package)}` : actionLabel;
+    case "counterparty:propose":
+      return verdict ? [actionLabel, " → 自分の金庫の答え: ", verdict] : actionLabel;
+    case "self:check":
+      return verdict ? ["自分の金庫で確かめ → ", verdict] : actionLabel;
+    case "self:principal_answer":
+      return entry.answer ? `${actionLabel}: ${entry.answer === "accept" ? "受ける" : "受けない"}${labels.autoAnswer ? "(架空人物の自動回答)" : ""}` : actionLabel;
+    case "self:invalid":
+      return `${actionLabel}: ${REASON_LABELS[entry.reason] ?? entry.reason ?? "理由は記録されていません"}`;
+    case "system:final_result":
+      return entry.result ? `${actionLabel}: 見込み ${LIKELIHOOD_LABELS[entry.result.likelihood] ?? entry.result.likelihood}` : actionLabel;
+    default:
+      return actionLabel;
+  }
+}
+
 /**
- * 活動ログの 1 件を、表示用の要素にする。labels は {self, counterparty}(その画面での呼び名)と autoAnswer
- * (真なら、途中確認の質問と回答が架空人物の自動回答であることを添える。§4.4)。
+ * 活動ログの 1 件を、表示用の要素にする。先頭に、何が起きたかの 1 行(summaryLine)。組み合わせ(7 項目)は、その 1 行目を押すと開く
+ * <details>(最終結果だけ、開いた状態)に入れる。previous は、同じ一覧の直前の組み合わせで、そこから変わった項目に印を付ける。
+ * labels は {self, counterparty}(その画面での呼び名)と autoAnswer(真なら、途中確認の質問と回答が架空人物の自動回答であることを添える。§4.4)。
  */
-export function entryElement(entry, labels) {
+export function entryElement(entry, labels, previous = null) {
+  const key = `${entry.actor}:${entry.action}`;
   const actorName = { self: labels.self, counterparty: labels.counterparty, system: "システム" }[entry.actor] ?? entry.actor;
-  const actionLabel = ACTION_LABELS[`${entry.actor}:${entry.action}`] ?? entry.action;
-  const body = [];
-  if (entry.package) body.push(h("div", {}, packageChips(entry.package)));
-  if (entry.own_evaluation) {
-    body.push(h("div", { class: "small" }, "自分側の評価: ", verdictBadge(entry.own_evaluation)));
+  const actionLabel = ACTION_LABELS[key] ?? entry.action;
+  const head = [h("span", { class: "entry-line" }, summaryLine(entry, labels, actionLabel)), h("span", { class: "entry-actor" }, actorName)];
+  const notes = [];
+  if (entry.own_evaluation && key !== "counterparty:propose" && key !== "self:check") {
+    notes.push(h("div", { class: "small" }, "自分側の評価: ", verdictBadge(entry.own_evaluation)));
   }
   if (entry.action === "ask_principal") {
-    body.push(
+    notes.push(
       h("div", { class: "small muted" }, labels.autoAnswer ? "架空人物の自動回答で答えます。" : "あなたに「この組み合わせなら受けますか?」と確認します。"),
     );
   }
-  if (entry.action === "principal_answer" && entry.answer) {
-    body.push(
-      h(
-        "div",
-        { class: "small" },
-        `回答: ${entry.answer === "accept" ? "受ける" : "受けない"}`,
-        labels.autoAnswer ? "(架空人物の自動回答)" : "",
-      ),
-    );
+  if (entry.action === "invalid" && entry.attempted_move) {
+    notes.push(h("div", { class: "small muted" }, `試した手: ${MOVE_LABELS[entry.attempted_move] ?? entry.attempted_move}`));
   }
-  if (entry.action === "invalid") {
-    const attempted = entry.attempted_move ? `(試した手: ${MOVE_LABELS[entry.attempted_move] ?? entry.attempted_move})` : "";
-    body.push(h("div", { class: "small" }, `${REASON_LABELS[entry.reason] ?? entry.reason ?? "理由は記録されていません"}${attempted}`));
-  }
-  if (entry.result) body.push(resultView(entry.result));
+  if (entry.result && !entry.result.package) notes.push(h("div", { class: "small" }, "合意できる組み合わせは見つかりませんでした。"));
+  const pkg = entry.package ?? entry.result?.package ?? null;
+  const main = pkg
+    ? h(
+        "details",
+        { class: "entry-details", open: entry.action === "final_result" },
+        h("summary", { class: "entry-head" }, head),
+        h("div", { class: "entry-table" }, packageChips(pkg, changedAxes(pkg, previous))),
+      )
+    : h("div", { class: "entry-head" }, head);
   return h(
     "li",
     { class: `entry actor-${entry.actor} action-${entry.action}`, dataset: { seq: entry.seq } },
     h("span", { class: "entry-seq" }, `#${entry.seq}`),
-    h("div", { class: "entry-head" }, h("span", { class: "entry-action" }, actionLabel), h("span", { class: "entry-actor" }, actorName)),
-    h("div", { class: "entry-body" }, body),
+    h("div", { class: "entry-main" }, main, notes.length ? h("div", { class: "entry-body" }, notes) : null),
   );
 }
 
@@ -272,18 +321,23 @@ export class ActivityView {
     this.list = list;
     this.empty = empty;
     this.labels = labels;
+    this.previous = null; // この一覧に出した、直前の組み合わせ(次の記録で、変わった項目に印を付ける元)
   }
 
   reset() {
     clear(this.list);
     this.empty.hidden = false;
+    this.previous = null;
   }
 
   add(entries) {
     if (!entries.length) return;
     this.empty.hidden = true;
     const atBottom = this.list.scrollHeight - this.list.scrollTop - this.list.clientHeight < 48;
-    entries.forEach((entry) => this.list.appendChild(entryElement(entry, this.labels)));
+    for (const entry of entries) {
+      this.list.appendChild(entryElement(entry, this.labels, this.previous));
+      if (entry.package) this.previous = entry.package;
+    }
     if (atBottom) this.list.scrollTop = this.list.scrollHeight;
   }
 }

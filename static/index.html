@@ -13,12 +13,28 @@
     <div class="inner">
       <a class="brand" href="/" aria-current="page">匿名交渉エージェント</a>
       <nav class="site-nav" aria-label="主なページ">
-        <a href="/interview">面談</a>
-        <a href="/me">自分の交渉</a>
-        <a href="/demo">デモ</a>
-        <a href="/attack">攻撃の実演</a>
-        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
-        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+        <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
+          <span class="nav-label" id="nav-label-seeker">求職者</span>
+          <div class="nav-links">
+            <a href="/interview">面談</a>
+            <a href="/me">自分の交渉</a>
+            <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+          </div>
+        </div>
+        <div class="nav-group zone-employer" role="group" aria-labelledby="nav-label-employer">
+          <span class="nav-label" id="nav-label-employer">求人側</span>
+          <div class="nav-links">
+            <a href="/demo">求人担当の画面(デモ)</a>
+          </div>
+        </div>
+        <div class="nav-group zone-security" role="group" aria-labelledby="nav-label-security">
+          <span class="nav-label" id="nav-label-security">セキュリティテスト</span>
+          <div class="nav-links">
+            <a href="/attack">攻撃してみる</a>
+            <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+            <a href="/#tee">金庫の確認(TEE)</a>
+          </div>
+        </div>
       </nav>
     </div>
   </header>
@@ -30,7 +46,35 @@
       生の値は面談の間だけ扱い、送信したあとは、このブラウザにも残しません。
     </p>
 
-    <div class="grid cols-3">
+    <div class="grid cols-3 spaced">
+      <section class="card link-card place-card zone-seeker" aria-labelledby="place-seeker-title">
+        <h2 id="place-seeker-title">求職者として使う</h2>
+        <p>あなた自身の条件で交渉する人向けです。面談で本音を預けると、丸めた形だけが保存され、AI のエージェントが代わりに交渉します。</p>
+        <div class="row">
+          <a class="btn btn-primary" href="/interview">面談で本音を預ける</a>
+          <a class="btn" href="/me">自分の交渉</a>
+        </div>
+      </section>
+      <section class="card link-card place-card zone-employer" aria-labelledby="place-employer-title">
+        <h2 id="place-employer-title">求人側の見え方を見る</h2>
+        <p>求人担当の目線で、架空の求人と架空の候補者の交渉を見られます。</p>
+        <p class="small muted">この版では、求人側は架空の求人が自動で応答します。</p>
+        <div class="row">
+          <a class="btn btn-primary" href="/demo">求人担当の画面(デモ)</a>
+        </div>
+      </section>
+      <section class="card link-card place-card zone-security" aria-labelledby="place-security-title">
+        <h2 id="place-security-title">セキュリティテスト</h2>
+        <p>求人担当になったつもりで、架空の候補者の本音を探る攻撃を試せます。</p>
+        <p class="small muted">架空の人物だけを使います。あなたの本音は使いません。</p>
+        <div class="row">
+          <a class="btn btn-primary" href="/attack">攻撃してみる</a>
+          <a class="btn" href="/#tee">金庫の確認(TEE)</a>
+        </div>
+      </section>
+    </div>
+
+    <div class="grid cols-2 spaced">
       <section class="card link-card" aria-labelledby="start-title">
         <h2 id="start-title">面談を始める</h2>
         <p>年収・リモート・当直などの条件を聞き取り、丸めた形だけを保存します。下の注記を読んでから始めてください。</p>
@@ -40,14 +84,6 @@
         <h2 id="me-title">自分の交渉</h2>
         <p>面談を送信したあと、求人を選んで交渉を始めます。活動ログの確認と、一時停止・再開・取消ができます。</p>
         <a class="btn" href="/me">自分の交渉を見る</a>
-      </section>
-      <section class="card link-card" aria-labelledby="demo-title">
-        <h2 id="demo-title">デモと攻撃の実演</h2>
-        <p>架空人物どうしの交渉(ケース 1〜3)とリプレイ、攻撃モードでの 3 枚の壁の実演を見られます。</p>
-        <div class="row">
-          <a class="btn" href="/demo">デモ</a>
-          <a class="btn" href="/attack">攻撃の実演</a>
-        </div>
       </section>
     </div>
 

@@ -8,17 +8,33 @@
   <link rel="stylesheet" href="/static/app.css">
   <script type="module" src="/static/me.js"></script>
 </head>
-<body>
+<body class="zone-seeker">
   <header class="site-header">
     <div class="inner">
       <a class="brand" href="/">匿名交渉エージェント</a>
       <nav class="site-nav" aria-label="主なページ">
-        <a href="/interview">面談</a>
-        <a href="/me" aria-current="page">自分の交渉</a>
-        <a href="/demo">デモ</a>
-        <a href="/attack">攻撃の実演</a>
-        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
-        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+        <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
+          <span class="nav-label" id="nav-label-seeker">求職者</span>
+          <div class="nav-links">
+            <a href="/interview">面談</a>
+            <a href="/me" aria-current="page">自分の交渉</a>
+            <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+          </div>
+        </div>
+        <div class="nav-group zone-employer" role="group" aria-labelledby="nav-label-employer">
+          <span class="nav-label" id="nav-label-employer">求人側</span>
+          <div class="nav-links">
+            <a href="/demo">求人担当の画面(デモ)</a>
+          </div>
+        </div>
+        <div class="nav-group zone-security" role="group" aria-labelledby="nav-label-security">
+          <span class="nav-label" id="nav-label-security">セキュリティテスト</span>
+          <div class="nav-links">
+            <a href="/attack">攻撃してみる</a>
+            <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+            <a href="/#tee">金庫の確認(TEE)</a>
+          </div>
+        </div>
       </nav>
     </div>
   </header>
@@ -72,7 +88,7 @@
               <p class="small muted">一時停止中は、手番の期限が進みません。取消すると、結果は「なし」になります。</p>
               <div id="detail-error" aria-live="polite"></div>
               <h3>活動ログ</h3>
-              <p class="small muted">あなたの側から見えた記録だけを、記録された順に並べています。</p>
+              <p class="small muted">あなたの側から見えた記録だけを、記録された順に並べています。各記録の 1 行目を押すと、組み合わせの 7 項目が開きます(色のついた項目は、直前の組み合わせから変わったところです)。</p>
               <p id="activity-empty" class="empty-note">まだ記録がありません。</p>
               <ol id="activity" class="activity"></ol>
             </div>
