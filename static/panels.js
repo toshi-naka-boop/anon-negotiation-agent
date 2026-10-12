@@ -35,7 +35,7 @@ function worstCasePanel(worstCase) {
     "section",
     { class: "card", "aria-labelledby": "panel-worst-title" },
     h("h3", { id: "panel-worst-title" }, "最悪漏れてもここまで"),
-    h("p", { class: "small muted" }, "金庫の答えをすべて見られたとしても、知られるのは、次のマス(丸めた後の値)までです。"),
+    h("p", { class: "small muted" }, "金庫の答えをすべて見られたとしても、相手に分かるのは、最大でも次のマス(丸めた後の値)1 つぶんまでです。"),
     rows.length ? h("ul", { class: "axis-list" }, rows) : h("p", { class: "empty-note" }, "条件が付いている軸がありません。"),
     h(
       "ul",
@@ -69,7 +69,7 @@ function stillHiddenPanel(panels) {
     "section",
     { class: "card", "aria-labelledby": "panel-hidden-title" },
     h("h3", { id: "panel-hidden-title" }, "まだ隠しているもの"),
-    h("p", { class: "small muted" }, "値は持たず、種類と、どのマスの中かだけを示します。生の値は、保存していません。"),
+    h("p", { class: "small muted" }, "値は持たず、種類と、どのマスの中かだけを示します。生の値は、預けた後に保存しません。"),
     h("ul", { class: "hidden-list" }, items),
   );
 }
@@ -77,14 +77,14 @@ function stillHiddenPanel(panels) {
 /** 2 つのパネルの区画を動かす。body・error はページの HTML にある要素。load() は、サーバが作った 2 つのパネル({worst_case, still_hidden})を返す。 */
 export function mountPanels({ body, error }, { load }) {
   async function refresh() {
-    replace(body, waiting("読み込み中…"));
+    replace(body, waiting("読み込んでいます…"));
     try {
       const panels = await load();
       showMessage(error, null);
       replace(body, [worstCasePanel(panels.worst_case), stillHiddenPanel(panels)]);
     } catch (failure) {
       replace(body, null);
-      showError(error, failure, { not_found: "まだ、条件が保存されていません。面談を送信すると、ここに出ます。" });
+      showError(error, failure, { not_found: "まだ、条件が保存されていません。面談を終えて預けると、ここに出ます。" });
     }
   }
 

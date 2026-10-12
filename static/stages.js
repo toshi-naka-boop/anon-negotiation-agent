@@ -27,7 +27,11 @@ export const SETTLE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 32000, 320
 // 匿名職務要約の上限(文字数)。サーバの [web.stages] job_summary_max_chars と同じ(暫定。tests/test_ui_static.py が一致を確かめる)。
 export const JOB_SUMMARY_MAX_CHARS = 400;
 
-const SIMULATED_NOTE = "模擬表示です。このシステムは、あなたの氏名・連絡先を集めていないので、求人側には何も渡りません。";
+const SIMULATED_NOTE = "模擬表示です。この版は、あなたの氏名・連絡先を集めていないので、求人側に渡るものがありません。";
+
+// 「会う」「承認」の 1 行確認(DESIGN.md §5)。押す前に、相手にも押されたときだけ開くことと、戻せないことを見せる。
+const MEET_CONFIRM = "相手にも「会う」が押されたときに、職務要約が開きます。戻せません。";
+const APPROVE_CONFIRM = "相手にも「承認」が押されたときに、氏名と連絡先が開きます。戻せません。";
 
 const STATE_BADGES = { done: ["開示済み", "ok"], current: ["いま、ここ", "info"], locked: ["まだ", ""] };
 
@@ -106,7 +110,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
     return stageItem(0, "見込みと組み合わせ", "done", [
       h("div", {}, `見込み: ${LIKELIHOOD_LABELS[view.result.likelihood] ?? view.result.likelihood}`),
       view.result.package ? h("div", {}, packageChips(view.result.package)) : null,
-      h("p", { class: "small muted" }, "交渉が合意で終わると、双方に自動で表示されます。求人側にも、同じものが見えています。"),
+      h("p", { class: "small muted" }, "判定が出ると、自動で双方に出ます。操作はありません。求人側にも、同じものが見えています。"),
     ]);
   }
 
@@ -145,10 +149,11 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
       h(
         "ul",
         { class: "small muted" },
-        h("li", {}, "この要約は、この交渉の求人側の画面にだけ出ます(求人は架空なので、実際には誰にも表示されません)。AI(LLM)には渡しません。"),
-        h("li", {}, "「会う」を押すと、書き直せません(最初に書いたものが残ります)。"),
+        h("li", {}, "この要約は、この交渉の求人側の画面にだけ出ます(この版の求人は架空なので、実際には誰にも表示されません)。あなたのエージェントにも、相手のエージェントにも渡しません。"),
+        h("li", {}, "押すまでは渡りません。押した後は、書き直せません(最初に書いたものが残ります)。"),
         h("li", {}, "データを消したとき(または、最後に使ってから一定の期間がたったとき)に、段の状態ごと消えます。"),
       ),
+      h("p", { class: "small" }, MEET_CONFIRM),
       h("div", { class: "row" }, button),
     );
   }
@@ -156,7 +161,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
   function stage1(view) {
     const open = view.stage >= 1;
     const content = [
-      h("p", { class: "small" }, "双方が「会う」を押すと、あなたの匿名職務要約が、求人側に開きます。AI(LLM)には渡しません。"),
+      h("p", { class: "small" }, "双方が「会う」を押したときだけ、あなたの匿名職務要約が、求人側に開きます。開いたものは戻せません。"),
       flagsLine("会う", view.meet, candidateName),
     ];
     if (open) {
@@ -164,7 +169,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
     } else if (own && !view.meet.candidate) {
       content.push(meetForm(view));
     } else if (own) {
-      content.push(h("p", { class: "small muted" }, "あなたは「会う」を押しました。求人側が押すのを待っています。"));
+      content.push(h("p", { class: "small muted" }, "あなたは「会う」を押しました。次は求人側の番です。あなたは何もしなくて大丈夫。"));
     } else {
       content.push(h("p", { class: "small muted" }, demoNote(view)));
     }
@@ -187,13 +192,14 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
   function approveBlock(view) {
     const button = h("button", { class: "btn btn-primary", type: "button" }, "承認する");
     button.addEventListener("click", () => {
-      if (!window.confirm("承認すると、段 2 で、氏名と連絡先が求人側に開示されます(このシステムは連絡先を集めていないので、実際には模擬表示です)。承認しますか?")) return;
+      if (!window.confirm(`${APPROVE_CONFIRM}(この版は連絡先を集めていないので、実際には模擬表示です)承認しますか?`)) return;
       operate(button, () => approve(view.nid));
     });
     return h(
       "div",
       {},
-      h("p", { class: "small muted" }, `承認すると、段 2 で、氏名と連絡先が求人側に開示されます。${SIMULATED_NOTE}`),
+      h("p", { class: "small" }, APPROVE_CONFIRM),
+      h("p", { class: "small muted" }, SIMULATED_NOTE),
       h("div", { class: "row" }, button),
     );
   }
@@ -202,13 +208,13 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
     const done = view.stage === 2;
     const current = view.stage === 1;
     const content = [
-      h("p", { class: "small" }, "双方が「承認」を押すと、氏名と連絡先が、求人側に開きます。"),
+      h("p", { class: "small" }, "双方が「承認」を押したときだけ、氏名と連絡先が、求人側に開きます。開いたものは戻せません。"),
       flagsLine("承認", view.approve, candidateName),
     ];
     if (done) content.push(contactBox(view.disclosed_to_employer));
     else if (!current) content.push(h("p", { class: "small muted" }, "段 1 が開いてから、承認できます。"));
     else if (own && !view.approve.candidate) content.push(approveBlock(view));
-    else if (own) content.push(h("p", { class: "small muted" }, "あなたは「承認」を押しました。求人側が押すのを待っています。"));
+    else if (own) content.push(h("p", { class: "small muted" }, "あなたは「承認」を押しました。次は求人側の番です。あなたは何もしなくて大丈夫。"));
     else content.push(h("p", { class: "small muted" }, demoNote(view)));
     return stageItem(2, "氏名と連絡先(承認)", done ? "done" : current ? "current" : "locked", content);
   }
@@ -222,7 +228,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
     } else {
       nodes.push(resultView(view.result));
       if (view.agreed) nodes.push(h("ol", { class: "stage-list" }, [stage0(view), stage1(view), stage2(view)]));
-      else nodes.push(message("info", "合意できる組み合わせがなかったので、段 1 以降には進めません。求人側に見えているのも、「見込み: なし」だけです。"));
+      else nodes.push(message("info", "合意できる組み合わせがなかったので、段 1 以降には進めません。求人側に見えているのも、「見込み: なし」だけです。あなたの条件は残っています。"));
       nodes.push(h("p", { class: "small muted" }, `いま求人側に見えているもの: ${view.disclosed_to_employer.visible.map((item) => ITEM_LABELS[item] ?? item).join("・")}`));
     }
     replace(body, nodes);

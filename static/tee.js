@@ -174,7 +174,7 @@ function render(data, origin) {
     statusLine(data),
     data.verified
       ? null
-      : h("p", { class: "small muted" }, "検証が通らなかったので、下の値は、確かめられていないトークンに書かれていたものです(取れなかった項目は「—」)。信用しないでください。"),
+      : h("p", { class: "small muted" }, "検証が通らなかったので、下の値は、確かめられていないトークンに書かれていたものです(取れなかった項目は「—」)。信用できる値ではありません。"),
     h("h3", {}, "証明の内容"),
     h(
       "dl",

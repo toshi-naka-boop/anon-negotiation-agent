@@ -3,40 +3,59 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>面談 - 匿名交渉エージェント</title>
+  <title>Negocie</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/app.css">
   <script type="module" src="/static/interview.js"></script>
 </head>
-<body>
+<body class="zone-seeker">
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="/">匿名交渉エージェント</a>
-      <nav class="site-nav" aria-label="主なページ">
-        <a href="/interview" aria-current="page">面談</a>
-        <a href="/me">自分の交渉</a>
-        <a href="/demo">デモ</a>
-        <a href="/attack">攻撃の実演</a>
-        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
-        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+      <a class="brand" href="/">Negocie</a>
+      <span class="feather-bar brand-mark" aria-hidden="true"></span>
+      <button id="nav-toggle" class="btn btn-small nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">メニュー</button>
+      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
+      <nav class="site-nav" id="site-nav" aria-label="主なページ">
+        <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
+          <span class="nav-label" id="nav-label-seeker">求職者</span>
+          <div class="nav-links">
+            <a href="/interview" aria-current="page">面談</a>
+            <a href="/me">自分の交渉</a>
+            <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+          </div>
+        </div>
+        <div class="nav-group zone-employer" role="group" aria-labelledby="nav-label-employer">
+          <span class="nav-label" id="nav-label-employer">求人側</span>
+          <div class="nav-links">
+            <a href="/demo">求人担当の画面(デモ)</a>
+          </div>
+        </div>
+        <div class="nav-group zone-security" role="group" aria-labelledby="nav-label-security">
+          <span class="nav-label" id="nav-label-security">セキュリティテスト</span>
+          <div class="nav-links">
+            <a href="/attack">攻撃してみる</a>
+            <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+            <a href="/#tee">金庫の確認(TEE)</a>
+          </div>
+        </div>
       </nav>
     </div>
   </header>
 
   <main>
-    <h1>面談</h1>
-    <p class="lead">
-      9 つの手順で、あなたの条件を聞き取ります。答えは、サーバーのメモリの上にだけ置き、送信すると、グリッドの一番近いマスに丸めた形だけが保存されます。
-      送信したあと、このページのフォームの内容は消えます。
+    <div class="topbar">
+      <h1>面談</h1>
+      <p class="lead">
+      短い問いに、1 つずつ答えます。答えはサーバーのメモリにだけ置き、預けるとマス目に丸めた形だけが残ります。預けたあと、このページの入力は消えます。
     </p>
+    </div>
 
     <section class="card" id="intro" aria-labelledby="notice-title">
-      <h2 id="notice-title">はじめに(必ずお読みください)</h2>
-      <div id="notice-body"><p class="muted">読み込み中…</p></div>
+      <h2 id="notice-title">はじめに</h2>
+      <p class="small muted">面談の前に、AI の処理と、答えの置き場所について短く確かめられます。</p>
+      <div id="notice-body"><p class="muted">注記を読み込んでいます</p></div>
       <div id="intro-error" aria-live="polite"></div>
-      <div class="row">
-        <button id="start-button" class="btn btn-primary" type="button">注記を読みました。面談を始める(続ける)</button>
-      </div>
+      <button id="start-button" class="btn btn-primary btn-wide" type="button">注記を読みました。面談を始める(続ける)</button>
     </section>
 
     <section id="wizard" class="hidden" aria-label="面談の手順">
@@ -44,19 +63,19 @@
       <div id="step-error" aria-live="polite"></div>
       <div class="card" id="step"></div>
       <div class="row">
-        <button id="restart-button" class="btn btn-quiet btn-small" type="button">最初からやり直す</button>
-        <button id="discard-button" class="btn btn-quiet btn-small" type="button">面談を破棄する</button>
+        <button id="restart-button" class="btn btn-quiet" type="button">最初からやり直す</button>
+        <button id="discard-button" class="btn btn-quiet" type="button">面談を破棄する</button>
       </div>
-      <p class="small muted" id="provisional-note" hidden>設問の文面は暫定です。</p>
+      <p class="small muted" id="provisional-note" hidden>問いの文面は暫定です。</p>
     </section>
 
     <section class="card hidden" id="done" aria-live="polite">
-      <h2>面談を送信しました</h2>
-      <p>丸めた条件を保存しました。このページに入力した内容は、画面から消しました。</p>
-      <p>次は、求人を選んで交渉を始めます。</p>
-      <div class="row">
-        <a class="btn btn-primary" href="/me">自分の交渉へ</a>
-        <a class="btn" href="/">入口へ戻る</a>
+      <h2>預けました</h2>
+      <p>預けました。書いた本音と面談の記録は捨てました。相手に分かるのはマス目までです。</p>
+      <p class="small muted">次は、求人を選んで交渉を始められます。預けたあとも、「自分の交渉」から、保存したデータをすべて消せます。</p>
+      <div class="screen-actions">
+        <a class="btn btn-primary btn-wide" href="/me">自分の交渉へ</a>
+        <a class="btn btn-quiet" href="/">入口へ戻る</a>
       </div>
     </section>
   </main>
@@ -64,5 +83,6 @@
   <footer class="site-footer">
     <p>求人はすべて架空のフィクスチャです。</p>
   </footer>
+  <div id="veil" class="veil" hidden tabindex="0" role="button" aria-label="伏せています。押すと画面に戻ります"></div>
 </body>
 </html>

@@ -3,32 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>デモ - 匿名交渉エージェント</title>
+  <title>Negocie</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/app.css">
   <script type="module" src="/static/demo.js"></script>
 </head>
-<body>
+<body class="zone-employer">
   <header class="site-header">
     <div class="inner">
-      <a class="brand" href="/">匿名交渉エージェント</a>
-      <nav class="site-nav" aria-label="主なページ">
-        <a href="/interview">面談</a>
-        <a href="/me">自分の交渉</a>
-        <a href="/demo" aria-current="page">デモ</a>
-        <a href="/attack">攻撃の実演</a>
-        <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
-        <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+      <a class="brand" href="/">Negocie</a>
+      <span class="feather-bar brand-mark" aria-hidden="true"></span>
+      <button id="nav-toggle" class="btn btn-small nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">メニュー</button>
+      <button id="veil-button" class="btn btn-small veil-button" type="button" aria-controls="veil">伏せる</button>
+      <nav class="site-nav" id="site-nav" aria-label="主なページ">
+        <div class="nav-group zone-seeker" role="group" aria-labelledby="nav-label-seeker">
+          <span class="nav-label" id="nav-label-seeker">求職者</span>
+          <div class="nav-links">
+            <a href="/interview">面談</a>
+            <a href="/me">自分の交渉</a>
+            <a href="/me#slot-stages" data-slot="nav-stages">段階開示・開示台帳</a>
+          </div>
+        </div>
+        <div class="nav-group zone-employer" role="group" aria-labelledby="nav-label-employer">
+          <span class="nav-label" id="nav-label-employer">求人側</span>
+          <div class="nav-links">
+            <a href="/demo" aria-current="page">求人担当の画面(デモ)</a>
+          </div>
+        </div>
+        <div class="nav-group zone-security" role="group" aria-labelledby="nav-label-security">
+          <span class="nav-label" id="nav-label-security">セキュリティテスト</span>
+          <div class="nav-links">
+            <a href="/attack">攻撃してみる</a>
+            <a href="/attack#slot-meter" data-slot="nav-meter">推定区間メーター</a>
+            <a href="/#tee">金庫の確認(TEE)</a>
+          </div>
+        </div>
       </nav>
     </div>
   </header>
+  <div class="zone-band" role="note">
+    <div class="inner">求人担当の画面(デモ): 架空の求人と架空の候補者の交渉です。求人側は自動で応答します。</div>
+  </div>
 
   <main>
-    <h1>デモ</h1>
-    <p class="lead">
-      架空人物どうしの交渉を、候補者側と求人側に分けて並べて見られます。それぞれのパネルには、その側から見えた記録だけが出ます
-      (相手の評価は、どちらにも出ません)。
+    <div class="topbar">
+      <h1>交渉のデモ(架空の人物)</h1>
+      <p class="lead">
+      架空の求人と架空の候補者の交渉を、求人側の画面・求職者の画面・並べて比べる、の 3 つの視点で見られます。それぞれの画面には、その側に届いた記録だけが出ます
+      (相手の金庫の答えは、どちらにも出ません)。
     </p>
+    </div>
 
     <section class="card" aria-labelledby="cases-title">
       <h2 id="cases-title">ケース</h2>
@@ -36,13 +60,20 @@
         ライブ実行は、AI(Gemini)を呼ぶので、回数に上限があります。上限に達したときは、リプレイで同じ交渉を見られます。
       </p>
       <div id="cases-error" aria-live="polite"></div>
-      <div id="cases" class="grid cols-3"><p class="muted">読み込み中…</p></div>
+      <div id="cases" class="grid cols-3 spaced"><p class="muted">読み込み中…</p></div>
       <label class="field">
-        <span class="label">リプレイの再生の倍率</span>
+        <span class="label">リプレイの再生の速さ</span>
         <select id="speed" aria-describedby="speed-hint"></select>
-        <span class="hint" id="speed-hint">記録した間隔を、この倍率で縮めて流します。台本の記録は間隔が短いので、倍率を小さくすると追いかけやすくなります。</span>
+        <span class="hint" id="speed-hint">「ゆっくり」「ふつう」「はやい」は、記録の時刻によらず、1 手ごとに同じ間隔で流します。「記録どおり」は、記録した間隔のまま流します(台本の記録は間隔が短く、全体で 1 秒足らずで終わります)。リプレイを始めるときの選択が使われます。</span>
       </label>
     </section>
+
+    <div id="view-switch" class="view-switch" role="group" aria-label="視点の切り替え">
+      <button id="view-employer" class="btn" type="button" aria-pressed="true">求人側の画面</button>
+      <button id="view-candidate" class="btn" type="button" aria-pressed="false">求職者の画面</button>
+      <button id="view-both" class="btn" type="button" aria-pressed="false">並べて比べる</button>
+    </div>
+    <p id="view-note" class="view-note" aria-live="polite">求人担当に届くのは、候補者の提案と、自分の金庫の答えだけで、候補者の条件(本音の値)は見えません。</p>
 
     <section id="run" class="hidden" aria-live="polite">
       <div id="banner" class="banner" role="status"></div>
@@ -53,15 +84,16 @@
       <div id="run-error" aria-live="polite"></div>
       <p id="run-status" class="small muted"></p>
       <div id="run-result"></div>
-      <div class="panels">
-        <section class="card" aria-labelledby="candidate-title">
-          <h3 id="candidate-title">候補者側のパネル(架空人物)</h3>
+      <p class="small muted">各記録の 1 行目を押すと、組み合わせの 7 項目が開きます。色のついた項目は、同じ画面の直前の組み合わせから変わったところです。</p>
+      <div id="panels" class="panels">
+        <section id="candidate-panel" class="card" aria-labelledby="candidate-title">
+          <h3 id="candidate-title">求職者の画面(架空人物)</h3>
           <p class="small muted">候補者側から見えた記録だけです。</p>
           <p id="candidate-empty" class="empty-note">まだ記録がありません。</p>
           <ol id="candidate-log" class="activity"></ol>
         </section>
-        <section class="card" aria-labelledby="employer-title">
-          <h3 id="employer-title">求人側のパネル(架空の求人)</h3>
+        <section id="employer-panel" class="card" aria-labelledby="employer-title">
+          <h3 id="employer-title">求人側の画面(架空の求人)</h3>
           <p class="small muted">求人側から見えた記録だけです。</p>
           <p id="employer-empty" class="empty-note">まだ記録がありません。</p>
           <ol id="employer-log" class="activity"></ol>
@@ -87,8 +119,8 @@
         種類と、どのマスの中かだけを示します。
       </p>
       <p class="small muted">
-        デモの架空人物は、生の条件をフィクスチャに持っています(デモ用に公開しているもの)が、その値を並べて見せる口は、まだありません。
-        代わりに、上の候補者側のパネルで、金庫が返した答え(自分側の評価)を見られます。攻撃者が、その答えをすべて見られたときに年収の境目がどこまで分かるかは、
+        デモの架空人物の生の条件は、デモ用の台本として公開していますが、その値を並べて見せる画面は、この版にはまだありません。
+        代わりに、上の視点の切り替えの「求職者の画面」で、金庫が返した答え(自分側の評価)を見られます。攻撃者が、その答えをすべて見られたときに年収の境目がどこまで分かるかは、
         <a href="/attack#slot-meter">推定区間メーター</a>で確かめられます。
       </p>
     </section>
@@ -97,5 +129,6 @@
   <footer class="site-footer">
     <p>人物と求人はすべて架空です。</p>
   </footer>
+  <div id="veil" class="veil" hidden tabindex="0" role="button" aria-label="伏せています。押すと画面に戻ります"></div>
 </body>
 </html>

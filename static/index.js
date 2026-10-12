@@ -5,7 +5,7 @@
 
 import { call } from "./api.js";
 import { showTee } from "./tee.js";
-import { h, replace, showError } from "./ui.js";
+import { h, mountVeil, replace, showError } from "./ui.js";
 
 async function showNotice() {
   const title = document.getElementById("notice-title");
@@ -20,4 +20,11 @@ async function showNotice() {
 }
 
 showNotice();
+// ナビの「金庫の確認(TEE)」(/#tee)で来たときは、畳んである「詳しく見る」を開く
+if (location.hash === "#tee") {
+  const more = document.getElementById("more-tee");
+  if (more) more.open = true;
+}
 showTee(document.getElementById("tee-body"), { load: () => call("GET /api/tee/attestation"), origin: location.origin });
+
+mountVeil();

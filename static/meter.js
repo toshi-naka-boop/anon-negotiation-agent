@@ -62,7 +62,7 @@ function meterBar(interval) {
     "div",
     { class: "meter", role: "img", "aria-label": `候補者の年収の境目: ${describeInterval(interval)}` },
     h("div", { class: "meter-track" }, cells),
-    h("div", { class: "meter-unit small muted" }, "年収(万円)。1 マスは 50 万円。両端の点線のマスは、グリッドの外まで広がる部分です。"),
+    h("div", { class: "meter-unit small muted" }, "年収(万円)。1 マスは 50 万円。両端の点線のマスは、マス目の外まで広がる部分です。"),
   );
 }
 
@@ -118,7 +118,7 @@ export function mountMeter({ body, error }) {
       meterBar(interval),
       h("p", {}, "候補者の年収の境目は、", h("strong", {}, describeInterval(interval)), `の中にあります(${interval.cells} マス)。`),
       interval.cells === 1
-        ? message("ok", "これ以上は絞れません。提案もグリッドの値に限られ、金庫も丸めた値でしか答えないので、境目がマスの中のどこかは、何度尋ねても分かりません。")
+        ? message("ok", "これ以上は絞れません。提案もマス目の値に限られ、金庫も丸めた値でしか答えないので、境目がマスの中のどこかは、何度尋ねても分かりません。")
         : null,
       h("p", { class: "small muted" }, "区間は、候補者側の金庫の「受けられる」「受けられない」から計算しています。「本人確認が必要」は、情報なしとして数えます。候補者側のエージェントが実際に受けたかどうかは、使っていません。"),
       groupsTable(response.groups),
@@ -138,7 +138,7 @@ export function mountMeter({ body, error }) {
       render(response);
     } catch (failure) {
       showError(error, failure, {
-        forbidden: "この画面で作った交渉が、サーバーに残っていません(再起動などで消えました)。攻撃の交渉を作り直してください。",
+        forbidden: "この画面で作った交渉が、サーバーに残っていません(再起動などで消えました)。攻撃の交渉を作り直すと、また計算できます。",
       });
       error.appendChild(h("button", { class: "btn btn-small", type: "button", onclick: () => refresh() }, "もう一度計算する"));
     } finally {
@@ -212,7 +212,7 @@ export function mountSimulation({ value, button, error, result }) {
       h(
         "p",
         { class: "small muted" },
-        "防御ありの金庫では、同じ探索をしても、上のメーターのとおり、50 万円幅の 1 マスまでしか絞れません。生の値(例: 620 万円)は、マスの中のどこかとしか分かりません。",
+        "防御ありの金庫では、同じ探索をしても、推定区間メーター(防御あり)のとおり、50 万円幅の 1 マスまでしか絞れません。生の値(例: 620 万円)は、マスの中のどこかとしか分かりません。",
       ),
     );
   }
@@ -220,7 +220,7 @@ export function mountSimulation({ value, button, error, result }) {
   async function simulate() {
     const amount = Number(value.value);
     if (value.value.trim() === "" || !Number.isInteger(amount) || amount < low || amount > high || amount % step !== 0) {
-      showMessage(error, "warn", `年収は、${low}〜${high} 万円の、${step} 万円刻みの値で入れてください。`);
+      showMessage(error, "warn", `年収は、${low}〜${high} 万円の、${step} 万円刻みの値だけです。入れ直すと、計算できます。`);
       clear(result);
       return;
     }
