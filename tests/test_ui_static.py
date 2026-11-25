@@ -3620,6 +3620,11 @@ def test_the_readme_has_a_section_for_those_who_decide_to_adopt_it_with_cost_fig
     assert (ROOT / "design" / "anon-negotiation-agent" / "research" / "deploy-runbook.md").exists()
     assert "deploy-runbook.md" in readme
     assert "公開デモが止まっているとき" in readme
+    concurrent = params["web"]["interview"]["max_concurrent_per_client"]
+    begin = params["web"]["limits"]["per_client"]["interview_begin"]
+    assert f"同時に進められる面談は {concurrent} 人まで" in readme
+    assert f"10 分に {begin} 人ほど" in readme
+    assert "max_concurrent_per_client" in readme and "interview_begin" in readme
 
 
 def test_the_screens_say_that_the_cookie_is_the_only_key_and_how_long_it_and_the_data_last():
@@ -3634,7 +3639,7 @@ def test_the_screens_say_that_the_cookie_is_the_only_key_and_how_long_it_and_the
     assert (cookie_days, data_days) == (29, 30)
     for html in (me, interview):
         assert "クッキーを消したり、別の端末・別のブラウザで開いたりすると" in html
-        assert f"クッキーの有効期間は、面談を始めてから {cookie_days} 日" in html
+        assert f"クッキーの有効期間は、最後に使ってから約 {cookie_days} 日" in html
         assert f"最後に使ってから {data_days} 日" in html
     assert "通知は届かない" in me
 
@@ -3653,3 +3658,18 @@ def test_an_unknown_field_name_in_a_422_is_not_shown_raw():
 
     assert "FIELD_LABELS[name] ?? name" not in api
     assert 'FIELD_LABELS[name] ?? "入力の一部"' in api
+
+
+def test_the_readme_and_the_entrance_match_the_actual_interview_order_and_the_fixed_grid():
+    # 面談の最初はプロフィール 3 問(年収の 3 問ではない)。粗さは利用者が決めるのではなく、あらかじめ決めてある。
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert "年収の 3 問から)" not in readme
+    assert "プロフィール 3 問 → 年収 3 問" in readme
+    assert "まず年収の 3 問だけ" not in index
+    assert "プロフィール 3 問と年収 3 問から始めます" in index
+    assert "あなたが決めた粗さ" not in readme
+    assert "あらかじめ決めた粗さまでしか伝えない" in readme
+    assert "試験は 3," not in readme  # 件数を固定で書かない(数え直しを忘れて食い違うため)
+    assert "属性帯" not in (STATIC / "api.js").read_text(encoding="utf-8")
