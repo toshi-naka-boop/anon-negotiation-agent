@@ -205,7 +205,7 @@ function describeValidation(detail) {
   for (const item of detail) {
     const parts = Array.isArray(item && item.loc) ? item.loc.filter((part) => typeof part === "string" && part !== "body") : [];
     const name = parts.length ? parts[parts.length - 1] : null;
-    if (name && !names.includes(name)) names.push(FIELD_LABELS[name] ?? name);
+    if (name && !names.includes(name)) names.push(FIELD_LABELS[name] ?? "入力の一部");
   }
   return names.length
     ? `入力の形が正しくありません(${names.join("、")})。値を見直してください。`

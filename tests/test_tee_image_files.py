@@ -551,3 +551,10 @@ def test_manual_code_blocks_hold_one_command_each():
     for block in blocks:
         commands = [line for line in re.sub(r"\\\n", " ", block).splitlines() if line.strip() and not line.lstrip().startswith("#")]
         assert len(commands) == 1, block
+
+
+def test_app_dockerfile_runs_as_a_non_root_user():
+    """web・agents・vault〔Cloud Run 版〕のイメージは、非 root で動く(TEE 版の Dockerfile.vault だけが、launcher のソケットのために root)。"""
+    users = of_kind(parse_dockerfile(ROOT / "Dockerfile"), "USER")
+
+    assert [item.argument for item in users] == ["app"]

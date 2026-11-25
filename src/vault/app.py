@@ -86,16 +86,9 @@ def create_app(
     - attestation: `GET /v1/attestation` を付ける。素の Starlette の経路なので、caller_verifier の依存は掛からない
       (web は、この口の応答を確かめるまで金庫を信用しないので、ID トークンをまだ送らない)。
     """
-    if caller_verifier is None:
-        app = FastAPI(title="vault")
-    else:
-        app = FastAPI(
-            title="vault",
-            dependencies=[Depends(caller_verifier)],
-            docs_url=None,
-            redoc_url=None,
-            openapi_url=None,
-        )
+    # /docs・/redoc・/openapi.json は、どちらの版でも出さない(内部 API の全容を見せない。web 側の app も同じ。src/web/app.py)。
+    dependencies = [] if caller_verifier is None else [Depends(caller_verifier)]
+    app = FastAPI(title="vault", dependencies=dependencies, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_route("/health", _healthz, methods=["GET"])  # caller_verifier の依存の外(素の経路)。TEE 版でも認証なしで通る
     if attestation is not None:
         app.add_route("/v1/attestation", attestation.endpoint, methods=["GET"])

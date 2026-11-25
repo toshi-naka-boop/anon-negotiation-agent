@@ -26,4 +26,18 @@ pythonpath = ["src"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.15",
 ]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+extend-exclude = ["design", ".venv"]
+
+[tool.ruff.lint]
+# 致命的な誤り(構文・未定義名・未使用 import など)だけを見る。書式は縛らない。
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest のフィクスチャは import して使う(引数名で参照されるので、未使用・再定義に見える)。
+"tests/**" = ["F401", "F811"]

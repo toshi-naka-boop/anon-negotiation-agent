@@ -101,6 +101,7 @@ import httpx  # noqa: E402
 from google.cloud import firestore  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
 
+from emulator_locator import EmulatorNotFound, find_emulator  # noqa: E402
 import replay_check  # noqa: E402
 from agents.config import DEFAULT_AGENTS_CONFIG  # noqa: E402
 from negotiation_core import Package, Side, TurnInput, Usage  # noqa: E402
@@ -142,9 +143,7 @@ RUN_TIMEOUT_SECONDS = 480.0
 # 設定ファイル(判定の基準・単価・設定のハッシュの元)。
 CONFIG_PATH = PROJECT_ROOT / "config" / "params.toml"
 
-# Firestore エミュレータの起動(tests/conftest.py と同じ値)。
-_JAVA_BIN = "/opt/homebrew/opt/openjdk@21/bin/java"
-_EMULATOR_JAR = "/opt/homebrew/share/google-cloud-sdk/platform/cloud-firestore-emulator/cloud-firestore-emulator.jar"
+# Firestore エミュレータの起動。java と jar の場所は scripts/emulator_locator.py が決める(tests/conftest.py と共通。環境変数で上書きできる)。
 _READY_MARKER = "Dev App Server is now running"
 _STARTUP_TIMEOUT_SECONDS = 30
 DEFAULT_DATABASE = "(default)"  # web 用(design.md §1.1)
@@ -219,17 +218,18 @@ def firestore_emulator() -> Iterator[str]:
     本物の GCP には接続しない: 呼び出し側が Firestore のクライアントを作るより前に、FIRESTORE_EMULATOR_HOST をここで
     エミュレータへ向ける(終わったら元に戻す)。
     """
-    for path in (_JAVA_BIN, _EMULATOR_JAR):
-        if not Path(path).exists():
-            raise RuntimeError(f"Firestore エミュレータの起動に要るファイルがありません: {path}")
+    try:
+        java_bin, emulator_jar = find_emulator()
+    except EmulatorNotFound as error:
+        raise RuntimeError(f"Firestore エミュレータを起動できません。{error}") from error
     port = _find_free_port()
     host = f"127.0.0.1:{port}"
     process = subprocess.Popen(
         [
-            _JAVA_BIN,
+            str(java_bin),
             "-Duser.language=en",
             "-cp",
-            _EMULATOR_JAR,
+            str(emulator_jar),
             "com.google.cloud.datastore.emulator.firestore.CloudFirestore",
             "start",
             "--host=127.0.0.1",

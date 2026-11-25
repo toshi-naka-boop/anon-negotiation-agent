@@ -16,26 +16,27 @@ import os
 import queue
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from google.cloud import firestore
 
-from vault.app import create_app
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from emulator_locator import find_emulator  # noqa: E402
+from vault.app import create_app  # noqa: E402
 from vault.clock import FixedClock
 from vault.config import DEFAULT_VAULT_CONFIG
 from vault.store import VaultStore
 from web.vault_client import VaultClient
 
-_JAVA_BIN = "/opt/homebrew/opt/openjdk@21/bin/java"
-_EMULATOR_JAR = (
-    "/opt/homebrew/share/google-cloud-sdk/platform/cloud-firestore-emulator/cloud-firestore-emulator.jar"
-)
 _READY_MARKER = "Dev App Server is now running"
 _STARTUP_TIMEOUT_SECONDS = 30
 
@@ -58,14 +59,15 @@ def _drain_output(pipe, sink: "queue.Queue[str | None]") -> None:
 @pytest.fixture(scope="session")
 def firestore_emulator_host() -> str:
     """Firestore エミュレータをセッション単位で起動し、終わったら止める(§テスト環境)。"""
+    java_bin, emulator_jar = find_emulator()  # 場所の決め方は scripts/emulator_locator.py(環境変数で上書きできる)
     port = _find_free_port()
     host = f"127.0.0.1:{port}"
     process = subprocess.Popen(
         [
-            _JAVA_BIN,
+            str(java_bin),
             "-Duser.language=en",
             "-cp",
-            _EMULATOR_JAR,
+            str(emulator_jar),
             "com.google.cloud.datastore.emulator.firestore.CloudFirestore",
             "start",
             "--host=127.0.0.1",

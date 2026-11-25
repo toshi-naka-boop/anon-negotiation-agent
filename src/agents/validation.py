@@ -30,7 +30,7 @@ from a2a.utils.errors import InvalidParamsError
 from pydantic import TypeAdapter, ValidationError
 
 from agents.wire import DATA_MEDIA_TYPE, part_kind, struct_to_python, value_to_python
-from negotiation_core.schema import AttackerTurnInput, Id, TurnInput
+from negotiation_core.schema import Id, TurnInput
 
 # メッセージの metadata に載せてよい項目(§2.7)。今は交渉 ID だけ。これ以外の項目は拒否する(台帳 X-41)。
 _MESSAGE_METADATA_KEYS = frozenset({"nid"})

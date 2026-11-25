@@ -467,6 +467,7 @@ function renderQuestion() {
       { class: "your-turn", role: "alert" },
       h("strong", {}, "この組み合わせなら受けますか?"),
       h("div", {}, packageChips(app.question)),
+      h("div", { class: "small" }, "答える期限は、質問が出てから 24 時間です。過ぎると、この交渉は時間切れで終わります(あなたの条件は残ります)。"),
       h(
         "div",
         { class: "small" },
@@ -621,7 +622,9 @@ async function init() {
       stateBox(
         "empty",
         session.principal_id ? "面談がまだ途中です。" : "まだ面談を受けていません。",
-        "面談で条件を預けると、ここで交渉を始められます。",
+        session.principal_id
+          ? "面談を最後まで進めて「預ける」を押すと、ここで交渉を始められます。"
+          : "面談で条件を預けると、ここで交渉を始められます。クッキーを消した、または別の端末・ブラウザで開いたときも、この表示になります。以前に預けた条件には戻れません(預けたデータは、最後に使ってから 30 日で消えます)。",
       ),
       h("a", { class: "btn btn-primary", href: "/interview" }, "面談へ"),
     );

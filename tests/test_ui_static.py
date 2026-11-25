@@ -1012,7 +1012,7 @@ def test_the_attack_page_shows_the_results_first_and_keeps_the_three_walls_in_cl
     assert [ids.index(name) for name in order] == sorted(ids.index(name) for name in order)
     assert outline.text(outline.by_id("bisection-title")) == "ボタン 1 つで攻撃を実演"
     assert outline.text(outline.by_id("own-title")) == "自分の言葉で攻撃する"
-    assert outline.text(outline.by_id("walls-title")) == "なぜ漏れないのか(3 枚の壁)"
+    assert outline.text(outline.by_id("walls-title")) == "なぜマス目より細かくは分からないのか(3 枚の壁)"
     meter, simulation = outline.by_id("slot-meter"), outline.by_id("slot-simulation")
     compare = outline.items[meter]["parent"]
     assert outline.items[simulation]["parent"] == compare and "compare" in outline.classes(compare)  # 横並び(狭い画面では縦)の枠に、2 つ
@@ -1867,7 +1867,7 @@ def test_the_manual_checklist_covers_every_page_and_every_part_of_the_second_pac
         "金庫の確認(TEE)", "scripts/verify_attestation.py", "この環境では、金庫は TEE(Confidential Space)で動いていません",
         # 場所ごとの改修: ナビの 3 つの組・帯・デモの視点と再生の速さ・攻撃の画面の順番
         "求職者", "求人側", "セキュリティテスト", "求人担当の画面(デモ)", "並べて比べる", "ふつう(1 手 2 秒)", "ボタン 1 つで攻撃を実演",
-        "自分の言葉で攻撃する", "なぜ漏れないのか(3 枚の壁)", "セキュリティテスト: 架空の人物だけを使います。あなたの本音は使いません。",
+        "自分の言葉で攻撃する", "なぜマス目より細かくは分からないのか(3 枚の壁)", "セキュリティテスト: 架空の人物だけを使います。あなたの本音は使いません。",
     ):  # fmt: skip
         assert required in source, required
 
@@ -3536,3 +3536,48 @@ def test_the_veil_shows_only_when_pressed_and_says_how_to_come_back():
     assert not any(word in message.group(1) for word in ("転職", "交渉", "本音"))
     for path in HTML_FILES:  # 覆いは、どのページでも同じ形で、最初は隠れている
         assert '<div id="veil" class="veil" hidden tabindex="0" role="button"' in path.read_text(encoding="utf-8"), path.name
+
+
+def test_the_screen_states_the_24_hour_deadline_of_the_check_question_that_the_config_sets():
+    # 途中確認の期限(利用者が気づかないうちに交渉が時間切れになる)を、画面が 24 時間と書く。数字は設定(config/params.toml)から出る。
+    import tomllib
+
+    params = tomllib.loads((ROOT / "config" / "params.toml").read_text(encoding="utf-8"))
+    hours = params["vault"]["deadlines"]["principal_check_deadline_seconds"] // 3600
+
+    assert hours == 24
+    assert f"質問が出てから {hours} 時間" in (STATIC / "me.js").read_text(encoding="utf-8")
+    assert f"質問が出てから {hours} 時間以内" in (STATIC / "me.html").read_text(encoding="utf-8")
+
+
+def test_the_screens_say_that_the_cookie_is_the_only_key_and_how_long_it_and_the_data_last():
+    import tomllib
+
+    params = tomllib.loads((ROOT / "config" / "params.toml").read_text(encoding="utf-8"))
+    cookie_days = params["web"]["session"]["cookie_max_age_seconds"] // 86400
+    data_days = params["web"]["principals"]["retention_seconds"] // 86400
+    me = (STATIC / "me.html").read_text(encoding="utf-8")
+    interview = (STATIC / "interview.html").read_text(encoding="utf-8")
+
+    assert (cookie_days, data_days) == (29, 30)
+    for html in (me, interview):
+        assert "クッキーを消したり、別の端末・別のブラウザで開いたりすると" in html
+        assert f"クッキーの有効期間は、面談を始めてから {cookie_days} 日" in html
+        assert f"最後に使ってから {data_days} 日" in html
+    assert "通知は届かない" in me
+
+
+def test_the_entrance_does_not_say_the_operator_cannot_see_inside_the_vault():
+    # README・金庫の確認の画面(tee.js)は、運営者が読み出し口から丸め済みの条件を読めると書く。入口の説明がそれと食い違わない。
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert "運営者も見られない" not in index
+    assert "運営者が読み出し口を通して、丸めた後の条件を読めること" in index
+
+
+def test_an_unknown_field_name_in_a_422_is_not_shown_raw():
+    # 対応表にない項目名(英語の内部名)を、そのまま画面に出さない。
+    api = (STATIC / "api.js").read_text(encoding="utf-8")
+
+    assert "FIELD_LABELS[name] ?? name" not in api
+    assert 'FIELD_LABELS[name] ?? "入力の一部"' in api

@@ -1,19 +1,45 @@
-# anon-negotiation-agent(匿名交渉エージェント)
+# Negocie(ネゴシエ)— 本音を預けられる転職エージェント
+
+(リポジトリ名は anon-negotiation-agent(匿名交渉エージェント)。画面と提出文では「Negocie」と呼びます。)
 
 > 話した本音が相手にどこまで伝わるか、人間のエージェントは約束できない。このエージェントは、あなたが決めた粗さまでしか伝えない。疑うなら、攻撃してみてください。
+
+**誰の、何の仕事が、どう楽になるか**: 転職の候補者は、「最低いくらなら受けるか」といった本音を、相手に見せずに預けられます。
+AI のエージェントが、求人側のエージェントと、本音の条件を明かさないまま、合意できそうな組み合わせを探します。
+本人は、条件を相手に口にして足元を見られる心配をせずに、「会う価値があるか」の見込みだけを受け取ります。
 
 転職の候補者と求人側は、本音の条件(最低年収、許せる当直の回数など)を口に出さないまま、
 「言えば通ったかもしれない話」を逃しがちです。このシステムは、双方が本音を明かさずに、
 「合意できそうか」だけを確かめます。
 
 - 候補者は、面談(LLM)で本音を話します。生の値は面談の間だけ扱い、送信のあとは保存せず、ブラウザにも残しません。
-- 本音は、共通のマス目(グリッド)に丸めてから、**金庫**に預けます。丸め済みのポリシーを持つのは金庫だけです。
+- 本音は、共通のマス目(グリッド。年収なら 50 万円の幅など、あらかじめ決めた粗さの区切り)に丸めてから、**金庫**に預けます。丸め済みのポリシーを持つのは金庫だけです。
   金庫は LLM を使わない決定的なコードで、提案もマス目の上に限るので、丸めても判定は 1 件も変わりません。
   相手に分かるのは、最大でもマス目 1 つぶんです。
 - 候補者側と求人側の交渉エージェント(LLM)は、金庫に「この組み合わせは受けられるか」を聞き、返ってくる 3 値だけを頼りに、
   合意できる組み合わせを探します。エージェントは、依頼者の生の値も、相手のポリシーも見ません(見えるのは、提案と 3 値の答えだけです)。
 - 結果は「見込み(高・中・なし)と組み合わせ 1 つ」です。匿名の職務要約、氏名・連絡先は、段階を踏んで、
-  双方が操作したときだけ開きます。
+  双方が操作したときだけ開きます(ただし、この版の段 2 は模擬の表示です。下の「この版でできないこと」を参照)。
+
+## 試す(ログイン不要)
+
+- 公開デモ: https://web-341888860511.asia-northeast1.run.app/ (ハッカソン提出時の公開先です。いま動いているかは、運営者の運用に依ります)
+- 試し方は 3 つです。画面の入口(`/`)から行けます。
+  1. 「面談を始める」: 実際に条件を預けられます(1 画面に 1 問。年収の 3 問から)。預けたあとは「自分の交渉」で、求人を選んで交渉を始められます。
+  2. 「求人担当の画面(デモ)」: 架空の求人と架空の候補者の交渉を、ケース 1〜3 から選んで見られます。
+  3. 「攻撃してみる」: 求人担当になったつもりで、架空の候補者の年収を探る攻撃を試せます。あなたの本音は使いません。
+- 自分の手元で動かすには、下の「ローカルでの動かし方」を見てください(エンジニア向けです)。
+
+## この版でできないこと(制約)
+
+- **求人は架空の 2 件だけ**です(`fixtures/` の `case*.toml`)。求人側の登録の画面・面談はありません。求人側の応答は、台本どおりに自動で返ります。
+  本物の求人側が本音を預ける画面は、これから作るものです(作者の判断が要ります)。
+- **段 2(氏名と連絡先)は模擬の表示**です。この版は、あなたの氏名・連絡先を集めていないので、相手に渡るものがありません。合意しても、実際に会う所までは進めません。
+- 自分の交渉の「求人分析」は、サンプルの数字です(本物の求人データの集計ではありません)。
+- 途中確認(「この組み合わせなら受けますか」)には、質問が出てから 24 時間以内に答える必要があります。通知(メールなど)は届かないので、交渉中は 1 日に 1 回は画面を開いてください。過ぎると、その交渉は時間切れで終わります(預けた条件は残ります)。
+- 本人は、ブラウザのクッキーで見分けます。クッキーを消す・別の端末やブラウザで開くと、預けた条件と交渉には戻れません(クッキーの有効期間は面談を始めてから 29 日。預けたデータは、最後に使ってから 30 日で自動で消えます。「自分の交渉」の「データを消す」で、すぐ消すこともできます)。
+- 面談の AI 処理は Google Cloud(Vertex AI)で行われ、不正利用の監視のために、一定期間記録され得ます。このシステムが保存しないのは生の値までで、Google 側の記録は消せません。
+- TEE(後述)で動いているかどうかは、公開デモの入口の「詳しく見る: 金庫の確認(TEE)」の表示が正です。
 
 ## 守りの仕組み
 
@@ -37,7 +63,7 @@
   丸め済みポリシーと交渉の記録(マス目の上の値)を読めます。保存データを古い版に戻したり、依頼者を作り直したりして、予算を回復することもできます。
 - どの場合も、得られる情報は丸め済みポリシーまでです(丸めの性質で上限が決まります)。予算は運営者への歯止めではなく、費用の制御と早期警告です。
 
-**TEE(Confidential Space)で言えること**(金庫を TEE で動かす構成の場合。スパイクの結果で確定します。通らなければ Cloud Run 版で出し、その旨を書きます)
+**TEE(Confidential Space)で言えること**(金庫を TEE で動かす構成の場合。この構成は、2026-10-03〜04 のスパイクで実測しました〔台帳 I-14・I-36〕。公開先が TEE 版か Cloud Run 版かは、画面の「金庫の確認(TEE)」が示します。Cloud Run 版のときは、TEE の確認は出ません)
 
 1. 動いているもの(第三者が確かめられる): 「この VM では、Confidential Space の本番イメージで、ダイジェスト D の金庫のコンテナが、
    コマンド・環境変数の上書きなしに動いている」。下の `verify_attestation.py` で確かめます。
@@ -78,14 +104,62 @@ uv run python scripts/verify_attestation.py --web https://<web の URL> --projec
     `bash scripts/deploy_check.sh --show-expected` で、展開した期待集合を確かめられます。
 - `scripts/deploy_check.sh`: 運営者のデプロイの確認(`bash scripts/deploy_check.sh --list` で項目の一覧)。
 
+## 構成
+
+| サービス | 場所 | 役割 |
+|---|---|---|
+| web | `src/web/`(+ 画面 `static/`) | 画面と API。面談(LLM)・交渉のレフェリー・段階開示・開示台帳。運営側のコード。Firestore の `(default)` を使う |
+| agents | `src/agents/` | 交渉エージェント(候補者側・求人側・攻撃用の求人側)。A2A の受信口。Gemini(ADK) |
+| vault(金庫) | `src/vault/` | 丸め済みのポリシーと交渉の状態を持ち、3 値で答える決定的なコード(LLM を使わない)。Firestore の `vault-db` を使う。TEE 版は `src/vault/tee/` |
+| 共通 | `src/negotiation_core/` | 丸め・ポリシー・メッセージの型など、3 つが共有する部分 |
+
+- `config/params.toml`: 暫定値(期限・枠・保存期間など)。`fixtures/`: 架空の人物・求人・面談の問い。`static/`: 画面(ビルド工程なし)。
+- `scripts/`: デモ・リプレイ・検査・デプロイの確認。`tests/`: 試験。`design/`: 設計書と批評の記録。`deploy/`: 金庫のイメージの許可リストなど。
+- ページは 5 つ(`/` `/interview` `/me` `/demo` `/attack`)。
+
+## 環境変数
+
+**web**(`uvicorn web.app:create_app_from_env --factory --workers 1`。Dockerfile の既定の起動コマンド。依頼者ごとのロックがプロセスの中にあるので、workers は 1)
+
+| 名前 | 必須 | 内容 |
+|---|---|---|
+| `SESSION_SIGNING_KEY` | 必須 | セッションのクッキーの署名鍵。32 バイト以上の乱数(base64url)。なければ・弱ければ起動しません。作り方: `python -c "import secrets; print(secrets.token_urlsafe(32))"`。値はリポジトリに入れず、環境変数かシークレット管理で渡し、漏れたら作り直します(作り直すと、既存のクッキーは使えなくなります) |
+| `VAULT_BASE_URL` | 必須 | 金庫の URL |
+| `SERVICE_AUTH_ENABLED` | 任意(既定 `true`) | Cloud Run の ID トークンで、金庫・agents を呼ぶ。ローカルでは `false` |
+| `VAULT_TEE` | 任意(既定 `false`) | 金庫が TEE かどうか。`true` のとき、`VAULT_BASE_URL` は https、`VAULT_SERVICE_ACCOUNT`(金庫のサービスアカウントのメール)と `GOOGLE_CLOUD_PROJECT` も必須 |
+| `VAULT_RELEASES_FILE`・`VAULT_EXPECTED_ZONE`・`VAULT_EXPECTED_INSTANCE`・`GITHUB_REPO_URL` | 任意(TEE のとき) | digest の許可リスト(既定 `deploy/vault-releases.json`)、期待するゾーン・インスタンス、コミットのリンクの土台 |
+
+**vault**(`uvicorn vault.app:create_app_from_env --factory`。TEE 版は `python -m vault.tee.main`)
+
+| 名前 | 必須 | 内容 |
+|---|---|---|
+| `VAULT_SEED_TEMPLATES` | 任意(既定 `true`) | 起動時に、`fixtures/` の架空人物のテンプレートを `vault-db` に書く。ローカルでは `false` にできる |
+
+Firestore の接続先は、Google のクライアントが環境から決めます(Cloud Run ではサービスのプロジェクト)。
+
+**ローカルの試験・デモ**
+
+| 名前 | 内容 |
+|---|---|
+| `FIRESTORE_EMULATOR_JAVA` | エミュレータを動かす java(JDK 21)のパス。未設定なら `JAVA_HOME`・`PATH` の java を探す |
+| `FIRESTORE_EMULATOR_JAR` | `cloud-firestore-emulator.jar` のパス。未設定なら、Google Cloud SDK のよくある場所を探す |
+| `GOOGLE_GENAI_USE_VERTEXAI`・`GOOGLE_CLOUD_PROJECT`・`GOOGLE_CLOUD_LOCATION` | `--live`(本物の Gemini)のときだけ。費用がかかる |
+
 ## ローカルでの動かし方
 
-Python 3.12 と [uv](https://docs.astral.sh/uv/) が要ります。試験は、Firestore エミュレータ(JDK 21 と Google Cloud SDK のエミュレータの jar)を使います。
-jar のパスは macOS の Homebrew の場所で、違うなら `tests/conftest.py` の `_JAVA_BIN`・`_EMULATOR_JAR` を直します。本物の GCP には接続しません。
+要るもの: Python 3.12 と [uv](https://docs.astral.sh/uv/)。試験・デモ・ローカルサーバは、Firestore エミュレータを使うので、JDK 21 と、Google Cloud SDK のエミュレータの jar も要ります。本物の GCP には接続しません。
+
+- JDK 21: macOS は `brew install openjdk@21`、Linux は各ディストリビューションの `openjdk-21`。
+- jar: [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) を入れて `gcloud components install cloud-firestore-emulator`。
+- java と jar の場所は、`PATH`・`JAVA_HOME` と、SDK のよくある場所(Homebrew・apt・`~/google-cloud-sdk` など)から自動で探します。見つからないとき、または別の場所のものを使うときは、
+  環境変数 `FIRESTORE_EMULATOR_JAVA`・`FIRESTORE_EMULATOR_JAR` で指定します(`tests/conftest.py` と `scripts/run_demo.py`〔`serve_local.py`・`canary_scan.py` も同じ〕が `scripts/emulator_locator.py` を共有しています)。
+  見つからなかったときは、何が足りないかと入れ方を表示して止まります。
 
 ```
+export FIRESTORE_EMULATOR_JAR=/path/to/cloud-firestore-emulator.jar   # 自動で見つかるなら不要
 uv sync
 uv run pytest -q                                      # 全試験(エミュレータは自動で起動・停止)
+uv run ruff check src scripts tests                   # 静的検査(構文・未定義名・未使用の import)
 uv run python scripts/run_demo.py --case 1            # ケース 1 を、台本のエージェントで通す(Gemini は呼ばない)
 uv run python scripts/run_demo.py --case 1 --replay   # 記録(fixtures/replays/)を、記録どおりの間隔で流す
 uv run python scripts/run_demo.py --case 1 --live --runs 2 --judge   # 本物の Gemini(費用がかかる。GOOGLE_GENAI_USE_VERTEXAI・GOOGLE_CLOUD_PROJECT・GOOGLE_CLOUD_LOCATION が要る)
@@ -94,6 +168,15 @@ uv run python scripts/canary_scan.py                  # 生の値のカナリア
 bash scripts/check_no_web_storage.sh                  # 画面(static/)がブラウザの保存領域に書かないことの静的な検査(AC-02)
 uv run python scripts/serve_local.py                  # 画面(static/)を、手元のブラウザで確かめる開発用サーバ(http://127.0.0.1:8080。台本のエージェント・面談はスタブ。--live で本物の Gemini)
 ```
+
+試験は 3,902 件(2026-11-25 時点。`uv run pytest --collect-only -q` で数えた値)です。Linux での全体の実行は、約 12 分かかりました(環境によります)。
+`uv run pytest -q tests/test_emulator_locator.py tests/test_vault_app_docs.py` のように、エミュレータの要らない試験だけを先に動かすこともできます。
+
+CI は置いていません(品質の確認は、手元の上の手順に頼っています)。
+
+### 運用の前提
+
+- web の `X-Forwarded-For` の扱いは、Cloud Run に直接つなぐ構成を前提にしています(`src/web/client_ip.py`)。前に外部 HTTPS ロードバランサーを置くと、全員が 1 つの枠を共有してしまうので、置くなら設計の見直しが要ります。
 
 ## 設計書と台帳
 

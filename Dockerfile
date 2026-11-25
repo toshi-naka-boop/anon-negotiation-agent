@@ -34,4 +34,9 @@ COPY static ./static
 ENV PATH=/opt/venv/bin:$PATH \
     PORT=8080
 
+# 非 root で動かす(web・agents・vault〔Cloud Run 版〕はディスクに書かない。コードと venv は読むだけ)。
+# Dockerfile.vault(TEE 版)が root のままなのは、launcher のソケットに届く必要があるため。
+RUN useradd --system --no-create-home --uid 10001 app
+USER app
+
 CMD ["uvicorn", "web.app:create_app_from_env", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

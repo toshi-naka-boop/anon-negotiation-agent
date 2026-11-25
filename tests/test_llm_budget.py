@@ -762,9 +762,10 @@ async def test_a_negotiation_created_just_now_counts_as_unconsumed_before_the_ne
     env = _admission_env(store, clock, vault_client, default_db, session_key, daily_limit=19)
     try:
         browser = env.browser()
-        created = await browser.post("/v1/demo/negotiations", _demo_request(store, "request-demo1"))
-        assert created.status_code == 200
-        assert created.json()["nid"] in env.services.referees.running_nids()  # 見回り(sweep_once)は、まだ 1 回も動いていない
+        # 1 件目の最初の送信を数えて応答待ちに入るまで待つ(負荷の下で、レフェリーのタスクが終わるか、まだ動き出さないうちに 2 件目を
+        # 送ると、数え方が時機に左右されて不安定になった)。応答待ちの間は、タスクは動いていて、未消化分(10 − 1)を数える: 1 + 9 + 10 = 20 > 19。
+        nid = await _create_demo_and_wait_for_its_first_send(env, browser, _demo_request(store, "request-demo1"))
+        assert nid in env.services.referees.running_nids()  # 見回り(sweep_once)は、まだ 1 回も動いていない
 
         second = await browser.post("/v1/demo/negotiations", _demo_request(store, "request-demo2"))
 
