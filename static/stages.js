@@ -47,8 +47,8 @@ function flagsLine(word, pair, candidateName) {
 /** デモ(架空人物)で、「会う」「承認」を誰が押すか。求人側に自動応答(フィクスチャの設定)がなければ、求人側は押されない。 */
 function demoNote(view) {
   return view.employer_auto_response
-    ? "架空の候補者・架空の求人が、フィクスチャの設定で、自動で押します。"
-    : "架空の候補者は、フィクスチャの設定で、自動で押します。求人側には自動応答がないので、押されません。";
+    ? "架空の候補者・架空の求人が、見本データの設定で、自動で押します。"
+    : "架空の候補者は、見本データの設定で、自動で押します。求人側には自動応答がないので、押されません。";
 }
 
 function stageItem(number, title, state, content) {
@@ -100,7 +100,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
         "span",
         { class: "small muted" },
         view.employer_auto_response
-          ? `求人側の「会う」「承認」は、フィクスチャの設定どおり、自動で押されます。${own ? "あなたが操作できるのは、候補者側(あなたの側)だけです。" : "架空の候補者の操作も、自動です。"}`
+          ? `求人側の「会う」「承認」は、見本データの設定どおり、自動で押されます。${own ? "あなたが操作できるのは、候補者側(あなたの側)だけです。" : "架空の候補者の操作も、自動です。"}`
           : "この求人には自動応答がなく、求人側を操作する口も、この画面にはありません。段 1 以降は、求人側が「会う」を押すまで進みません。",
       ),
     );
@@ -183,7 +183,7 @@ export function mountStages({ body, error }, { mode, loadStage, meet, approve, o
     return h(
       "div",
       { class: "disclosure-box" },
-      h("div", { class: "small muted" }, "求人側に見えている氏名と連絡先(フィクスチャの架空のもの)"),
+      h("div", { class: "small muted" }, "求人側に見えている氏名と連絡先(見本データの架空のもの)"),
       h("div", { class: "disclosure-text" }, `氏名: ${disclosed.name ?? "-"}`),
       h("div", { class: "disclosure-text" }, `連絡先(メール): ${disclosed.email ?? "-"}`),
     );

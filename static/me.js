@@ -222,7 +222,7 @@ const SAMPLE_MARKET = {
     { label: "450〜500", value: 11 },
     { label: "500〜550", value: 19 },
     { label: "550〜600", value: 24 },
-    { label: "600〜650", value: 21, mine: true },
+    { label: "600〜650", value: 21 },
     { label: "650〜700", value: 14 },
     { label: "700〜800", value: 9 },
     { label: "800 万円〜", value: 4 },
@@ -230,13 +230,13 @@ const SAMPLE_MARKET = {
   remote: [
     { label: "週 0 日", value: 22 },
     { label: "週 1 日", value: 13 },
-    { label: "週 2 日", value: 26, mine: true },
+    { label: "週 2 日", value: 26 },
     { label: "週 3 日", value: 25 },
     { label: "週 4 日", value: 8 },
     { label: "週 5 日", value: 14 },
   ],
   duty: [
-    { label: "なし", value: 61, mine: true },
+    { label: "なし", value: 61 },
     { label: "月 2 回", value: 23 },
     { label: "月 4 回", value: 16 },
     { label: "月 6 回以上", value: 8 },
@@ -260,12 +260,11 @@ function renderAnalysis() {
   replace(
     el("analysis-stats"),
     statTile({ label: "求人の数", value: total, unit: "件", note: "見本の数字です" }),
-    statTile({ label: "年収の中央の帯", value: "550〜600", unit: "万円", note: "あなたのマス目は 600〜650 万円" }),
+    statTile({ label: "年収の中央の帯", value: "550〜600", unit: "万円", note: "見本の数字です" }),
     statTile({ label: "リモートがある求人", value: Math.round((remoteAny / remoteTotal) * 100), unit: "%", note: "週 1 日以上" }),
     statTile({ label: "当直なしの求人", value: Math.round((SAMPLE_MARKET.duty[0].value / dutyTotal) * 100), unit: "%", note: "当直のない職種を含む" }),
   );
-  const legend = () =>
-    h("p", { class: "legend" }, h("span", {}, h("span", { class: "swatch accent" }), "求人の数"), h("span", {}, h("span", { class: "swatch acorn" }), "あなたの条件に当たる帯"));
+  const legend = () => h("p", { class: "legend" }, h("span", {}, h("span", { class: "swatch accent" }), "求人の数(見本)"));
   replace(el("chart-salary"), barChart({ rows: SAMPLE_MARKET.salary, unit: " 件", title: "年収帯ごとの求人の数" }), legend());
   replace(el("chart-remote"), barChart({ rows: SAMPLE_MARKET.remote, unit: " 件", title: "リモート日数の分布" }), legend());
   replace(el("chart-duty"), barChart({ rows: SAMPLE_MARKET.duty, unit: " 件", title: "当直の回数" }), legend());
@@ -387,12 +386,12 @@ function renderWhere(item) {
     };
   } else if (item.state === "ended") {
     where = {
-      now: "この交渉は終わりました。合意できる組み合わせは見つかりませんでした。",
-      next: "あなたの条件は残っています。別の求人で始められます。",
+      now: "この交渉は終わりました。見込みは「なし」です(合意できる組み合わせが見つからなかった場合のほか、時間切れ・取り消し・システムの停止でもこうなります)。",
+      next: "あなたの条件は残っています。同じ求人でも別の求人でも、もう一度始められます。",
       yours: "新しく始めるかどうか。",
     };
   } else if (item.state === "paused") {
-    where = { now: "一時停止中です。期限は進みません。", next: "再開すると、続きから進みます。", yours: "再開するか、取り消すか。" };
+    where = { now: "一時停止中です。手番の期限は進みませんが、止めておけるのは 24 時間までです。", next: "再開すると、続きから進みます。", yours: "再開するか、取り消すか。" };
   } else if (app.question) {
     where = {
       now: "あなたの確認を待っています。",

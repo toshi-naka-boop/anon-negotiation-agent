@@ -2252,12 +2252,12 @@ const includesAll = (shown, phrases) => phrases.forEach((phrase) => assert.ok(sh
   mountStages({ body, error }, { mode: "demo", emptyText: "ライブで実行してください", loadStage: async () => DATA.views.stage2_demo });
   fire("negotiation:selected", { nid: "n1" });
   await wait(30);
-  includesAll(text(body), ["架空の候補者", "氏名: 架空 花子", "hanako.kako@example.com", "フィクスチャの架空のもの"]);
+  includesAll(text(body), ["架空の候補者", "氏名: 架空 花子", "hanako.kako@example.com", "見本データの架空のもの"]);
   assert.equal(byTag(body, "button").length + byTag(body, "textarea").length, 0);
   // 段 0 の状態で、「会う」を誰が押すか: 求人側にも自動応答がある(ケース 1・2)・求人側に自動応答がない(ケース 3。求人側は押されない)
   for (const [view, phrase, other] of [
-    [DATA.views.open, "架空の候補者・架空の求人が、フィクスチャの設定で、自動で押します", "求人側には自動応答がないので、押されません"],
-    [DATA.views.no_auto_response, "求人側には自動応答がないので、押されません", "架空の候補者・架空の求人が、フィクスチャの設定で、自動で押します"],
+    [DATA.views.open, "架空の候補者・架空の求人が、見本データの設定で、自動で押します", "求人側には自動応答がないので、押されません"],
+    [DATA.views.no_auto_response, "求人側には自動応答がないので、押されません", "架空の候補者・架空の求人が、見本データの設定で、自動で押します"],
   ]) {
     resetListeners();
     const demo = mounted();
@@ -3548,6 +3548,78 @@ def test_the_screen_states_the_24_hour_deadline_of_the_check_question_that_the_c
     assert hours == 24
     assert f"質問が出てから {hours} 時間" in (STATIC / "me.js").read_text(encoding="utf-8")
     assert f"質問が出てから {hours} 時間以内" in (STATIC / "me.html").read_text(encoding="utf-8")
+
+
+def test_the_screens_and_readme_state_the_pause_limit_the_lifetime_and_the_interview_limit_that_the_config_sets():
+    # 一時停止の上限・交渉の寿命・面談の上限(どれも、過ぎると利用者の知らないうちに終わる)を、設定の値から出して画面と README が書く。
+    import tomllib
+
+    params = tomllib.loads((ROOT / "config" / "params.toml").read_text(encoding="utf-8"))
+    pause_hours = params["vault"]["deadlines"]["max_pause_seconds"] // 3600
+    lifetime_hours = params["vault"]["deadlines"]["negotiation_lifetime_seconds"] // 3600
+    interview_hours = params["web"]["interview"]["max_lifetime_seconds"] // 3600
+
+    assert (pause_hours, lifetime_hours, interview_hours) == (24, 72, 3)
+    me_html = (STATIC / "me.html").read_text(encoding="utf-8")
+    me_js = (STATIC / "me.js").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"止めておけるのは {pause_hours} 時間まで" in me_html
+    assert f"交渉を始めてから {lifetime_hours} 時間" in me_html
+    assert f"止めておけるのは {pause_hours} 時間まで" in me_js
+    assert "一時停止中は、手番の期限が進みません。" not in me_html  # 上限を言わずに「進みません」だけ言わない
+    assert f"始めてから {interview_hours} 時間で消えます" in (STATIC / "index.html").read_text(encoding="utf-8")
+    assert f"一時停止できるのは {pause_hours} 時間まで" in readme
+    assert f"始めてから {lifetime_hours} 時間で終わります" in readme
+    assert f"始めてから {interview_hours} 時間で消え" in readme
+
+
+def test_the_analysis_does_not_show_a_fixed_band_as_the_users_own_condition():
+    # 求人分析は見本の数字。預けた条件を読んでいないので、「あなたの条件に当たる帯」を固定の値で出さない。
+    me_js = (STATIC / "me.js").read_text(encoding="utf-8")
+    me_html = (STATIC / "me.html").read_text(encoding="utf-8")
+
+    assert "mine: true" not in me_js
+    assert "あなたのマス目は" not in me_js
+    assert "あなたの条件に当たる帯" not in me_js
+    assert "預けたマス目(年収は 50 万円の幅)に当たる帯" not in me_html
+    assert "預けた条件の位置は、この見本には出していません" in me_html
+
+
+def test_a_result_of_none_does_not_claim_that_the_cause_was_no_agreement_only():
+    # 終了理由は画面に返らない(設計書 §3.3)ので、「見込み: なし」の説明は、時間切れ・取り消し・システムの停止でも出ると添える。
+    ui = (STATIC / "ui.js").read_text(encoding="utf-8")
+    me_js = (STATIC / "me.js").read_text(encoding="utf-8")
+
+    assert ui.count("時間切れ・取り消し・システムの停止で終わったときも、この表示になります") == 2
+    assert "時間切れ・取り消し・システムの停止でもこうなります" in me_js
+
+
+def test_the_user_facing_screens_do_not_use_the_word_fixture_and_the_lead_does_not_offer_the_employer_side():
+    # 「フィクスチャ」は開発用語。入口の説明は、この版で使えるのが候補者の側だけだと分かる形にする。
+    for name in ("index.html", "interview.html", "me.html", "stages.js"):
+        assert "フィクスチャ" not in (STATIC / name).read_text(encoding="utf-8").replace("(フィクスチャの設定)", ""), name
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "転職の候補者と求人側が、本音の条件を明かさない" not in index
+    assert "この版で使えるのは、候補者の側だけです" in index
+
+
+def test_the_readme_has_a_section_for_those_who_decide_to_adopt_it_with_cost_figures_from_the_config():
+    import tomllib
+
+    params = tomllib.loads((ROOT / "config" / "params.toml").read_text(encoding="utf-8"))
+    per_negotiation = params["web"]["llm_budget"]["per_negotiation_limit"]
+    daily = params["web"]["llm_budget"]["daily_limit"]
+    judge_line = params["agents"]["cost_targets"]["max_cost_usd_per_negotiation"]
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "## 導入を判断する人へ" in readme
+    assert readme.index("## 導入を判断する人へ") < readme.index("## この版でできないこと(制約)")
+    assert f"交渉ごとに {per_negotiation} 回、全体で 1 日 {daily:,} 回" in readme
+    assert f"合格の線は {judge_line} ドル" in readme
+    assert "運用して測った請求額ではありません" in readme
+    assert (ROOT / "design" / "anon-negotiation-agent" / "research" / "deploy-runbook.md").exists()
+    assert "deploy-runbook.md" in readme
+    assert "公開デモが止まっているとき" in readme
 
 
 def test_the_screens_say_that_the_cookie_is_the_only_key_and_how_long_it_and_the_data_last():

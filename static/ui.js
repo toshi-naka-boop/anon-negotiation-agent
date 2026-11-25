@@ -205,7 +205,7 @@ export function resultView(result, { title = "最終結果" } = {}) {
     "div",
     { class: `result-box${none ? " none" : ""}` },
     h("strong", {}, `${title}: 見込み ${LIKELIHOOD_LABELS[result.likelihood] ?? result.likelihood}`),
-    none ? h("div", { class: "small" }, "合意できる組み合わせは見つかりませんでした。") : null,
+    none ? h("div", { class: "small" }, "合意できる組み合わせは見つかりませんでした。時間切れ・取り消し・システムの停止で終わったときも、この表示になります(終わった理由は、この画面には出ません)。") : null,
     result.package ? h("div", {}, packageChips(result.package)) : null,
   );
 }
@@ -297,7 +297,7 @@ export function entryElement(entry, labels, previous = null) {
   if (entry.action === "invalid" && entry.attempted_move) {
     notes.push(h("div", { class: "small muted" }, `試した手: ${MOVE_LABELS[entry.attempted_move] ?? entry.attempted_move}`));
   }
-  if (entry.result && !entry.result.package) notes.push(h("div", { class: "small" }, "合意できる組み合わせは見つかりませんでした。"));
+  if (entry.result && !entry.result.package) notes.push(h("div", { class: "small" }, "合意できる組み合わせは見つかりませんでした。時間切れ・取り消し・システムの停止で終わったときも、この表示になります(終わった理由は、この画面には出ません)。"));
   const pkg = entry.package ?? entry.result?.package ?? null;
   const main = pkg
     ? h(
